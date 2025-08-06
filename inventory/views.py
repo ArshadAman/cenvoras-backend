@@ -129,3 +129,30 @@ def product_update_delete(request, pk):
     elif request.method == 'DELETE':
         product.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+@swagger_auto_schema(
+    method='get',
+    responses={200: openapi.Response(
+        description="List of products",
+        examples={
+            "application/json": [
+                {
+                    "id": "uuid-1",
+                    "name": "Product A",
+                    "hsn_code": "1234",
+                    "stock": 50,
+                    "unit": "pcs",
+                    "purchase_price": 100,
+                    "low_stock_alert": 10,
+                    "created_by": 1
+                }
+            ]
+        }
+    )}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_products(request):
+    products = Product.objects.filter(created_by=request.user)
+    serializer = ProductSerializer(products, many=True)
+    return Response(serializer.data)

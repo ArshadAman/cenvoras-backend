@@ -10,29 +10,6 @@ from .filters import PurchaseBillFilter, SalesInvoiceFilter
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
-# Create your views here.
-
-class PurchaseBillListCreateView(generics.ListCreateAPIView):
-    serializer_class = PurchaseBillSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    filterset_class = PurchaseBillFilter
-    ordering_fields = ['bill_date', 'created_at']
-    search_fields = ['bill_number', 'vendor_name']
-
-    def get_queryset(self):
-        return PurchaseBill.objects.filter(created_by=self.request.user)
-
-class SalesInvoiceListCreateView(generics.ListCreateAPIView):
-    serializer_class = SalesInvoiceSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    filterset_class = SalesInvoiceFilter
-    ordering_fields = ['invoice_date', 'created_at']
-    search_fields = ['invoice_number']
-
-    def get_queryset(self):
-        return SalesInvoice.objects.filter(created_by=self.request.user)
 
 @swagger_auto_schema(
     method='get',
@@ -73,15 +50,22 @@ def purchase_bill_list_create(request):
     if request.method == 'GET':
         bills = PurchaseBill.objects.filter(created_by=request.user).order_by('-bill_date')
         serializer = PurchaseBillSerializer(bills, many=True)
-        return Response(serializer.data)
+        return Response({"success": True, "data": serializer.data})
+
     elif request.method == 'POST':
-        data = request.data.copy()
-        data['created_by'] = str(request.user.id)
-        serializer = PurchaseBillSerializer(data=data)
+        serializer = PurchaseBillSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save(created_by=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "success": True,
+                "message": "Purchase bill created successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response({
+            "success": False,
+            "message": "Validation error.",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 @swagger_auto_schema(
     method='get',
@@ -115,9 +99,9 @@ def purchase_bill_detail(request, pk):
     try:
         bill = PurchaseBill.objects.get(pk=pk, created_by=request.user)
     except PurchaseBill.DoesNotExist:
-        return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": False, "message": "Not found."}, status=404)
     serializer = PurchaseBillSerializer(bill)
-    return Response(serializer.data)
+    return Response({"success": True, "data": serializer.data})
 
 @swagger_auto_schema(
     method='get',
@@ -168,6 +152,30 @@ def sales_invoice_list_create(request):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def sales_invoice_create(request):
+    serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
+    if serializer.is_valid():
+        serializer.save(created_by=request.user)
+        return Response({
+            "success": True,
+            "message": "Sales invoice created successfully.",
+            "data": serializer.data
+        }, status=201)
+    return Response({
+        "success": False,
+        "message": "Validation error.",
+        "errors": serializer.errors
+    }, status=400)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def sales_invoice_list(request):
+    invoices = SalesInvoice.objects.filter(created_by=request.user).order_by('-invoice_date')
+    serializer = SalesInvoiceSerializer(invoices, many=True)
+    return Response({"success": True, "data": serializer.data})
+
 @swagger_auto_schema(
     method='get',
     responses={200: openapi.Response(
@@ -200,9 +208,9 @@ def sales_invoice_detail(request, pk):
     try:
         invoice = SalesInvoice.objects.get(pk=pk, created_by=request.user)
     except SalesInvoice.DoesNotExist:
-        return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": False, "message": "Not found."}, status=404)
     serializer = SalesInvoiceSerializer(invoice)
-    return Response(serializer.data)
+    return Response({"success": True, "data": serializer.data})
 
 @swagger_auto_schema(
     methods=['put', 'patch', 'delete'],
@@ -237,17 +245,31 @@ def purchase_bill_update_delete(request, pk):
     try:
         bill = PurchaseBill.objects.get(pk=pk, created_by=request.user)
     except PurchaseBill.DoesNotExist:
-        return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "success": False,
+            "message": "Purchase bill not found."
+        }, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
         serializer = PurchaseBillSerializer(bill, data=request.data, partial=(request.method == 'PATCH'))
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "success": True,
+                "message": "Purchase bill updated successfully.",
+                "data": serializer.data
+            })
+        return Response({
+            "success": False,
+            "message": "Validation error.",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
         bill.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({
+            "success": True,
+            "message": "Purchase bill deleted successfully."
+        }, status=status.HTTP_204_NO_CONTENT)
 
 @swagger_auto_schema(
     methods=['put', 'patch', 'delete'],

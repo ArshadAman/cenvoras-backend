@@ -158,7 +158,7 @@ def purchase_summary(request):
                     {
                         "id": "uuid-1",
                         "name": "Product A",
-                        "hsn_code": "1234",
+                        "hsn_sac_code": "1234",
                         "stock": 50,
                         "unit": "pcs",
                         "low_stock_alert": 10
@@ -168,7 +168,7 @@ def purchase_summary(request):
                     {
                         "id": "uuid-2",
                         "name": "Product B",
-                        "hsn_code": "5678",
+                        "hsn_sac_code": "5678",
                         "stock": 5,
                         "unit": "pcs",
                         "low_stock_alert": 10
@@ -195,7 +195,7 @@ def inventory_summary(request):
         data = {
             'id': str(product.id),
             'name': product.name,
-            'hsn_code': product.hsn_code,
+            'hsn_sac_code': product.hsn_sac_code,
             'stock': product.stock,
             'unit': product.unit,
             'low_stock_alert': product.low_stock_alert,
@@ -205,7 +205,7 @@ def inventory_summary(request):
             low_stock.append(data)
 
     total_inventory_value = products.aggregate(
-        value=Sum(F('stock') * F('purchase_price'))
+        value=Sum(F('stock') * F('price'))
     )['value'] or 0
 
     negative_stock = [data for data in product_list if data['stock'] < 0]
@@ -214,9 +214,9 @@ def inventory_summary(request):
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="inventory_summary.csv"'
         writer = csv.writer(response)
-        writer.writerow(['Product', 'HSN Code', 'Stock', 'Unit', 'Low Stock Alert'])
+        writer.writerow(['Product', 'HSN/SAC Code', 'Stock', 'Unit', 'Low Stock Alert'])
         for row in product_list:
-            writer.writerow([row['name'], row['hsn_code'], row['stock'], row['unit'], row['low_stock_alert']])
+            writer.writerow([row['name'], row['hsn_sac_code'], row['stock'], row['unit'], row['low_stock_alert']])
         writer.writerow([])
         writer.writerow(['Total Inventory Value', total_inventory_value])
         return response
@@ -344,7 +344,7 @@ def dashboard_summary(request):
     # Inventory
     products = Product.objects.filter(created_by=request.user)
     total_inventory_value = products.aggregate(
-        value=Sum(F('stock') * F('purchase_price'))
+        value=Sum(F('stock') * F('price'))
     )['value'] or 0
     low_stock_count = products.filter(stock__lte=F('low_stock_alert')).count()
 

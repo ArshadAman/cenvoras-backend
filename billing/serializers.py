@@ -35,7 +35,16 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         try:
             uuid_obj = uuid.UUID(str(product_value))
             product = Product.objects.get(id=uuid_obj)
+            # Update product fields if present in data
+            updated = False
+            for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                if field in data and data[field] is not None:
+                    setattr(product, field, data[field])
+                    updated = True
+            if updated:
+                product.save()
         except (ValueError, Product.DoesNotExist):
+            # Not a UUID or not found, create new product
             defaults = {
                 'hsn_sac_code': data.get('hsn_sac_code', ''),
                 'unit': data.get('unit', 'pcs'),
@@ -80,7 +89,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     def get_product_detail(self, obj):
         return {
             "name": obj.product.name,
-            "hsn_code": obj.product.hsn_code,
+            "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
         }
 

@@ -251,7 +251,7 @@ def purchase_bill_update_delete(request, pk):
         }, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
-        serializer = PurchaseBillSerializer(bill, data=request.data, partial=(request.method == 'PATCH'))
+        serializer = PurchaseBillSerializer(bill, data=request.data, partial=(request.method == 'PATCH'), context={'request': request})
         if serializer.is_valid():
             serializer.save()
             return Response({

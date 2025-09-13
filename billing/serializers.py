@@ -62,7 +62,6 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
 class PurchaseBillSerializer(serializers.ModelSerializer):
     items = PurchaseBillItemSerializer(many=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
-    created_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = PurchaseBill
@@ -72,12 +71,26 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
-        print("Validated data:", validated_data)  # Add this line
         items_data = validated_data.pop('items')
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
         return purchase_bill
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', [])
+        
+        # Update the purchase bill fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Delete existing items and create new ones
+        instance.items.all().delete()
+        for item_data in items_data:
+            PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
+        
+        return instance
 
 class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     product_detail = serializers.SerializerMethodField(read_only=True)

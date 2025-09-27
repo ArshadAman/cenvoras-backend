@@ -7,8 +7,11 @@ from inventory.models import Product
 
 class Customer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, null=True)
+    email = models.EmailField(blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
     gstin = models.CharField(max_length=15, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
 
     def __str__(self):
@@ -43,7 +46,8 @@ class PurchaseBillItem(models.Model):
 
 class SalesInvoice(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True)
+    customer_name = models.CharField(max_length=255, null=True, blank=True)  # Always store customer name as text
     invoice_number = models.CharField(max_length=100)
     invoice_date = models.DateField()
     due_date = models.DateField(null=True, blank=True)

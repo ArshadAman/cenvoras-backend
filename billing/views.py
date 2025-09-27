@@ -103,18 +103,46 @@ def purchase_bill_detail(request, pk):
     serializer = PurchaseBillSerializer(bill)
     return Response({"success": True, "data": serializer.data})
 
+
 @swagger_auto_schema(
-    method='get',
-    manual_parameters=[
-        openapi.Parameter('invoice_number', openapi.IN_QUERY, description="Invoice number", type=openapi.TYPE_STRING),
-        openapi.Parameter('invoice_date', openapi.IN_QUERY, description="Invoice date (YYYY-MM-DD)", type=openapi.TYPE_STRING),
-        openapi.Parameter('customer', openapi.IN_QUERY, description="Customer ID", type=openapi.TYPE_STRING),
-    ],
-    responses={200: openapi.Response(
-        description="List of sales invoices",
-        examples={
-            "application/json": [
-                {
+    method='post',
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['invoice_number', 'invoice_date', 'customer', 'items'],
+        properties={
+            'invoice_number': openapi.Schema(type=openapi.TYPE_STRING, description='Invoice number'),
+            'invoice_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description='Invoice date (YYYY-MM-DD)'),
+            'due_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description='Due date (YYYY-MM-DD)'),
+            'customer': openapi.Schema(type=openapi.TYPE_STRING, description='Customer UUID'),
+            'billing_address': openapi.Schema(type=openapi.TYPE_STRING, description='Billing address'),
+            'shipping_address': openapi.Schema(type=openapi.TYPE_STRING, description='Shipping address'),
+            'gst_treatment': openapi.Schema(type=openapi.TYPE_STRING, description='GST treatment type'),
+            'journal': openapi.Schema(type=openapi.TYPE_STRING, description='Journal name'),
+            'total_amount': openapi.Schema(type=openapi.TYPE_NUMBER, description='Total amount'),
+            'items': openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    required=['product', 'quantity', 'price', 'amount'],
+                    properties={
+                        'product': openapi.Schema(type=openapi.TYPE_STRING, description='Product UUID or name'),
+                        'hsn_sac_code': openapi.Schema(type=openapi.TYPE_STRING, description='HSN/SAC code'),
+                        'unit': openapi.Schema(type=openapi.TYPE_STRING, description='Unit of measurement'),
+                        'quantity': openapi.Schema(type=openapi.TYPE_INTEGER, description='Quantity'),
+                        'price': openapi.Schema(type=openapi.TYPE_NUMBER, description='Unit price'),
+                        'amount': openapi.Schema(type=openapi.TYPE_NUMBER, description='Total amount'),
+                        'discount': openapi.Schema(type=openapi.TYPE_NUMBER, description='Discount amount'),
+                        'tax': openapi.Schema(type=openapi.TYPE_NUMBER, description='Tax amount'),
+                    }
+                )
+            )
+        }
+    ),
+    responses={
+        201: openapi.Response(
+            description="Sales invoice created successfully",
+            examples={
+                "application/json": {
                     "id": "uuid-2",
                     "invoice_number": "INV-001",
                     "invoice_date": "2025-08-01",
@@ -128,13 +156,25 @@ def purchase_bill_detail(request, pk):
                             "quantity": 5,
                             "unit": "pcs",
                             "price": 3000,
-                            "amount": 15000
+                            "amount": 15000,
+                            "discount": 0,
+                            "tax": 0
                         }
                     ]
                 }
-            ]
-        }
-    )}
+            }
+        ),
+        400: openapi.Response(
+            description="Validation error",
+            examples={
+                "application/json": {
+                    "errors": {
+                        "invoice_number": ["This field is required."]
+                    }
+                }
+            }
+        )
+    }
 )
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -144,37 +184,39 @@ def sales_invoice_list_create(request):
         serializer = SalesInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':
-        data = request.data.copy()
-        data['created_by'] = str(request.user.id)
-        serializer = SalesInvoiceSerializer(data=data)
+        print("DEBUG: Sales invoice creation request received")
+        print("DEBUG: Request data:", request.data)
+        print("DEBUG: Request user:", request.user)
+        
+        serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save(created_by=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def sales_invoice_create(request):
-    serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
-    if serializer.is_valid():
-        serializer.save(created_by=request.user)
-        return Response({
-            "success": True,
-            "message": "Sales invoice created successfully.",
-            "data": serializer.data
-        }, status=201)
-    return Response({
-        "success": False,
-        "message": "Validation error.",
-        "errors": serializer.errors
-    }, status=400)
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def sales_invoice_list(request):
-    invoices = SalesInvoice.objects.filter(created_by=request.user).order_by('-invoice_date')
-    serializer = SalesInvoiceSerializer(invoices, many=True)
-    return Response({"success": True, "data": serializer.data})
+            print("DEBUG: Serializer is valid, creating sales invoice")
+            try:
+                instance = serializer.save(created_by=request.user)
+                print("DEBUG: Sales invoice created successfully:", instance.id)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                print("DEBUG: Error during save:", str(e))
+                import traceback
+                traceback.print_exc()
+                return Response({
+                    'error': 'Failed to create sales invoice',
+                    'details': str(e)
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            print("DEBUG: Serializer validation failed")
+            try:
+                error_details = serializer.errors
+                print("DEBUG: Serializer errors:", error_details)
+            except Exception as e:
+                print("DEBUG: Error accessing serializer.errors:", str(e))
+                error_details = {'general': ['Validation failed - unable to retrieve detailed errors']}
+            
+            return Response({
+                'error': 'Validation failed',
+                'details': error_details
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
 
 @swagger_auto_schema(
     method='get',
@@ -307,7 +349,12 @@ def sales_invoice_update_delete(request, pk):
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
-        serializer = SalesInvoiceSerializer(invoice, data=request.data, partial=(request.method == 'PATCH'))
+        serializer = SalesInvoiceSerializer(
+            invoice, 
+            data=request.data, 
+            partial=(request.method == 'PATCH'),
+            context={'request': request}  # Add this line
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)

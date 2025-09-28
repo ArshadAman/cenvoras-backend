@@ -365,3 +365,31 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
         
         return instance
+    
+
+
+class CustomerSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    
+    class Meta:
+        model = Customer
+        fields = [
+            'id', 'name', 'email', 'phone', 'gstin', 'address', 
+            'created_by', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def validate_email(self, value):
+        if value:
+            # Check for duplicate email within the same user's customers
+            user = self.context['request'].user
+            queryset = Customer.objects.filter(email=value, created_by=user)
+            if self.instance:
+                queryset = queryset.exclude(pk=self.instance.pk)
+            if queryset.exists():
+                raise serializers.ValidationError("A customer with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        return super().create(validated_data)

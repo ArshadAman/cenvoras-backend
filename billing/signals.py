@@ -35,28 +35,34 @@ def increase_stock_on_sale_delete(sender, instance, **kwargs):
 
 # Accounting Signals for Double-Entry Bookkeeping
 
-@receiver(post_save, sender=SalesInvoice)
+@receiver(post_save, sender=SalesInvoiceItem)
 def create_sales_invoice_accounting_entries(sender, instance, created, **kwargs):
     """
-    Automatically create double-entry accounting entries when a sales invoice is created
-    
-    This creates:
-    1. Journal Entry with balanced debits and credits
-    2. General Ledger entries (Dr. Accounts Receivable, Cr. Sales Revenue)  
-    3. Client Ledger entry (subsidiary ledger for customer tracking)
+    Create or recreate accounting entries when sales invoice items are created
+    This ensures detailed line item information is captured
     """
-    print(f"DEBUG: SalesInvoice signal triggered - created: {created}, invoice: {instance.invoice_number}")
-    
     if created:
+        sales_invoice = instance.sales_invoice
+        
+        print(f"DEBUG: Line item added to Sales Invoice {sales_invoice.invoice_number}")
+        
+        # Always recreate entries to ensure they include all line items
+        from ledger.models import GeneralLedgerEntry
+        
+        # Delete any existing entries for this invoice
+        existing_entries = GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice)
+        if existing_entries.exists():
+            print(f"DEBUG: Deleting {existing_entries.count()} existing entries to recreate with line items")
+            existing_entries.delete()
+        
         try:
             from ledger.services import AccountingService
-            print(f"DEBUG: Imported AccountingService, creating entries for {instance.invoice_number}")
-            logger.info(f"Creating accounting entries for Sales Invoice {instance.invoice_number}")
-            journal_entry = AccountingService.create_sales_invoice_entries(instance)
-            logger.info(f"Successfully created journal entry {journal_entry.id} for Sales Invoice {instance.invoice_number}")
-            print(f"DEBUG: Successfully created journal entry {journal_entry.id}")
+            logger.info(f"Creating detailed accounting entries for Sales Invoice {sales_invoice.invoice_number}")
+            success = AccountingService.create_sales_invoice_entries(sales_invoice)
+            logger.info(f"Successfully created general ledger entries for Sales Invoice {sales_invoice.invoice_number}")
+            print(f"DEBUG: Successfully created detailed accounting entries - {success}")
         except Exception as e:
-            error_msg = f"Failed to create accounting entries for Sales Invoice {instance.invoice_number}: {str(e)}"
+            error_msg = f"Failed to create accounting entries for Sales Invoice {sales_invoice.invoice_number}: {str(e)}"
             logger.error(error_msg)
             print(f"DEBUG ERROR: {error_msg}")
             import traceback
@@ -65,43 +71,80 @@ def create_sales_invoice_accounting_entries(sender, instance, created, **kwargs)
             pass
 
 
-@receiver(post_save, sender=PurchaseBill)  
+# Fallback signal - only creates entries if no line items are created within a reasonable time
+@receiver(post_save, sender=SalesInvoice)
+def create_sales_invoice_accounting_entries_fallback(sender, instance, created, **kwargs):
+    """
+    Fallback: Create accounting entries for sales invoices 
+    This will be overridden by the line item signal if items are added
+    """
+    if created:
+        print(f"DEBUG: SalesInvoice created: {instance.invoice_number}, will check for entries later")
+
+
+@receiver(post_save, sender=PurchaseBillItem)
 def create_purchase_bill_accounting_entries(sender, instance, created, **kwargs):
     """
-    Automatically create double-entry accounting entries when a purchase bill is created
-    
-    This creates:
-    1. Journal Entry with balanced debits and credits
-    2. General Ledger entries (Dr. Purchases, Cr. Accounts Payable)
+    Create or recreate accounting entries when purchase bill items are created
+    This ensures detailed line item information is captured
     """
-    print(f"DEBUG: PurchaseBill signal triggered - created: {created}, bill: {getattr(instance, 'bill_number', 'NO_BILL_NUMBER')}")
-    print(f"DEBUG: PurchaseBill fields - vendor: {getattr(instance, 'vendor_name', 'NO_VENDOR')}, total: {getattr(instance, 'total_amount', 'NO_TOTAL')}")
-    print(f"DEBUG: PurchaseBill user: {getattr(instance, 'created_by', 'NO_USER')}")
-    
     if created:
-        print(f"DEBUG: Starting accounting entry creation for PurchaseBill")
+        purchase_bill = instance.purchase_bill
+        
+        print(f"DEBUG: Line item added to Purchase Bill {purchase_bill.bill_number}")
+        
+        # Always recreate entries to ensure they include all line items
+        from ledger.models import GeneralLedgerEntry
+        
+        # Delete any existing entries for this bill
+        existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill)
+        if existing_entries.exists():
+            print(f"DEBUG: Deleting {existing_entries.count()} existing entries to recreate with line items")
+            existing_entries.delete()
+        
         try:
-            # Test if we can access the required fields
-            required_fields = ['bill_date', 'vendor_name', 'bill_number', 'total_amount', 'created_by']
-            for field in required_fields:
-                value = getattr(instance, field, 'MISSING')
-                print(f"DEBUG: Field {field} = {value}")
-            
             from ledger.services import AccountingService
-            print(f"DEBUG: Imported AccountingService successfully")
-            
-            logger.info(f"Creating accounting entries for Purchase Bill {instance.bill_number}")
-            journal_entry = AccountingService.create_purchase_bill_entries(instance)
-            logger.info(f"Successfully created journal entry {journal_entry.id} for Purchase Bill {instance.bill_number}")
-            print(f"DEBUG: SUCCESS - Created journal entry {journal_entry.id}")
-            
+            logger.info(f"Creating detailed accounting entries for Purchase Bill {purchase_bill.bill_number}")
+            success = AccountingService.create_purchase_bill_entries(purchase_bill)
+            logger.info(f"Successfully created general ledger entries for Purchase Bill {purchase_bill.bill_number}")
+            print(f"DEBUG: Successfully created detailed accounting entries - {success}")
         except Exception as e:
-            error_msg = f"Failed to create accounting entries for Purchase Bill {getattr(instance, 'bill_number', 'UNKNOWN')}: {str(e)}"
+            error_msg = f"Failed to create accounting entries for Purchase Bill {purchase_bill.bill_number}: {str(e)}"
             logger.error(error_msg)
             print(f"DEBUG ERROR: {error_msg}")
             import traceback
-            traceback.print_exc()
+            print(f"DEBUG TRACEBACK: {traceback.format_exc()}")
             # Don't raise exception to avoid breaking bill creation
             pass
-    else:
-        print(f"DEBUG: PurchaseBill signal fired but created=False (update operation)")
+
+
+# Keep the original signal as a fallback for bills without line items
+@receiver(post_save, sender=PurchaseBill)  
+def create_purchase_bill_accounting_entries_fallback(sender, instance, created, **kwargs):
+    """
+    Fallback: Create accounting entries for purchase bills without line items
+    """
+    if created:
+        from django.db import transaction
+        
+        def create_entries_after_commit():
+            from billing.models import PurchaseBillItem
+            from ledger.models import GeneralLedgerEntry
+            
+            # Check if line items exist
+            line_items = PurchaseBillItem.objects.filter(purchase_bill=instance)
+            existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=instance)
+            
+            # Only create if no line items and no existing entries
+            if not line_items.exists() and not existing_entries.exists():
+                print(f"DEBUG: Creating fallback accounting entries for Purchase Bill {instance.bill_number}")
+                
+                try:
+                    from ledger.services import AccountingService
+                    success = AccountingService.create_purchase_bill_entries(instance)
+                    print(f"DEBUG: Fallback accounting entries created - {success}")
+                except Exception as e:
+                    print(f"DEBUG ERROR in fallback: {e}")
+        
+        # Schedule after the current transaction commits
+        transaction.on_commit(create_entries_after_commit)

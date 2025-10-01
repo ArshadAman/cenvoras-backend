@@ -1,26 +1,21 @@
 from django.urls import path
-from .views import client_ledger_list, client_ledger_edit, client_payment_entry, client_ledger_summary
 from .accounting_views import (
-    chart_of_accounts, journal_entries, general_ledger, 
-    trial_balance, setup_default_accounts
+    chart_of_accounts, account_detail, general_ledger, general_ledger_entries_list, 
+    general_ledger_entry_detail, trial_balance, setup_default_accounts,
+    create_sales_invoice_ledger_entries, create_purchase_bill_ledger_entries
 )
-from .debug_views import test_purchase_bill_accounting, test_sales_invoice_accounting
 
 urlpatterns = [
-    # Client Ledger (Existing APIs - unchanged)
-    path('client-ledger/', client_ledger_list, name='client_ledger_list'),
-    path('client-ledger/<uuid:pk>/', client_ledger_edit, name='client_ledger_edit'),
-    path('client-ledger/payment/', client_payment_entry, name='client_payment_entry'),
-    path('client-ledger/summary/', client_ledger_summary, name='client_ledger_summary'),
-    
-    # Double-Entry Accounting APIs (New - optional)
+    # General Ledger Accounting APIs
     path('accounts/', chart_of_accounts, name='chart_of_accounts'),
+    path('accounts/<uuid:account_id>/', account_detail, name='account_detail'),
     path('accounts/setup-defaults/', setup_default_accounts, name='setup_default_accounts'),
-    path('journal-entries/', journal_entries, name='journal_entries'),
     path('general-ledger/<uuid:account_id>/', general_ledger, name='general_ledger'),
+    path('general-ledger-entries/', general_ledger_entries_list, name='general_ledger_entries_list'),
+    path('general-ledger-entry/<uuid:entry_id>/', general_ledger_entry_detail, name='general_ledger_entry_detail'),
     path('trial-balance/', trial_balance, name='trial_balance'),
     
-    # Debug endpoints (remove in production)
-    path('debug/test-purchase-bill/', test_purchase_bill_accounting, name='test_purchase_bill'),
-    path('debug/test-sales-invoice/', test_sales_invoice_accounting, name='test_sales_invoice'),
+    # Manual Ledger Entry Creation
+    path('create-sales-invoice-entries/', create_sales_invoice_ledger_entries, name='create_sales_invoice_ledger_entries'),
+    path('create-purchase-bill-entries/', create_purchase_bill_ledger_entries, name='create_purchase_bill_ledger_entries'),
 ]

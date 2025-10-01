@@ -1,4 +1,4 @@
 from django.contrib import admin
-from .models import ClientLedgerEntry
+from .models import Account, GeneralLedgerEntry
 
-admin.site.register(ClientLedgerEntry)
+admin.site.register([Account, GeneralLedgerEntry])

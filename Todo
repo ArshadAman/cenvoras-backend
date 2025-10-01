@@ -1,0 +1,32 @@
+🚀 Suggested Next Enhancements for Canvoras
+	1.	Role-Based Access Control (RBAC)
+	•	Admin, Manager, Accountant, Salesperson, etc.
+	•	Granular permissions (who can view/edit/export what).
+	2.	Multi-Business Support
+	•	Single user can manage multiple businesses under one account.
+	•	Easy switching between businesses with isolated data.
+	3.	Subscription & Payments
+	•	Built-in Stripe / Razorpay integration for SaaS monetization.
+	•	Tiered plans: Free → Pro → Enterprise.
+	4.	Banking & Payments Integration
+	•	Auto-import transactions from bank feeds (Open Banking APIs or Indian equivalents like ICICI, HDFC integrations).
+	•	Payment reconciliation against invoices.
+	5.	Smart AI Features (Differentiator)
+	•	Predict low-stock reordering.
+	•	GST filing assistant (auto-generate GSTR-1, GSTR-3B drafts).
+	•	AI-powered insights: “Your sales dipped 15% this month compared to last.”
+	6.	Offline-First Mode (Critical in India)
+	•	PWA capability for Canvoras web → works offline.
+	•	Syncs when internet is restored.
+	7.	Data Backup & Migration Tools
+	•	One-click backup/export for safety.
+	•	Migration assistant from Tally/Marg CSVs.
+	8.	Audit Logs & Compliance
+	•	Every update tracked (who did what).
+	•	Downloadable audit trails for CA/government compliance.
+	9.	Mobile App (Future)
+	•	Flutter app for business owners → create invoices, check stock, get analytics on the go.
+	10.	Marketplace Ecosystem
+
+	•	Allow plugins (e.g., payroll, HR, CRM add-ons).
+	•	This can make Canvoras future-proof like Zoho.₹

@@ -26,13 +26,13 @@ def test_purchase_bill_accounting(request):
         
         # Try to create accounting entries manually
         try:
-            journal_entry = AccountingService.create_purchase_bill_entries(purchase_bill)
+            success = AccountingService.create_purchase_bill_entries(purchase_bill)
             
             return Response({
                 'success': True,
                 'message': 'Purchase bill and accounting entries created successfully',
                 'purchase_bill_id': str(purchase_bill.id),
-                'journal_entry_id': str(journal_entry.id)
+                'accounting_success': success
             })
             
         except Exception as e:
@@ -69,13 +69,13 @@ def test_sales_invoice_accounting(request):
         
         # Try to create accounting entries manually
         try:
-            journal_entry = AccountingService.create_sales_invoice_entries(sales_invoice)
+            success = AccountingService.create_sales_invoice_entries(sales_invoice)
             
             return Response({
                 'success': True,
                 'message': 'Sales invoice and accounting entries created successfully',
                 'sales_invoice_id': str(sales_invoice.id),
-                'journal_entry_id': str(journal_entry.id)
+                'accounting_success': success
             })
             
         except Exception as e:

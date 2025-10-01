@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.db import transaction
-from django.db.models import Sum
-from .models import ClientLedgerEntry, JournalEntry, GeneralLedgerEntry, Account, AccountType
+from django.db.models import Sum, Q
+from .models import GeneralLedgerEntry, Account, AccountType
 from billing.models import SalesInvoice, PurchaseBill
 
 
@@ -62,108 +62,155 @@ class AccountingService:
     @transaction.atomic
     def create_sales_invoice_entries(cls, sales_invoice):
         """
-        Create accounting entries for a sales invoice using double-entry accounting
+        Create detailed accounting entries for a sales invoice using double-entry accounting
         
-        Journal Entry:
-        Dr. Accounts Receivable    [Total Amount]    (Asset increases)
-            Cr. Sales Revenue                [Total Amount]    (Revenue increases)
+        Creates one entry for Accounts Receivable (total amount)
+        Creates detailed entries for each line item showing actual products sold
         """
         user = sales_invoice.created_by
         accounts = cls.get_or_create_default_accounts(user)
         
-        # Create journal entry
-        journal_entry = JournalEntry.objects.create(
+        # Get all line items for this invoice
+        from billing.models import SalesInvoiceItem
+        line_items = SalesInvoiceItem.objects.filter(sales_invoice=sales_invoice)
+        
+        # Create detailed description with line items
+        if line_items.exists():
+            item_details = []
+            for item in line_items:
+                item_desc = f"{item.product.name} (Qty: {item.quantity}"
+                if item.unit:
+                    item_desc += f" {item.unit}"
+                item_desc += f" @ ₹{item.price} = ₹{item.amount})"
+                item_details.append(item_desc)
+            
+            detailed_description = f"Sales to {sales_invoice.customer_name or 'Customer'} - Items: " + "; ".join(item_details)
+        else:
+            detailed_description = f"Sales to {sales_invoice.customer_name or 'Customer'}"
+        
+        # Debit: Accounts Receivable (increase what customer owes)
+        GeneralLedgerEntry.objects.create(
             date=sales_invoice.invoice_date,
-            description=f"Sales Invoice - {sales_invoice.customer_name or 'Customer'}",
+            account=accounts['accounts_receivable'],
+            debit=sales_invoice.total_amount,
+            credit=0,
+            description=detailed_description,
             reference=sales_invoice.invoice_number,
             sales_invoice=sales_invoice,
             created_by=user
         )
         
-        # Debit: Accounts Receivable (increase what customer owes)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['accounts_receivable'],
-            debit=sales_invoice.total_amount,
-            credit=0,
-            description=f"Sales to {sales_invoice.customer_name or 'Customer'}"
-        )
-        
-        # Credit: Sales Revenue (record income)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['sales_revenue'],
-            debit=0,
-            credit=sales_invoice.total_amount,
-            description=f"Sales revenue from invoice {sales_invoice.invoice_number}"
-        )
-        
-        # Create/update customer subsidiary ledger entry
-        if sales_invoice.customer:
-            # Calculate running balance for this customer
-            last_entry = ClientLedgerEntry.objects.filter(
-                customer=sales_invoice.customer,
-                created_by=user
-            ).order_by('-date', '-created_at').first()
+        # Create detailed credit entries for each line item
+        for item in line_items:
+            item_description = f"Sale of {item.product.name}"
+            if item.quantity > 1:
+                item_description += f" (Qty: {item.quantity}"
+                if item.unit:
+                    item_description += f" {item.unit}"
+                item_description += f" @ ₹{item.price})"
+            else:
+                item_description += f" @ ₹{item.price}"
             
-            prev_balance = last_entry.balance if last_entry else Decimal('0')
-            new_balance = prev_balance + sales_invoice.total_amount
+            # Add tax information if applicable
+            if item.tax > 0:
+                item_description += f" [Tax: ₹{item.tax}]"
             
-            ClientLedgerEntry.objects.create(
-                customer=sales_invoice.customer,
+            # Add discount information if applicable
+            if item.discount > 0:
+                item_description += f" [Discount: ₹{item.discount}]"
+                
+            item_description += f" - Invoice {sales_invoice.invoice_number}"
+        
+            # Credit: Sales Revenue (record income for each item)
+            GeneralLedgerEntry.objects.create(
                 date=sales_invoice.invoice_date,
-                description=f"Sales Invoice {sales_invoice.invoice_number}",
-                invoice=sales_invoice,
-                journal_entry=journal_entry,
-                debit=sales_invoice.total_amount,  # Customer owes us money
-                credit=0,
-                balance=new_balance,
+                account=accounts['sales_revenue'],
+                debit=0,
+                credit=item.amount,
+                description=item_description,
+                reference=f"{sales_invoice.invoice_number}-{item.id}",
+                sales_invoice=sales_invoice,
                 created_by=user
             )
         
-        return journal_entry
+        return True
     
     @classmethod
     @transaction.atomic
     def create_purchase_bill_entries(cls, purchase_bill):
         """
-        Create accounting entries for a purchase bill using double-entry accounting
+        Create detailed accounting entries for a purchase bill using double-entry accounting
         
-        Journal Entry:
-        Dr. Purchases/Expense     [Total Amount]    (Expense increases)
-            Cr. Accounts Payable        [Total Amount]    (Liability increases)
+        Creates detailed entries for each line item showing actual products purchased
+        Creates one entry for Accounts Payable (total amount)
         """
         user = purchase_bill.created_by
         accounts = cls.get_or_create_default_accounts(user)
         
-        # Create journal entry
-        journal_entry = JournalEntry.objects.create(
+        # Get all line items for this purchase bill
+        from billing.models import PurchaseBillItem
+        line_items = PurchaseBillItem.objects.filter(purchase_bill=purchase_bill)
+        
+        # Create detailed debit entries for each line item
+        for item in line_items:
+            item_description = f"Purchase of {item.product.name}"
+            if item.quantity > 1:
+                item_description += f" (Qty: {item.quantity}"
+                if item.unit:
+                    item_description += f" {item.unit}"
+                item_description += f" @ ₹{item.price})"
+            else:
+                item_description += f" @ ₹{item.price}"
+            
+            # Add tax information if applicable
+            if item.tax > 0:
+                item_description += f" [Tax: ₹{item.tax}]"
+            
+            # Add discount information if applicable
+            if item.discount > 0:
+                item_description += f" [Discount: ₹{item.discount}]"
+                
+            item_description += f" - Bill {purchase_bill.bill_number}"
+        
+            # Debit: Purchases/Expense (record what we bought for each item)
+            GeneralLedgerEntry.objects.create(
+                date=purchase_bill.bill_date,
+                account=accounts['purchases'],
+                debit=item.amount,
+                credit=0,
+                description=item_description,
+                reference=f"{purchase_bill.bill_number}-{item.id}",
+                purchase_bill=purchase_bill,
+                created_by=user
+            )
+        
+        # Create detailed description with line items for accounts payable
+        if line_items.exists():
+            item_details = []
+            for item in line_items:
+                item_desc = f"{item.product.name} (Qty: {item.quantity}"
+                if item.unit:
+                    item_desc += f" {item.unit}"
+                item_desc += f" @ ₹{item.price} = ₹{item.amount})"
+                item_details.append(item_desc)
+            
+            detailed_payable_description = f"Amount owed to {purchase_bill.vendor_name} - Items: " + "; ".join(item_details)
+        else:
+            detailed_payable_description = f"Amount owed to {purchase_bill.vendor_name}"
+        
+        # Credit: Accounts Payable (record what we owe)
+        GeneralLedgerEntry.objects.create(
             date=purchase_bill.bill_date,
-            description=f"Purchase Bill - {purchase_bill.vendor_name}",
+            account=accounts['accounts_payable'],
+            debit=0,
+            credit=purchase_bill.total_amount,
+            description=detailed_payable_description,
             reference=purchase_bill.bill_number,
             purchase_bill=purchase_bill,
             created_by=user
         )
         
-        # Debit: Purchases/Expense (record what we bought)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['purchases'],
-            debit=purchase_bill.total_amount,
-            credit=0,
-            description=f"Purchase from {purchase_bill.vendor_name}"
-        )
-        
-        # Credit: Accounts Payable (record what we owe)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['accounts_payable'],
-            debit=0,
-            credit=purchase_bill.total_amount,
-            description=f"Amount owed to {purchase_bill.vendor_name}"
-        )
-        
-        return journal_entry
+        return True
     
     @classmethod
     @transaction.atomic
@@ -171,59 +218,34 @@ class AccountingService:
         """
         Create entries when payment is received from customer
         
-        Journal Entry:
         Dr. Cash                    [Amount]    (Asset increases)
-            Cr. Accounts Receivable      [Amount]    (Asset decreases)
+            Cr. Accounts Receivable [Amount]    (Asset decreases)
         """
         accounts = cls.get_or_create_default_accounts(user)
         
-        # Create journal entry
-        journal_entry = JournalEntry.objects.create(
+        # Debit: Cash (increase cash)
+        GeneralLedgerEntry.objects.create(
             date=date,
-            description=description or f"Payment received from {customer.name}",
+            account=accounts['cash'],
+            debit=amount,
+            credit=0,
+            description=f"Payment received from {customer.name if customer else 'Customer'}",
             reference="Payment Received",
             created_by=user
         )
         
-        # Debit: Cash (increase cash)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['cash'],
-            debit=amount,
-            credit=0,
-            description=f"Payment received from {customer.name}"
-        )
-        
         # Credit: Accounts Receivable (reduce what customer owes)
         GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
+            date=date,
             account=accounts['accounts_receivable'],
             debit=0,
             credit=amount,
-            description=f"Payment received from {customer.name}"
-        )
-        
-        # Update client subsidiary ledger
-        last_entry = ClientLedgerEntry.objects.filter(
-            customer=customer,
-            created_by=user
-        ).order_by('-date', '-created_at').first()
-        
-        prev_balance = last_entry.balance if last_entry else Decimal('0')
-        new_balance = prev_balance - amount  # Reduce what they owe
-        
-        client_ledger_entry = ClientLedgerEntry.objects.create(
-            customer=customer,
-            date=date,
-            description=description or f"Payment received",
-            journal_entry=journal_entry,
-            debit=0,
-            credit=amount,  # Payment received reduces their debt
-            balance=new_balance,
+            description=f"Payment received from {customer.name if customer else 'Customer'}",
+            reference="Payment Received",
             created_by=user
         )
         
-        return client_ledger_entry, journal_entry
+        return True
     
     @classmethod
     @transaction.atomic
@@ -231,62 +253,53 @@ class AccountingService:
         """
         Create entries when payment is made to vendor
         
-        Journal Entry:
-        Dr. Accounts Payable       [Amount]    (Liability decreases)
-            Cr. Cash                     [Amount]    (Asset decreases)
+        Dr. Accounts Payable    [Amount]    (Liability decreases)
+            Cr. Cash            [Amount]    (Asset decreases)
         """
         accounts = cls.get_or_create_default_accounts(user)
         
-        # Create journal entry
-        journal_entry = JournalEntry.objects.create(
+        # Debit: Accounts Payable (reduce what we owe)
+        GeneralLedgerEntry.objects.create(
             date=date,
-            description=description or f"Payment made to {vendor_name}",
+            account=accounts['accounts_payable'],
+            debit=amount,
+            credit=0,
+            description=f"Payment made to {vendor_name}",
             reference="Payment Made",
             created_by=user
         )
         
-        # Debit: Accounts Payable (reduce what we owe)
+        # Credit: Cash (decrease cash)
         GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
-            account=accounts['accounts_payable'],
-            debit=amount,
-            credit=0,
-            description=f"Payment made to {vendor_name}"
-        )
-        
-        # Credit: Cash (reduce cash)
-        GeneralLedgerEntry.objects.create(
-            journal_entry=journal_entry,
+            date=date,
             account=accounts['cash'],
             debit=0,
             credit=amount,
-            description=f"Payment made to {vendor_name}"
+            description=f"Payment made to {vendor_name}",
+            reference="Payment Made",
+            created_by=user
         )
         
-        return journal_entry
+        return True
     
     @classmethod
-    def get_account_balance(cls, account, user):
-        """Get the current balance for an account"""
-        ledger_entries = GeneralLedgerEntry.objects.filter(
+    def get_account_balance(cls, account, user, date_to=None):
+        """Get balance for a specific account"""
+        entries = GeneralLedgerEntry.objects.filter(
             account=account,
-            journal_entry__created_by=user
+            created_by=user
         )
         
-        total_debits = ledger_entries.aggregate(
-            total=Sum('debit')
-        )['total'] or Decimal('0')
+        if date_to:
+            entries = entries.filter(date__lte=date_to)
         
-        total_credits = ledger_entries.aggregate(
-            total=Sum('credit')
-        )['total'] or Decimal('0')
+        total_debits = entries.aggregate(Sum('debit'))['debit__sum'] or Decimal('0')
+        total_credits = entries.aggregate(Sum('credit'))['credit__sum'] or Decimal('0')
         
         # Calculate balance based on account type
         if account.account_type in [AccountType.ASSET, AccountType.EXPENSE]:
-            # For assets and expenses, debit increases balance
             balance = total_debits - total_credits
-        else:
-            # For liabilities, equity, and revenue, credit increases balance
+        else:  # LIABILITY, EQUITY, REVENUE
             balance = total_credits - total_debits
         
         return {
@@ -296,32 +309,43 @@ class AccountingService:
         }
     
     @classmethod
-    def get_trial_balance(cls, user):
+    def get_trial_balance(cls, user, date_to=None):
         """Get trial balance for all accounts"""
-        accounts = Account.objects.filter(created_by=user, is_active=True)
-        trial_balance = []
+        accounts = Account.objects.filter(created_by=user, is_active=True).order_by('account_type', 'code', 'name')
         
+        accounts_data = []
         total_debits = Decimal('0')
         total_credits = Decimal('0')
         
         for account in accounts:
-            balance_info = cls.get_account_balance(account, user)
-            
-            # Only include accounts with activity
-            if balance_info['debit_total'] > 0 or balance_info['credit_total'] > 0:
-                trial_balance.append({
-                    'account': account,
-                    'debit_total': balance_info['debit_total'],
-                    'credit_total': balance_info['credit_total'],
-                    'balance': balance_info['balance']
-                })
-                
-                total_debits += balance_info['debit_total']
-                total_credits += balance_info['credit_total']
+            balance_info = cls.get_account_balance(account, user, date_to)
+            accounts_data.append({
+                'account': account,
+                'debit_total': balance_info['debit_total'],
+                'credit_total': balance_info['credit_total'],
+                'balance': balance_info['balance']
+            })
+            total_debits += balance_info['debit_total']
+            total_credits += balance_info['credit_total']
         
         return {
-            'accounts': trial_balance,
+            'accounts': accounts_data,
             'total_debits': total_debits,
             'total_credits': total_credits,
             'is_balanced': total_debits == total_credits
         }
+    
+    @classmethod
+    def get_general_ledger_entries(cls, account, user, date_from=None, date_to=None):
+        """Get all entries for a specific account"""
+        entries = GeneralLedgerEntry.objects.filter(
+            account=account,
+            created_by=user
+        ).order_by('-date', '-created_at')
+        
+        if date_from:
+            entries = entries.filter(date__gte=date_from)
+        if date_to:
+            entries = entries.filter(date__lte=date_to)
+        
+        return entries

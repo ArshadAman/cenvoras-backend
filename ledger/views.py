@@ -4,8 +4,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from .models import ClientLedgerEntry
 from .serializers import ClientLedgerEntrySerializer
+from .services import AccountingService
 from billing.models import Customer
 from datetime import date
+from decimal import Decimal
 from rest_framework import status
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -45,7 +47,7 @@ def client_ledger_list(request):
     customer = request.query_params.get('customer')
     date_from = request.query_params.get('date_from')
     date_to = request.query_params.get('date_to')
-    queryset = ClientLedgerEntry.objects.filter(created_by=request.user)
+    queryset = ClientLedgerEntry.objects.select_related('customer').filter(created_by=request.user)
     if customer:
         queryset = queryset.filter(customer=customer)
     if date_from and date_to:
@@ -83,19 +85,47 @@ def client_ledger_list(request):
 @permission_classes([IsAuthenticated])
 def client_ledger_edit(request, pk):
     try:
-        entry = ClientLedgerEntry.objects.get(pk=pk, created_by=request.user)
+        entry = ClientLedgerEntry.objects.select_related('customer').get(pk=pk, created_by=request.user)
     except ClientLedgerEntry.DoesNotExist:
-        return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'success': False,
+            'error': 'Ledger entry not found.'
+        }, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
-        serializer = ClientLedgerEntrySerializer(entry, data=request.data, partial=(request.method == 'PATCH'))
+        print(f"DEBUG: Request data: {request.data}")
+        print(f"DEBUG: Request user: {request.user}")
+        
+        # Pass request context - this was missing!
+        serializer = ClientLedgerEntrySerializer(
+            entry, 
+            data=request.data, 
+            partial=(request.method == 'PATCH'),
+            context={'request': request}  # This is crucial!
+        )
+        
         if serializer.is_valid():
+            print("DEBUG: Serializer is valid, saving...")
             serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'success': True,
+                'message': 'Ledger entry updated successfully.',
+                'data': serializer.data
+            })
+        else:
+            print(f"DEBUG: Serializer errors: {serializer.errors}")
+            return Response({
+                'success': False,
+                'message': 'Validation errors occurred.',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
     elif request.method == 'DELETE':
         entry.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({
+            'success': True,
+            'message': 'Ledger entry deleted successfully.'
+        }, status=status.HTTP_204_NO_CONTENT)
 
 @swagger_auto_schema(
     method='post',
@@ -132,6 +162,7 @@ def client_ledger_edit(request, pk):
 def client_payment_entry(request):
     """
     Record a payment received from a client (credit entry).
+    Uses double-entry accounting to automatically create proper journal entries.
     Required fields: customer, amount, description (optional), date (optional)
     """
     customer_id = request.data.get('customer')
@@ -140,28 +171,45 @@ def client_payment_entry(request):
     entry_date = request.data.get('date', date.today())
 
     if not customer_id or not amount:
-        return Response({'error': 'customer and amount are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'success': False,
+            'error': 'customer and amount are required.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
     try:
         customer = Customer.objects.get(id=customer_id, created_by=request.user)
     except Customer.DoesNotExist:
-        return Response({'error': 'Customer not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'success': False,
+            'error': 'Customer not found.'
+        }, status=status.HTTP_404_NOT_FOUND)
 
-    # Calculate running balance
-    last_entry = ClientLedgerEntry.objects.filter(customer=customer, created_by=request.user).order_by('-date', '-created_at').first()
-    prev_balance = last_entry.balance if last_entry else 0
-    new_balance = prev_balance - float(amount)
-
-    entry = ClientLedgerEntry.objects.create(
-        customer=customer,
-        date=entry_date,
-        description=description,
-        debit=0,
-        credit=amount,
-        balance=new_balance,
-        created_by=request.user
-    )
-    serializer = ClientLedgerEntrySerializer(entry)
-    return Response(serializer.data, status=status.HTTP_201_CREATED)
+    try:
+        # Use AccountingService to create proper double-entry accounting entries
+        client_ledger_entry, journal_entry = AccountingService.create_payment_received_entries(
+            customer=customer,
+            amount=Decimal(str(amount)),
+            description=description,
+            date=entry_date,
+            user=request.user
+        )
+        
+        # Return the client ledger entry with full customer object
+        client_ledger_entry = ClientLedgerEntry.objects.select_related('customer').get(pk=client_ledger_entry.pk)
+        serializer = ClientLedgerEntrySerializer(client_ledger_entry, context={'request': request})
+        
+        return Response({
+            'success': True,
+            'message': 'Payment entry created successfully.',
+            'data': serializer.data,
+            'journal_entry_id': str(journal_entry.id)
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': f'Failed to create payment entry: {str(e)}'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 @swagger_auto_schema(
     method='get',

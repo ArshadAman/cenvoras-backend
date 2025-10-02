@@ -29,7 +29,7 @@ services:
       - "443:443"
     volumes:
       - ./certs/fullchain.pem:/etc/ssl/certs/fullchain.pem:ro
-      - ./certs/privkey.pem:/etc/ssl/private/privkey.pem:ro
+      - ./certs/privkey.pem:/etc/ssl/certs/privkey.pem:ro
     depends_on:
       - web
 

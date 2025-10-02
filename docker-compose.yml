@@ -30,6 +30,9 @@ services:
     volumes:
       - ./certs/fullchain.pem:/etc/ssl/certs/fullchain.pem:ro
       - ./certs/privkey.pem:/etc/ssl/certs/privkey.pem:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro   # <-- mount your custom config
+      - ./app/static:/app/static                                   # optional, if you serve static files
+      - ./app/media:/app/media                                     # optional, if you serve media files
     depends_on:
       - web
 

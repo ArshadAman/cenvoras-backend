@@ -141,6 +141,7 @@ REST_FRAMEWORK = {
 
 # CORS configuration (allow all for development, restrict in production)
 CORS_ALLOW_ALL_ORIGINS = True
+CSRF_TRUSTED_ORIGINS = ["https://devapi.cenvora.app"]
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'

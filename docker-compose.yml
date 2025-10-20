@@ -28,11 +28,10 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./certs/fullchain.pem:/etc/letsencrypt/live/cenvora.app/fullchain.pem:ro
-      - ./certs/privkey.pem:/etc/letsencrypt/live/cenvora.app/privkey.pem:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro   # <-- mount your custom config
-      - ./app/static:/app/static                                   # optional, if you serve static files
-      - ./app/media:/app/media                                     # optional, if you serve media files
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro   
+      - ./app/static:/app/static               
+      - ./app/media:/app/media                
     depends_on:
       - web
 

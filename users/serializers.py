@@ -72,6 +72,101 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         instance.mark_profile_completed()
         return instance
 
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """Comprehensive profile update serializer"""
+    current_password = serializers.CharField(write_only=True, required=False, help_text="Required only when changing email or password")
+    new_password = serializers.CharField(write_only=True, required=False, min_length=8)
+    confirm_new_password = serializers.CharField(write_only=True, required=False)
+    
+    class Meta:
+        model = User
+        fields = (
+            'first_name', 'last_name', 'phone', 'business_name', 
+            'business_address', 'gstin', 'email', 'current_password',
+            'new_password', 'confirm_new_password'
+        )
+        extra_kwargs = {
+            'phone': {'required': False},
+            'business_name': {'required': False},
+            'email': {'required': False},
+        }
+    
+    def validate(self, attrs):
+        user = self.instance
+        
+        # Password change validation
+        new_password = attrs.get('new_password')
+        confirm_new_password = attrs.get('confirm_new_password')
+        current_password = attrs.get('current_password')
+        
+        if new_password:
+            if not confirm_new_password:
+                raise serializers.ValidationError({
+                    'confirm_new_password': 'This field is required when setting a new password.'
+                })
+            if new_password != confirm_new_password:
+                raise serializers.ValidationError({
+                    'confirm_new_password': 'New passwords do not match.'
+                })
+            if not current_password:
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is required to set a new password.'
+                })
+            if not user.check_password(current_password):
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is incorrect.'
+                })
+        
+        # Email change validation
+        email = attrs.get('email')
+        if email and email != user.email:
+            if not current_password:
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is required to change email.'
+                })
+            if not user.check_password(current_password):
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is incorrect.'
+                })
+            if User.objects.filter(email=email).exclude(id=user.id).exists():
+                raise serializers.ValidationError({
+                    'email': 'A user with this email already exists.'
+                })
+        
+        # Phone validation
+        phone = attrs.get('phone')
+        if phone and phone != user.phone:
+            if User.objects.filter(phone=phone).exclude(id=user.id).exists():
+                raise serializers.ValidationError({
+                    'phone': 'A user with this phone number already exists.'
+                })
+        
+        return attrs
+    
+    def update(self, instance, validated_data):
+        # Remove password fields from validated_data for normal update
+        current_password = validated_data.pop('current_password', None)
+        new_password = validated_data.pop('new_password', None)
+        confirm_new_password = validated_data.pop('confirm_new_password', None)
+        
+        # Update regular fields
+        instance = super().update(instance, validated_data)
+        
+        # Handle password change
+        if new_password:
+            instance.set_password(new_password)
+            instance.save(update_fields=['password'])
+        
+        # Handle email change (update username too)
+        if 'email' in validated_data:
+            instance.username = instance.email
+            instance.save(update_fields=['username'])
+        
+        # Check if profile should be marked as completed
+        instance.mark_profile_completed()
+        
+        return instance
+
 class UserProfileSerializer(serializers.ModelSerializer):
     """Full user profile for display"""
     can_generate_gst_invoice = serializers.ReadOnlyField()

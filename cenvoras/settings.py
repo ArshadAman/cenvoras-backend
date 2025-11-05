@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'ledger',
     'subscription',
     'analytics',
+    'ai_assistant',
 ]
 
 MIDDLEWARE = [

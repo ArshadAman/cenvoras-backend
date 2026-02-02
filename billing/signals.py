@@ -1,150 +1,225 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
-from billing.models import PurchaseBillItem, SalesInvoiceItem, SalesInvoice, PurchaseBill
-from inventory.models import Product
+from billing.models import PurchaseBillItem, SalesInvoiceItem, SalesInvoice, PurchaseBill, Payment, Customer
+from django.core.exceptions import ValidationError
+from inventory.models import Product, Warehouse, StockPoint
+from users.models import ActionLog
+from django.db.models import F
+from django.db.models.functions import Greatest
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------
+# INVENTORY SIGNALS (Atomic)
+# ---------------------------------------------------------
+
 @receiver(post_save, sender=PurchaseBillItem)
 def increase_stock_on_purchase(sender, instance, created, **kwargs):
     if created:
-        product = instance.product
-        product.stock += instance.quantity
-        product.save()
+        total_qty = instance.quantity + instance.free_quantity
+        qty_to_add = total_qty
+        
+        product_id = instance.product_id
+        product = Product.objects.only('secondary_unit', 'conversion_factor', 'unit').get(pk=product_id)
+
+        if product.secondary_unit and instance.unit == product.secondary_unit:
+            qty_to_add = total_qty * product.conversion_factor
+            print(f"DEBUG: Converted purchase qty {total_qty} {instance.unit} to {qty_to_add} {product.unit}")
+            
+        # ATOMIC UPDATE: Product Stock
+        Product.objects.filter(pk=product_id).update(stock=F('stock') + qty_to_add)
+
+        # Update StockPoint
+        if instance.batch:
+            user = instance.purchase_bill.created_by
+            target_warehouse = instance.purchase_bill.warehouse
+            
+            if not target_warehouse:
+                target_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
+                if not target_warehouse:
+                    target_warehouse = Warehouse.objects.create(name="Main Warehouse", created_by=user)
+            
+            stock_point, _ = StockPoint.objects.get_or_create(
+                batch=instance.batch,
+                warehouse=target_warehouse,
+                defaults={'quantity': 0}
+            )
+            StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') + qty_to_add)
+            print(f"DEBUG: Atomically increased stock for batch {instance.batch.batch_number} by {qty_to_add}")
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def decrease_stock_on_sale(sender, instance, created, **kwargs):
     if created:
-        product = instance.product
-        product.stock = max(product.stock - instance.quantity, 0)
-        product.save()
+        total_qty = instance.quantity + instance.free_quantity
+        qty_to_remove = total_qty
+        product_id = instance.product_id
+        
+        product = Product.objects.only('secondary_unit', 'conversion_factor', 'unit').get(pk=product_id)
+
+        if product.secondary_unit and instance.unit == product.secondary_unit:
+            qty_to_remove = total_qty * product.conversion_factor
+            print(f"DEBUG: Converted sale qty {total_qty} {instance.unit} to {qty_to_remove} {product.unit}")
+
+        # ATOMIC UPDATE: Product Stock
+        Product.objects.filter(pk=product_id).update(stock=Greatest(F('stock') - qty_to_remove, 0))
+
+        # Update StockPoint
+        if instance.batch:
+            user = instance.sales_invoice.created_by
+            target_warehouse = instance.sales_invoice.warehouse
+            
+            if not target_warehouse:
+                target_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
+            
+            if target_warehouse:
+                stock_point, _ = StockPoint.objects.get_or_create(
+                    batch=instance.batch,
+                    warehouse=target_warehouse,
+                    defaults={'quantity': 0}
+                )
+                StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
+                print(f"DEBUG: Atomically decreased stock for batch {instance.batch.batch_number} by {qty_to_remove}")
 
 @receiver(post_delete, sender=PurchaseBillItem)
 def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
-    product = instance.product
-    product.stock = max(product.stock - instance.quantity, 0)
-    product.save()
+    # ATOMIC REVERT
+    Product.objects.filter(pk=instance.product_id).update(stock=Greatest(F('stock') - instance.quantity, 0))
+    
+    if instance.batch:
+        try:
+             bill = instance.purchase_bill
+             target_warehouse = bill.warehouse
+             if not target_warehouse:
+                 target_warehouse = Warehouse.objects.filter(created_by=bill.created_by, is_active=True).first()
+             
+             if target_warehouse:
+                 StockPoint.objects.filter(
+                     batch=instance.batch, 
+                     warehouse=target_warehouse
+                 ).update(quantity=Greatest(F('quantity') - instance.quantity, 0))
+                 print(f"DEBUG: Atomically reverted stock for batch {instance.batch.batch_number}")
+        except Exception as e:
+            print(f"ERROR reverting StockPoint on Purchase Delete: {e}")
 
 @receiver(post_delete, sender=SalesInvoiceItem)
 def increase_stock_on_sale_delete(sender, instance, **kwargs):
-    product = instance.product
-    product.stock += instance.quantity
-    product.save()
+    # ATOMIC REVERT
+    Product.objects.filter(pk=instance.product_id).update(stock=F('stock') + instance.quantity)
+
+    if instance.batch:
+        try:
+             inv = instance.sales_invoice
+             target_warehouse = inv.warehouse
+             if not target_warehouse:
+                 target_warehouse = Warehouse.objects.filter(created_by=inv.created_by, is_active=True).first()
+             
+             if target_warehouse:
+                 StockPoint.objects.filter(
+                     batch=instance.batch, 
+                     warehouse=target_warehouse
+                 ).update(quantity=F('quantity') + instance.quantity)
+                 print(f"DEBUG: Atomically restored stock for batch {instance.batch.batch_number}")
+        except Exception as e:
+            print(f"ERROR reverting StockPoint on Sale Delete: {e}")
 
 
-# Accounting Signals for Double-Entry Bookkeeping
+# ---------------------------------------------------------
+# FINANCIAL SIGNALS (Atomic)
+# ---------------------------------------------------------
+
+@receiver(post_save, sender=SalesInvoice)
+def update_balance_on_sale(sender, instance, created, **kwargs):
+    if created and instance.customer:
+        Customer.objects.filter(pk=instance.customer.pk).update(
+            current_balance=F('current_balance') + instance.total_amount
+        )
+        print(f"DEBUG: Atomically increased balance by {instance.total_amount}")
+
+@receiver(post_delete, sender=SalesInvoice)
+def revert_balance_on_sale_delete(sender, instance, **kwargs):
+    if instance.customer:
+        Customer.objects.filter(pk=instance.customer.pk).update(
+            current_balance=F('current_balance') - instance.total_amount
+        )
+        print(f"DEBUG: Reverted balance for deleted invoice {instance.invoice_number}")
+
+@receiver(post_save, sender=Payment)
+def update_balance_on_payment(sender, instance, created, **kwargs):
+    if created and instance.customer:
+        Customer.objects.filter(pk=instance.customer.pk).update(
+            current_balance=F('current_balance') - instance.amount
+        )
+        print(f"DEBUG: Atomically decreased balance by {instance.amount}")
+
+@receiver(post_delete, sender=Payment)
+def revert_balance_on_payment_delete(sender, instance, **kwargs):
+    if instance.customer:
+        Customer.objects.filter(pk=instance.customer.pk).update(
+            current_balance=F('current_balance') + instance.amount
+        )
+        print(f"DEBUG: Reverted balance for deleted payment {instance.pk}")
+
+@receiver(post_save, sender=SalesInvoice)
+def check_credit_limit_pre_save(sender, instance, created, **kwargs):
+    # Enforced in Serializer
+    pass
+
+
+# ---------------------------------------------------------
+# ACCOUNTING / LEDGER SIGNALS
+# ---------------------------------------------------------
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def create_sales_invoice_accounting_entries(sender, instance, created, **kwargs):
-    """
-    Create or recreate accounting entries when sales invoice items are created
-    This ensures detailed line item information is captured
-    """
     if created:
         sales_invoice = instance.sales_invoice
-        
-        print(f"DEBUG: Line item added to Sales Invoice {sales_invoice.invoice_number}")
-        
-        # Always recreate entries to ensure they include all line items
         from ledger.models import GeneralLedgerEntry
         
-        # Delete any existing entries for this invoice
         existing_entries = GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice)
         if existing_entries.exists():
-            print(f"DEBUG: Deleting {existing_entries.count()} existing entries to recreate with line items")
             existing_entries.delete()
         
         try:
             from ledger.services import AccountingService
-            logger.info(f"Creating detailed accounting entries for Sales Invoice {sales_invoice.invoice_number}")
-            success = AccountingService.create_sales_invoice_entries(sales_invoice)
-            logger.info(f"Successfully created general ledger entries for Sales Invoice {sales_invoice.invoice_number}")
-            print(f"DEBUG: Successfully created detailed accounting entries - {success}")
-        except Exception as e:
-            error_msg = f"Failed to create accounting entries for Sales Invoice {sales_invoice.invoice_number}: {str(e)}"
-            logger.error(error_msg)
-            print(f"DEBUG ERROR: {error_msg}")
-            import traceback
-            print(f"DEBUG TRACEBACK: {traceback.format_exc()}")
-            # Don't raise exception to avoid breaking invoice creation
+            AccountingService.create_sales_invoice_entries(sales_invoice)
+        except Exception:
             pass
 
-
-# Fallback signal - only creates entries if no line items are created within a reasonable time
 @receiver(post_save, sender=SalesInvoice)
 def create_sales_invoice_accounting_entries_fallback(sender, instance, created, **kwargs):
-    """
-    Fallback: Create accounting entries for sales invoices 
-    This will be overridden by the line item signal if items are added
-    """
     if created:
-        print(f"DEBUG: SalesInvoice created: {instance.invoice_number}, will check for entries later")
-
+        pass 
 
 @receiver(post_save, sender=PurchaseBillItem)
 def create_purchase_bill_accounting_entries(sender, instance, created, **kwargs):
-    """
-    Create or recreate accounting entries when purchase bill items are created
-    This ensures detailed line item information is captured
-    """
     if created:
         purchase_bill = instance.purchase_bill
-        
-        print(f"DEBUG: Line item added to Purchase Bill {purchase_bill.bill_number}")
-        
-        # Always recreate entries to ensure they include all line items
         from ledger.models import GeneralLedgerEntry
         
-        # Delete any existing entries for this bill
         existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill)
         if existing_entries.exists():
-            print(f"DEBUG: Deleting {existing_entries.count()} existing entries to recreate with line items")
             existing_entries.delete()
         
         try:
             from ledger.services import AccountingService
-            logger.info(f"Creating detailed accounting entries for Purchase Bill {purchase_bill.bill_number}")
-            success = AccountingService.create_purchase_bill_entries(purchase_bill)
-            logger.info(f"Successfully created general ledger entries for Purchase Bill {purchase_bill.bill_number}")
-            print(f"DEBUG: Successfully created detailed accounting entries - {success}")
-        except Exception as e:
-            error_msg = f"Failed to create accounting entries for Purchase Bill {purchase_bill.bill_number}: {str(e)}"
-            logger.error(error_msg)
-            print(f"DEBUG ERROR: {error_msg}")
-            import traceback
-            print(f"DEBUG TRACEBACK: {traceback.format_exc()}")
-            # Don't raise exception to avoid breaking bill creation
+            AccountingService.create_purchase_bill_entries(purchase_bill)
+        except Exception:
             pass
 
-
-# Keep the original signal as a fallback for bills without line items
 @receiver(post_save, sender=PurchaseBill)  
 def create_purchase_bill_accounting_entries_fallback(sender, instance, created, **kwargs):
-    """
-    Fallback: Create accounting entries for purchase bills without line items
-    """
     if created:
         from django.db import transaction
-        
         def create_entries_after_commit():
             from billing.models import PurchaseBillItem
             from ledger.models import GeneralLedgerEntry
-            
-            # Check if line items exist
             line_items = PurchaseBillItem.objects.filter(purchase_bill=instance)
             existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=instance)
-            
-            # Only create if no line items and no existing entries
             if not line_items.exists() and not existing_entries.exists():
-                print(f"DEBUG: Creating fallback accounting entries for Purchase Bill {instance.bill_number}")
-                
                 try:
                     from ledger.services import AccountingService
-                    success = AccountingService.create_purchase_bill_entries(instance)
-                    print(f"DEBUG: Fallback accounting entries created - {success}")
-                except Exception as e:
-                    print(f"DEBUG ERROR in fallback: {e}")
-        
-        # Schedule after the current transaction commits
+                    AccountingService.create_purchase_bill_entries(instance)
+                except Exception:
+                    pass
         transaction.on_commit(create_entries_after_commit)

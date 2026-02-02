@@ -49,8 +49,30 @@ from drf_yasg import openapi
 def purchase_bill_list_create(request):
     if request.method == 'GET':
         bills = PurchaseBill.objects.filter(created_by=request.user).order_by('-bill_date')
-        serializer = PurchaseBillSerializer(bills, many=True)
-        return Response({"success": True, "data": serializer.data})
+        
+        # Pagination
+        page = int(request.GET.get('page', 1))
+        limit = int(request.GET.get('limit', 10))
+        
+        total_count = bills.count()
+        start = (page - 1) * limit
+        end = start + limit
+        
+        paginated_bills = bills[start:end]
+        serializer = PurchaseBillSerializer(paginated_bills, many=True)
+        
+        return Response({
+            "success": True, 
+            "data": serializer.data,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total_count": total_count,
+                "total_pages": (total_count + limit - 1) // limit,
+                "has_next": end < total_count,
+                "has_prev": page > 1
+            }
+        })
 
     elif request.method == 'POST':
         serializer = PurchaseBillSerializer(data=request.data, context={'request': request})

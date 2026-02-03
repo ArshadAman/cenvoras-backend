@@ -13,7 +13,7 @@ SECRET_KEY = 'django-insecure-^b68wd86pdzoj4goxo_o--!6w4tygg0sgzl)r7mb4m_^j-n0x0
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['testserver', 'localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'ledger',
     'subscription',
     'analytics',
+    'ai_assistant',
 ]
 
 MIDDLEWARE = [
@@ -75,12 +76,19 @@ WSGI_APPLICATION = 'cenvoras.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
+import os
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'cenvoras_db'),
+        'USER': os.environ.get('POSTGRES_USER', 'cenvoras_user'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
+
 
 
 # Password validation
@@ -117,7 +125,16 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
+
+# Media files (user uploads)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
@@ -141,6 +158,7 @@ REST_FRAMEWORK = {
 
 # CORS configuration (allow all for development, restrict in production)
 CORS_ALLOW_ALL_ORIGINS = True
+CSRF_TRUSTED_ORIGINS = ["https://devapi.cenvora.app"]
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'

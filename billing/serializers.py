@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer
-from inventory.models import Product
+from rest_framework import serializers
+from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Payment
+from inventory.models import Product, ProductBatch
 import uuid
 
 class ProductField(serializers.Field):
@@ -26,12 +27,18 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
+    
+    # Batch fields (Virtual fields, not mapped directly to model until to_internal_value)
+    batch_number = serializers.CharField(required=False, write_only=True)
+    expiry_date = serializers.DateField(required=False, write_only=True, allow_null=True)
+    mrp = serializers.DecimalField(required=False, write_only=True, max_digits=10, decimal_places=2)
 
     class Meta:
         model = PurchaseBillItem
         fields = [
             'product', 'hsn_sac_code', 'unit',
-            'quantity', 'price', 'amount', 'discount', 'tax'
+            'quantity', 'price', 'amount', 'discount', 'tax',
+            'batch_number', 'expiry_date', 'mrp'
         ]
 
     def to_internal_value(self, data):
@@ -66,6 +73,34 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
                 defaults=defaults
             )
         data['product'] = product
+        
+        # Handle Batch Logic
+        batch_number = data.get('batch_number')
+        if batch_number:
+            print(f"DEBUG: Processing batch {batch_number} for product {product.name}")
+            expiry_date = data.get('expiry_date')
+            mrp = data.get('mrp', 0)
+            cost_price = data.get('price', 0) # Cost is the purchase price
+            
+            batch, created = ProductBatch.objects.get_or_create(
+                product=product,
+                batch_number=batch_number,
+                defaults={
+                    'expiry_date': expiry_date,
+                    'mrp': mrp,
+                    'cost_price': cost_price,
+                    'sale_price': mrp  # Default sale price to MRP if not specified
+                }
+            )
+            # Update fields if batch exists but new info provided
+            if not created:
+                 if expiry_date: batch.expiry_date = expiry_date
+                 if mrp: batch.mrp = mrp
+                 batch.sale_price = mrp # Update sale price to MRP
+                 batch.save()
+            
+            data['batch'] = batch
+
         return super().to_internal_value(data)
 
 class PurchaseBillSerializer(serializers.ModelSerializer):
@@ -76,7 +111,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         model = PurchaseBill
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date', 'vendor_name', 'vendor_address', 'vendor_gstin',
-            'gst_treatment', 'journal', 'total_amount', 'created_by', 'created_at', 'items'
+            'gst_treatment', 'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items'
         ]
 
     def create(self, validated_data):
@@ -107,14 +142,16 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     quantity = serializers.IntegerField(min_value=1)
+    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2)
+    batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'product', 'product_detail', 'hsn_sac_code', 'unit', 'quantity', 'price', 'discount', 'tax', 'amount']
+        fields = ['id', 'product', 'product_detail', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
 
     def get_product_detail(self, obj):
         return {
@@ -209,6 +246,29 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         if data.get('tax') is None:
             data['tax'] = 0
             
+        # FEFO Logic: Auto-select batch if not provided
+        if 'batch' not in data and product:
+            print(f"DEBUG SalesInvoiceItemSerializer: No batch provided for {product.name}, attempting FEFO selection")
+            # Find batch with earliest expiry that has stock > 0
+            # Note: We filter by is_active=True to properly exclude deleted/blocked batches
+            best_batch = ProductBatch.objects.filter(
+                product=product, 
+                is_active=True,
+                stock_points__quantity__gt=0
+            ).order_by('expiry_date').first()
+            
+            if best_batch:
+                print(f"DEBUG SalesInvoiceItemSerializer: FEFO selected batch {best_batch.batch_number} (Exp: {best_batch.expiry_date})")
+                data['batch'] = best_batch.id
+            else:
+                 # Fallback: Try to find ANY active batch, even if stock is 0 (to record the sale against something)
+                 # Or just leave it null (Global stock)
+                 print("DEBUG SalesInvoiceItemSerializer: No suitable batch found with stock. Checking any active batch.")
+                 any_batch = ProductBatch.objects.filter(product=product, is_active=True).order_by('expiry_date').first()
+                 if any_batch:
+                     data['batch'] = any_batch.id
+                     print(f"DEBUG SalesInvoiceItemSerializer: Fallback selected batch {any_batch.batch_number}")
+
         print("DEBUG SalesInvoiceItemSerializer: Product processed successfully, calling super()")
         print("DEBUG SalesInvoiceItemSerializer: Final data before super():", data)
         try:
@@ -235,8 +295,40 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
-                  'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'gst_treatment',
-                  'journal', 'total_amount', 'created_by', 'created_at', 'items']
+                  'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
+                  'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items']
+
+    def validate(self, data):
+        """
+        Check for Credit Limit violations.
+        """
+        request = self.context.get('request')
+        user = request.user if request else None
+        
+        # We need to resolve the customer to check their limit
+        # This is tricky because the customer might be created dynamically in to_internal_value
+        # But global validation runs after to_internal_value
+        
+        # In a real scenario, we might want to check the email in data against existing customers
+        customer_email = data.get('customer_email')
+        total_amount = data.get('total_amount', 0)
+        
+        if customer_email and user:
+            try:
+                customer = Customer.objects.get(email=customer_email, created_by=user)
+                if not customer.allow_credit:
+                    # Strict Check: If allow_credit is False, STRICTLY enforce the limit
+                    new_balance = customer.current_balance + total_amount
+                    if new_balance > customer.credit_limit:
+                        raise serializers.ValidationError(
+                            f"Credit Limit Exceeded! Current Balance: {customer.current_balance}, Limit: {customer.credit_limit}. "
+                            f"This invoice would take balance to {new_balance}."
+                        )
+            except Customer.DoesNotExist:
+                # New customer usually starts with 0 balance, so likely safe unless default limit is 0
+                pass
+                
+        return data
 
     def to_internal_value(self, data):
         print("DEBUG SalesInvoiceSerializer: Processing data:", data)
@@ -334,6 +426,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         validated_data['customer'] = customer_obj
         print("DEBUG SalesInvoiceSerializer: Added customer object:", customer_obj)
         
+        # Smart Tax: Auto-set Place of Supply if not provided
+        if not validated_data.get('place_of_supply') and customer_obj and customer_obj.state:
+            validated_data['place_of_supply'] = customer_obj.state
+            print(f"DEBUG SalesInvoiceSerializer: Auto-set POS to {customer_obj.state}")
+            
         try:
             sales_invoice = SalesInvoice.objects.create(**validated_data)
             print("DEBUG SalesInvoiceSerializer: Sales invoice created:", sales_invoice.id)
@@ -374,7 +471,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
         fields = [
-            'id', 'name', 'email', 'phone', 'gstin', 'address', 
+            'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
+            'credit_limit', 'current_balance', 'allow_credit',
             'created_by', 'created_at'
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
@@ -389,6 +487,22 @@ class CustomerSerializer(serializers.ModelSerializer):
             if queryset.exists():
                 raise serializers.ValidationError("A customer with this email already exists.")
         return value
+
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        return super().create(validated_data)
+
+class PaymentSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'customer', 'customer_name', 'date', 'amount', 
+            'mode', 'reference', 'notes', 'created_by', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at']
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user

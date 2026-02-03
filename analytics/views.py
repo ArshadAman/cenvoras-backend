@@ -3,7 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from billing.models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem
-from inventory.models import Product
+from inventory.models import Product, StockPoint
 from django.db.models import Sum, F
 from datetime import datetime
 import csv
@@ -333,6 +333,10 @@ def dashboard_summary(request):
     """
     Returns a summary of sales, purchases, inventory, and GST.
     """
+    from django.db.models.functions import TruncMonth
+    from collections import defaultdict
+    from decimal import Decimal
+    
     # Sales
     sales_qs = SalesInvoice.objects.filter(created_by=request.user)
     total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
@@ -348,19 +352,293 @@ def dashboard_summary(request):
     )['value'] or 0
     low_stock_count = products.filter(stock__lte=F('low_stock_alert')).count()
 
-    # GST
+    # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
+    # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
     sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=request.user)
-    gst_collected = sales_items.aggregate(total_gst=Sum('tax'))['total_gst'] or 0
+    gst_collected = Decimal('0.00')
+    for item in sales_items:
+        qty = Decimal(item.quantity)
+        price = Decimal(item.price)
+        discount_pct = Decimal(item.discount or 0)
+        tax_rate = Decimal(item.tax or 0)
+        
+        line_value = qty * price
+        discount_amount = (line_value * discount_pct) / Decimal('100')
+        taxable_value = line_value - discount_amount
+        tax_amount = (taxable_value * tax_rate) / Decimal('100')
+        gst_collected += tax_amount
+
     purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=request.user)
-    gst_paid = purchase_items.aggregate(total_gst=Sum('tax'))['total_gst'] or 0
+    gst_paid = Decimal('0.00')
+    for item in purchase_items:
+        qty = Decimal(item.quantity)
+        price = Decimal(item.price)
+        discount_pct = Decimal(item.discount or 0)
+        tax_rate = Decimal(item.tax or 0)
+        
+        line_value = qty * price
+        discount_amount = (line_value * discount_pct) / Decimal('100')
+        taxable_value = line_value - discount_amount
+        tax_amount = (taxable_value * tax_rate) / Decimal('100')
+        gst_paid += tax_amount
+
     gst_payable = gst_collected - gst_paid
+
+    # Sales vs Purchases Chart Data (Monthly aggregation)
+    sales_by_month = sales_qs.annotate(
+        month=TruncMonth('invoice_date')
+    ).values('month').annotate(
+        total=Sum('total_amount')
+    ).order_by('month')
+
+    purchases_by_month = purchase_qs.annotate(
+        month=TruncMonth('bill_date')
+    ).values('month').annotate(
+        total=Sum('total_amount')
+    ).order_by('month')
+
+    # Merge into chart format
+    month_data = defaultdict(lambda: {'Sales': 0, 'Purchases': 0})
+    for entry in sales_by_month:
+        if entry['month']:
+            month_name = entry['month'].strftime('%b %Y')
+            month_data[month_name]['Sales'] = float(entry['total'] or 0)
+    for entry in purchases_by_month:
+        if entry['month']:
+            month_name = entry['month'].strftime('%b %Y')
+            month_data[month_name]['Purchases'] = float(entry['total'] or 0)
+    
+    # Convert to list for chart
+    sales_vs_purchases = [
+        {'name': month, 'Sales': data['Sales'], 'Purchases': data['Purchases']}
+        for month, data in sorted(month_data.items())
+    ]
 
     return Response({
         'total_sales': total_sales,
         'total_purchases': total_purchases,
         'total_inventory_value': total_inventory_value,
         'low_stock_count': low_stock_count,
-        'gst_collected': gst_collected,
-        'gst_paid': gst_paid,
-        'gst_payable': gst_payable,
+        'gst_collected': float(gst_collected),
+        'gst_paid': float(gst_paid),
+        'gst_payable': float(gst_payable),
+        'sales_vs_purchases': sales_vs_purchases,
     })
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('date_from', openapi.IN_QUERY, description="Start date (YYYY-MM-DD)", type=openapi.TYPE_STRING, required=True),
+        openapi.Parameter('date_to', openapi.IN_QUERY, description="End date (YYYY-MM-DD)", type=openapi.TYPE_STRING, required=True),
+        openapi.Parameter('export', openapi.IN_QUERY, description="Set to 'json' or 'csv'", type=openapi.TYPE_STRING),
+    ],
+    responses={200: openapi.Response(
+        description="GSTR-1 Report Data",
+        examples={
+            "application/json": [
+                {
+                    "gstin": "27ABCDE1234F1Z5",
+                    "receiver_name": "Customer X",
+                    "invoice_number": "INV-001",
+                    "invoice_date": "2023-01-01",
+                    "invoice_value": 1180.00,
+                    "place_of_supply": "27-Maharashtra",
+                    "invoice_type": "B2B",
+                    "rate": 18.0,
+                    "taxable_value": 1000.00,
+                    "igst": 0,
+                    "cgst": 90.00,
+                    "sgst": 90.00,
+                    "cess": 0
+                }
+            ]
+        }
+    )}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def gstr1_report(request):
+    """
+    Returns data for GSTR-1 filing (B2B, B2C Large, B2C Small).
+    Aggregates data by Invoice and Tax Rate.
+    """
+    date_from = request.query_params.get('date_from')
+    date_to = request.query_params.get('date_to')
+    export = request.query_params.get('export', 'json')
+
+    if not date_from or not date_to:
+        return Response({"error": "date_from and date_to are required"}, status=400)
+
+    # Fetch User State (Place of Supply Origin)
+    user_state_code = request.user.state
+    if not user_state_code:
+        # Default or Error? For now handle gracefully.
+        user_state_code = "" 
+
+    invoices = SalesInvoice.objects.filter(
+        created_by=request.user,
+        invoice_date__gte=date_from,
+        invoice_date__lte=date_to
+    ).prefetch_related('items', 'customer')
+
+    report_data = []
+
+    for inv in invoices:
+        customer = inv.customer
+        is_b2b = bool(customer and customer.gstin)
+        # Determine Place of Supply
+        pos = customer.state if customer and customer.state else user_state_code
+        is_inter_state = pos != user_state_code
+
+        # Invoice Type
+        if is_b2b:
+            inv_type = "B2B"
+        elif inv.total_amount > 250000 and is_inter_state:
+            inv_type = "B2CL" # B2C Large
+        else:
+            inv_type = "B2CS" # B2C Small
+
+        # Group items by Tax Rate
+        tax_groups = {} # { 18.0: { 'taxable': 0, 'tax_amt': 0 } }
+        
+        for item in inv.items.all():
+            qty = item.quantity # Ignore free_quantity for tax val, usually
+            price = float(item.price)
+            discount_percent = float(item.discount)
+            tax_rate = float(item.tax)
+            
+            # Line Taxable Value
+            line_val = qty * price
+            discount_amount = (line_val * discount_percent) / 100.0
+            taxable_val = line_val - discount_amount
+            
+            # Tax Amount
+            tax_amt = (taxable_val * tax_rate) / 100.0
+
+            if tax_rate not in tax_groups:
+                tax_groups[tax_rate] = {'taxable': 0.0, 'tax_amt': 0.0}
+            
+            tax_groups[tax_rate]['taxable'] += taxable_val
+            tax_groups[tax_rate]['tax_amt'] += tax_amt
+
+        # Create rows for report
+        for rate, vals in tax_groups.items():
+            igst = 0.0
+            cgst = 0.0
+            sgst = 0.0
+            
+            if is_inter_state:
+                igst = vals['tax_amt']
+            else:
+                cgst = vals['tax_amt'] / 2.0
+                sgst = vals['tax_amt'] / 2.0
+
+            row = {
+                "gstin": customer.gstin if (customer and customer.gstin) else "",
+                "receiver_name": inv.customer_name or (customer.name if customer else "Unknown"),
+                "invoice_number": inv.invoice_number,
+                "invoice_date": inv.invoice_date,
+                "invoice_value": float(inv.total_amount),
+                "place_of_supply": pos,
+                "invoice_type": inv_type,
+                "rate": rate,
+                "taxable_value": round(vals['taxable'], 2),
+                "igst": round(igst, 2),
+                "cgst": round(cgst, 2),
+                "sgst": round(sgst, 2),
+                "cess": 0 # Placeholder
+            }
+            report_data.append(row)
+
+    if export == 'csv':
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="gstr1_report.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'GSTIN/UIN', 'Receiver Name', 'Invoice Number', 'Invoice Date', 
+            'Invoice Value', 'Place Of Supply', 'Invoice Type', 
+            'Rate (%)', 'Taxable Value', 'Integrated Tax', 'Central Tax', 'State/UT Tax', 'Cess'
+        ])
+        
+        for r in report_data:
+            writer.writerow([
+                 r['gstin'], r['receiver_name'], r['invoice_number'], r['invoice_date'],
+                 r['invoice_value'], r['place_of_supply'], r['invoice_type'],
+                 r['rate'], r['taxable_value'], r['igst'], r['cgst'], r['sgst'], r['cess']
+            ])
+        return response
+
+    return Response(report_data)
+
+
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('export', openapi.IN_QUERY, description="Set to 'csv' for CSV export", type=openapi.TYPE_STRING),
+    ],
+    responses={200: openapi.Response(
+        description="Detailed Stock Summary (Batch-wise)",
+        examples={
+            "application/json": [
+                {
+                    "product_name": "Paracetamol 500mg",
+                    "batch_number": "B001",
+                    "expiry_date": "2025-12-31",
+                    "quantity": 100,
+                    "unit": "box",
+                    "mrp": 50.0,
+                    "value": 4000.0
+                }
+            ]
+        }
+    )}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def stock_summary_report(request):
+    """
+    Returns detailed batch-wise stock summary.
+    This is the 'Closing Stock' report.
+    """
+    export = request.query_params.get('export', 'json')
+    
+    stock_points = StockPoint.objects.filter(
+        product__created_by=request.user,
+        quantity__gt=0
+    ).select_related('product', 'batch', 'warehouse').order_by('product__name', 'batch__expiry_date')
+    
+    report_data = []
+    
+    for sp in stock_points:
+        cost_price = float(sp.product.purchase_price) if sp.product.purchase_price else 0.0
+        
+        value = sp.quantity * cost_price
+        
+        data = {
+            "product_name": sp.product.name,
+            "batch_number": sp.batch.batch_number if sp.batch else "NA",
+            "expiry_date": sp.batch.expiry_date if sp.batch else None,
+            "warehouse": sp.warehouse.name if sp.warehouse else "Main",
+            "quantity": sp.quantity,
+            "unit": sp.product.unit,
+            "cost_rate": cost_price,
+            "stock_value": round(value, 2)
+        }
+        report_data.append(data)
+        
+    if export == 'csv':
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="stock_summary.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'Product Name', 'Batch No', 'Expiry Date', 'Warehouse', 
+            'Quantity', 'Unit', 'Cost Rate', 'Stock Value'
+        ])
+        
+        for r in report_data:
+            writer.writerow([
+                 r['product_name'], r['batch_number'], r['expiry_date'], r['warehouse'],
+                 r['quantity'], r['unit'], r['cost_rate'], r['stock_value']
+            ])
+        return response
+
+    return Response(report_data)

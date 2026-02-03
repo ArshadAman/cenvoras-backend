@@ -19,6 +19,15 @@ class User(AbstractUser):
     gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional)")
     business_address = models.TextField(blank=True, null=True, help_text="Complete business address for invoices")
     
+    from cenvoras.constants import IndianStates
+    state = models.CharField(
+        max_length=2, 
+        choices=IndianStates.choices, 
+        blank=True, 
+        null=True, 
+        help_text="State for tax calculation (Place of Supply)"
+    )
+    
     # System fields
     subscription_status = models.CharField(
         max_length=20, 
@@ -56,3 +65,18 @@ class User(AbstractUser):
         if all(required_fields):
             self.profile_completed = True
             self.save(update_fields=['profile_completed'])
+
+class ActionLog(models.Model):
+    """
+    Audit Trail for critical actions (Enterprise Requirement)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    action = models.CharField(max_length=50) # CREATE, UPDATE, DELETE
+    model_name = models.CharField(max_length=100)
+    object_id = models.CharField(max_length=100)
+    details = models.JSONField(default=dict)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user} - {self.action} {self.model_name} at {self.timestamp}"

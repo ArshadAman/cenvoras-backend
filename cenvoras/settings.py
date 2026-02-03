@@ -76,12 +76,19 @@ WSGI_APPLICATION = 'cenvoras.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
+import os
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'cenvoras_db'),
+        'USER': os.environ.get('POSTGRES_USER', 'cenvoras_user'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
+
 
 
 # Password validation

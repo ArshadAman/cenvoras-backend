@@ -7,7 +7,7 @@ from rest_framework.throttling import AnonRateThrottle
 from django.db import IntegrityError, transaction
 from .serializers import (
     QuickSignupSerializer, ProfileSetupSerializer, UserProfileSerializer, 
-    CustomTokenObtainPairSerializer
+    ProfileUpdateSerializer, CustomTokenObtainPairSerializer
 )
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.utils import timezone
@@ -118,31 +118,84 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 @swagger_auto_schema(
     method='get',
     responses={200: openapi.Response(
-        description="User profile with business details and subscription info",
+        description="Complete user profile with business details and subscription info",
         examples={
             "application/json": {
-                "id": "uuid",
-                "email": "user@example.com",
-                "business_name": "My Shop",
-                "phone": "9876543210",
-                "gstin": "29ABCDE1234F1Z5",
-                "business_address": "123 Main St, City",
-                "subscription_status": "trial",
-                "trial_ends_at": "2025-11-01T10:00:00Z",
-                "profile_completed": True,
-                "can_generate_gst_invoice": True,
-                "is_trial_active": True
+                "success": True,
+                "profile": {
+                    "id": "uuid",
+                    "email": "user@example.com",
+                    "business_name": "My Shop",
+                    "phone": "9876543210",
+                    "first_name": "John",
+                    "last_name": "Doe",
+                    "gstin": "29ABCDE1234F1Z5",
+                    "business_address": "123 Main St, City",
+                    "subscription_status": "trial",
+                    "trial_ends_at": "2025-11-01T10:00:00Z",
+                    "profile_completed": True,
+                    "can_generate_gst_invoice": True,
+                    "is_trial_active": True
+                },
+                "setup_progress": {
+                    "signup_completed": True,
+                    "profile_completed": True,
+                    "can_create_invoices": True,
+                    "can_create_gst_invoices": True,
+                    "completion_percentage": 100,
+                    "next_steps": []
+                },
+                "account_stats": {
+                    "days_since_signup": 5,
+                    "trial_days_remaining": 25,
+                    "total_invoices": 0,
+                    "total_customers": 0
+                }
             }
         }
     )}
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def profile_view(request):
-    """Get complete user profile with business and subscription details"""
+def view_profile(request):
+    """
+    👤 VIEW PROFILE - Get complete user profile with business and subscription details
+    
+    Returns comprehensive profile information including:
+    - Personal & business details
+    - Subscription status & trial info
+    - Profile completion status
+    - Account capabilities
+    - Usage statistics
+    """
     user = request.user
     user.last_login_at = timezone.now()
     user.save(update_fields=['last_login_at'])
+    
+    # Calculate profile completion percentage
+    total_fields = 7  # email, phone, business_name, first_name, last_name, business_address, gstin
+    completed_fields = 0
+    
+    if user.email: completed_fields += 1
+    if user.phone: completed_fields += 1
+    if user.business_name: completed_fields += 1
+    if user.first_name: completed_fields += 1
+    if user.last_name: completed_fields += 1
+    if user.business_address: completed_fields += 1
+    if user.gstin: completed_fields += 1
+    
+    completion_percentage = int((completed_fields / total_fields) * 100)
+    
+    # Calculate account stats
+    days_since_signup = (timezone.now() - user.date_joined).days
+    trial_days_remaining = 0
+    if user.trial_ends_at and user.is_trial_active:
+        trial_days_remaining = (user.trial_ends_at - timezone.now()).days
+    
+    # Get usage stats (you can expand this)
+    from billing.models import SalesInvoice, Customer
+    total_invoices = SalesInvoice.objects.filter(created_by=user).count()
+    total_customers = Customer.objects.filter(created_by=user).count()
     
     serializer = UserProfileSerializer(user)
     return Response({
@@ -153,9 +206,139 @@ def profile_view(request):
             'profile_completed': user.profile_completed,
             'can_create_invoices': bool(user.business_name),
             'can_create_gst_invoices': user.can_generate_gst_invoice,
+            'completion_percentage': completion_percentage,
             'next_steps': _get_profile_next_steps(user)
+        },
+        'account_stats': {
+            'days_since_signup': days_since_signup,
+            'trial_days_remaining': max(0, trial_days_remaining),
+            'total_invoices': total_invoices,
+            'total_customers': total_customers
         }
     })
+
+@swagger_auto_schema(
+    method='put',
+    request_body=ProfileUpdateSerializer,
+    responses={200: openapi.Response(
+        description="Profile updated successfully",
+        examples={
+            "application/json": {
+                "success": True,
+                "message": "Profile updated successfully",
+                "profile": {
+                    "id": "uuid",
+                    "email": "updated@example.com",
+                    "business_name": "Updated Shop Name",
+                    "phone": "9876543210",
+                    "first_name": "John",
+                    "last_name": "Doe",
+                    "gstin": "29ABCDE1234F1Z5",
+                    "business_address": "123 Updated St, City"
+                },
+                "changes_made": ["business_name", "first_name"],
+                "capabilities": {
+                    "can_create_basic_invoices": True,
+                    "can_create_gst_invoices": True,
+                    "profile_completed": True
+                }
+            }
+        }
+    ), 400: openapi.Response(
+        description="Validation error",
+        examples={
+            "application/json": {
+                "success": False,
+                "errors": {
+                    "email": ["A user with this email already exists"],
+                    "current_password": ["Current password is incorrect"]
+                }
+            }
+        }
+    )}
+)
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def update_profile(request):
+    """
+    ✏️ UPDATE PROFILE - Comprehensive profile update with validation
+    
+    Allows updating:
+    - Personal info (first_name, last_name)
+    - Contact info (phone, email - requires current password)
+    - Business details (business_name, business_address, gstin)
+    - Password (requires current password + confirmation)
+    
+    Security features:
+    - Current password required for email/password changes
+    - Email uniqueness validation
+    - Phone uniqueness validation
+    - Password confirmation matching
+    """
+    user = request.user
+    
+    # Track what fields are being changed
+    original_data = {
+        'email': user.email,
+        'phone': user.phone,
+        'business_name': user.business_name,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'business_address': user.business_address,
+        'gstin': user.gstin
+    }
+    
+    serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method == 'PATCH'))
+    
+    if serializer.is_valid():
+        updated_user = serializer.save()
+        
+        # Determine what changed
+        changes_made = []
+        new_data = {
+            'email': updated_user.email,
+            'phone': updated_user.phone,
+            'business_name': updated_user.business_name,
+            'first_name': updated_user.first_name,
+            'last_name': updated_user.last_name,
+            'business_address': updated_user.business_address,
+            'gstin': updated_user.gstin
+        }
+        
+        for field, old_value in original_data.items():
+            if old_value != new_data[field]:
+                changes_made.append(field)
+        
+        # Check for password change
+        if 'new_password' in request.data:
+            changes_made.append('password')
+        
+        # Determine new capabilities
+        can_create_basic_invoices = bool(updated_user.business_name)
+        can_create_gst_invoices = updated_user.can_generate_gst_invoice
+        
+        # Generate success message
+        if changes_made:
+            message = f"Profile updated successfully. Changed: {', '.join(changes_made)}"
+        else:
+            message = "No changes were made to your profile"
+        
+        return Response({
+            'success': True,
+            'message': message,
+            'profile': UserProfileSerializer(updated_user).data,
+            'changes_made': changes_made,
+            'capabilities': {
+                'can_create_basic_invoices': can_create_basic_invoices,
+                'can_create_gst_invoices': can_create_gst_invoices,
+                'profile_completed': updated_user.profile_completed
+            }
+        })
+    
+    return Response({
+        'success': False,
+        'errors': serializer.errors
+    }, status=status.HTTP_400_BAD_REQUEST)
 
 @swagger_auto_schema(
     method='put',

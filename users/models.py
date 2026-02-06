@@ -36,6 +36,7 @@ class User(AbstractUser):
         help_text="Current subscription status"
     )
     trial_ends_at = models.DateTimeField(null=True, blank=True, help_text="When trial period ends")
+    is_lifetime_free = models.BooleanField(default=False, help_text="Account is permanently free (VIP/Friends)")
     last_login_at = models.DateTimeField(null=True, blank=True, help_text="Last login timestamp")
     
     # Profile completion tracking
@@ -47,12 +48,25 @@ class User(AbstractUser):
     @property
     def is_trial_active(self):
         """Check if user is in active trial period"""
+        if self.is_lifetime_free:
+            return False  # Not in trial, they're free forever
         if self.subscription_status != SubscriptionStatus.TRIAL:
             return False
         if not self.trial_ends_at:
             return True  # No expiry set yet
         from django.utils import timezone
         return timezone.now() < self.trial_ends_at
+    
+    @property
+    def has_active_subscription(self):
+        """Check if user has access to full features (paid, trial, or lifetime free)"""
+        if self.is_lifetime_free:
+            return True  # VIP - always has access
+        if self.subscription_status == SubscriptionStatus.ACTIVE:
+            return True
+        if self.is_trial_active:
+            return True
+        return False
     
     @property
     def can_generate_gst_invoice(self):

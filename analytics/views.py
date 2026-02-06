@@ -642,3 +642,87 @@ def stock_summary_report(request):
         return response
 
     return Response(report_data)
+
+
+# ═══════════════════════════════════════════════════════════════
+# SMART DASHBOARD - Intelligent Business Assistant
+# ═══════════════════════════════════════════════════════════════
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get intelligent dashboard with business insights, warnings, and actionable metrics",
+    responses={200: openapi.Response(
+        description="Smart dashboard data",
+        examples={
+            "application/json": {
+                "pulse": {"sales_today": 15000, "net_profit_today": 3500},
+                "warnings": [{"type": "low_stock", "severity": "yellow", "title": "Low Stock: Product X"}],
+                "insights": {"top_5_products": []},
+                "gst_shield": {"turnover_percent": 45, "days_until_due": 12},
+                "health_status": {"status": "green", "emoji": "🟢"}
+            }
+        }
+    )}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def smart_dashboard(request):
+    """
+    Smart Dashboard API - Returns intelligent business metrics
+    
+    Includes:
+    - Pulse: Today's key metrics (sales, profit, udhaar)
+    - Warnings: Actionable alerts (low stock, payment due, dead stock)
+    - Insights: Business intelligence (bestsellers, slow movers, margins)
+    - GST Shield: Compliance tracking (turnover, due dates, payable)
+    - Health Status: Overall business health indicator (🟢🟡🔴)
+    """
+    from .smart_dashboard import SmartDashboard
+    
+    dashboard = SmartDashboard(request.user)
+    return Response(dashboard.get_full_dashboard())
+
+
+# ═══════════════════════════════════════════════════════════════
+# ML PREDICTIONS - Machine Learning Powered Insights
+# ═══════════════════════════════════════════════════════════════
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get ML-powered predictions: Sales Forecast and Restock Predictions",
+    responses={200: openapi.Response(
+        description="ML Predictions",
+        examples={
+            "application/json": {
+                "sales_forecast": {
+                    "forecast": [{"date": "2026-02-05", "predicted_sales": 15000}],
+                    "predicted_total": 105000,
+                    "trend": "growing"
+                },
+                "restock_predictions": {
+                    "predictions": [{"product_name": "Laptop Pro", "days_to_reorder": 3}]
+                }
+            }
+        }
+    )}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ml_predictions(request):
+    """
+    ML Predictions API - Sales Forecasting and Restock Predictions
+    
+    Sales Forecast:
+    - 7-day sales prediction using Linear Regression
+    - Trend analysis (growing/stable/declining)
+    - Confidence level based on data variance
+    
+    Restock Predictions:
+    - Days until stockout for each product
+    - Suggested reorder dates
+    - Urgency levels (critical/high/medium/low)
+    """
+    from .ml_predictions import MLPredictions
+    
+    ml = MLPredictions(request.user)
+    return Response(ml.get_all_predictions())

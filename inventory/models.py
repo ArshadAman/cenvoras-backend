@@ -129,4 +129,8 @@ def product_recalculate_stock(self):
     self.stock = total
     self.save(update_fields=['stock'])
 
+
 Product.recalculate_stock = product_recalculate_stock
+
+# Import Sidecar Models to ensure they are registered
+from .models_sidecar import ProductMeta, ProductBatchMeta, BillOfMaterial, StockJournal, StockJournalItem

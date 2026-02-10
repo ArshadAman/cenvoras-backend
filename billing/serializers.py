@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from rest_framework import serializers
 from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Payment
+from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem, InvoiceSettings
+from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 import uuid
 
@@ -290,13 +292,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(max_length=100)
     invoice_date = serializers.DateField()
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    meta = TransactionMetaSerializer(required=False)
 
     class Meta:
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items']
+                  'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items', 'meta']
 
     def validate(self, data):
         """
@@ -441,6 +444,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
             
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
+            
+            # Create Transaction Meta
+            meta_data = validated_data.pop('meta', None)
+            if meta_data:
+                TransactionMeta.objects.create(invoice=sales_invoice, **meta_data)
+            else:
+                TransactionMeta.objects.create(invoice=sales_invoice)
+                
             return sales_invoice
         except Exception as e:
             print("DEBUG SalesInvoiceSerializer: Error in create method:", str(e))
@@ -461,6 +472,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         for item_data in items_data:
             SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
         
+        # Update Meta
+        meta_data = validated_data.pop('meta', None)
+        if meta_data:
+            meta, created = TransactionMeta.objects.get_or_create(invoice=instance)
+            for attr, value in meta_data.items():
+                setattr(meta, attr, value)
+            meta.save()
+
         return instance
     
 

@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from inventory.models import Product
-from billing.models import Customer, SalesInvoice, SalesInvoiceItem, Payment, PaymentMode
+from billing.models import Customer, SalesInvoice, SalesInvoiceItem, Payment, PaymentMode, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem
 from ledger.models import Account, AccountType
 import random
 from datetime import timedelta, date
@@ -11,8 +11,6 @@ from decimal import Decimal
 User = get_user_model()
 
 class Command(BaseCommand):
-    help = 'Seeds the database with realistic SME (Small Business) test data'
-
     help = 'Seeds the database with realistic SME (Small Business) test data'
 
     def handle(self, *args, **kwargs):
@@ -24,6 +22,10 @@ class Command(BaseCommand):
         # Delete transactions
         SalesInvoiceItem.objects.all().delete()
         SalesInvoice.objects.all().delete()
+        SalesOrderItem.objects.all().delete()
+        SalesOrder.objects.all().delete()
+        DeliveryChallanItem.objects.all().delete()
+        DeliveryChallan.objects.all().delete()
         Payment.objects.all().delete()
         
         from billing.models import PurchaseBill, PurchaseBillItem
@@ -99,6 +101,8 @@ class Command(BaseCommand):
         
         total_purchases = 0
         total_invoices = 0
+        total_orders = 0
+        total_challans = 0
         
         for i in range(90, -1, -1): # 90 days history
             day = today - timedelta(days=i)
@@ -148,6 +152,88 @@ class Command(BaseCommand):
             # --- B. SALES (Selling from stock) ---
             if random.random() < 0.05: continue # 5% closed days
             
+            
+            # --- C. SALES ORDERS (New Feature) ---
+            if random.random() < 0.2: # 20% chance of an order coming in
+                cust = random.choice(db_customers)
+                order_total = 0
+                order_items = []
+                
+                for _ in range(random.randint(1, 3)):
+                    prod = random.choice(db_products)
+                    qty = random.randint(5, 20) # Bulk order
+                    price = prod.sale_price
+                    amount = price * qty
+                    
+                    order_items.append({
+                        'product': prod,
+                        'quantity': qty,
+                        'price': price,
+                        'amount': amount
+                    })
+                    order_total += amount
+                
+                if order_items:
+                    so = SalesOrder.objects.create(
+                        order_number=f"SO-{day.strftime('%Y%m%d')}-{random.randint(100, 999)}",
+                        date=day,
+                        customer=cust,
+                        total_amount=order_total,
+                        stage=random.choice(['new', 'packed', 'shipped', 'completed']),
+                        created_by=user
+                    )
+                    
+                    for item in order_items:
+                        SalesOrderItem.objects.create(
+                            order=so,
+                            **item
+                        )
+                    total_orders += 1
+
+            
+            # --- D. DELIVERY CHALLANS (New Feature) ---
+            if random.random() < 0.15: # 15% chance of a delivery challan
+                 cust = random.choice(db_customers)
+                 challan_items_data = []
+                 
+                 for _ in range(random.randint(1, 4)):
+                    prod = random.choice(db_products)
+                    # Check stock for challan too, as it reduces stock
+                    prod.refresh_from_db()
+                    if prod.stock <= 5: continue
+                    
+                    qty = random.randint(2, 10)
+                    if prod.stock < qty: qty = prod.stock
+                    
+                    challan_items_data.append({
+                        'product': prod,
+                        'quantity': qty
+                    })
+                 
+                 if challan_items_data:
+                     dc = DeliveryChallan.objects.create(
+                        challan_number=f"DC-{day.strftime('%Y%m%d')}-{random.randint(100, 999)}",
+                        date=day,
+                        customer=cust,
+                        is_billed=random.choice([True, False]),
+                        created_by=user
+                     )
+                     
+                     for item in challan_items_data:
+                         DeliveryChallanItem.objects.create(
+                             challan=dc,
+                             **item
+                         )
+                         # Note: Stock reduction logic should be in models/signals. 
+                         # If not implemented there, we might need to manually reduce stock here for realism.
+                         # Assuming signal or manual reduction:
+                         item['product'].stock -= item['quantity']
+                         item['product'].save()
+                         
+                     total_challans += 1
+
+
+            # --- E. INVOICES (Regular Sales) ---
             num_sales = random.randint(5, 15) if is_weekend else random.randint(3, 8)
             
             for _ in range(num_sales):
@@ -206,7 +292,7 @@ class Command(BaseCommand):
 
                 total_invoices += 1
                 
-                # --- C. PAYMENTS ---
+                # --- F. PAYMENTS ---
                 # 70% Cash/UPI (Immediate), 30% Credit (Udhaar)
                 payment_mode = random.choices(['immediate', 'credit'], weights=[0.7, 0.3])[0]
                 
@@ -225,4 +311,4 @@ class Command(BaseCommand):
                 
                 
         self.stdout.write(self.style.SUCCESS(f'✨ Transaction-based seed complete!'))
-        self.stdout.write(f'Bills: {total_purchases}, Invoices: {total_invoices}')
+        self.stdout.write(f'Bills: {total_purchases}, Invoices: {total_invoices}, Orders: {total_orders}, Challans: {total_challans}')

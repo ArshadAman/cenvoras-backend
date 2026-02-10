@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'subscription',
     'analytics',
     'ai_assistant',
+    'integration',
 ]
 
 MIDDLEWARE = [

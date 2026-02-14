@@ -43,6 +43,9 @@ class ProductMeta(models.Model):
     # Structure: [{"product_id": "uuid", "qty": 1}, ...]
     bundle_items = models.JSONField(default=list, blank=True, help_text="Items to auto-add when this product is billed")
     
+    # Feature 72: Barcode/QR
+    barcode = models.CharField(max_length=100, blank=True, null=True, unique=True, help_text="EAN/UPC barcode for scanning")
+    
     def __str__(self):
         return f"Meta for {self.product.name}"
 

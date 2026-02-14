@@ -6,6 +6,13 @@ class TransactionMetaSerializer(serializers.ModelSerializer):
         model = TransactionMeta
         fields = ['status', 'delivery_status', 'delivery_boy', 'tags']
 
+class PartyMetaSerializer(serializers.ModelSerializer):
+    class Meta:
+        # Import PartyMeta inside or ensure it's imported at top
+        from .models_sidecar import PartyMeta
+        model = PartyMeta
+        fields = ['loyalty_points', 'party_category', 'credit_days', 'gst_type', 'whatsapp_number']
+
 class InvoiceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = InvoiceSettings

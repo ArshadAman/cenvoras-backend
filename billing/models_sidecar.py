@@ -5,6 +5,49 @@ from .models import SalesInvoice, Customer
 from inventory.models import Product, Warehouse
 
 # =============================================================================
+# SIDECAR MODELS (Module 3 - Party & CRM Engine)
+# =============================================================================
+
+class PartyMeta(models.Model):
+    """
+    Sidecar for Customer. Stores CRM & extra financial info.
+    Ref: Features 13 (Credit Limit - in core), 28 (Loyalty), 49 (Category)
+    """
+    customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name='meta')
+    
+    # Feature 28: Loyalty Points
+    loyalty_points = models.PositiveIntegerField(default=0, help_text="Accrued loyalty points")
+    
+    # Feature 49: Party Category
+    PARTY_CATEGORY_CHOICES = [
+        ('retailer', 'Retailer'),
+        ('wholesaler', 'Wholesaler'),
+        ('distributor', 'Distributor'),
+        ('consumer', 'End Consumer'),
+    ]
+    party_category = models.CharField(
+        max_length=20, 
+        choices=PARTY_CATEGORY_CHOICES, 
+        default='consumer',
+        help_text="Classification for pricing and reporting"
+    )
+    
+    # Financials
+    credit_days = models.PositiveIntegerField(default=0, help_text="Default payment terms in days")
+    gst_type = models.CharField(
+        max_length=20, 
+        choices=[('registered', 'Registered'), ('unregistered', 'Unregistered'), ('composite', 'Composite')],
+        default='unregistered'
+    )
+    
+    # Contact
+    whatsapp_number = models.CharField(max_length=20, blank=True, null=True)
+    
+    def __str__(self):
+        return f"Meta for {self.customer.name}"
+
+
+# =============================================================================
 # SIDECAR MODELS (Module 2 - Transaction Extensions)
 # =============================================================================
 
@@ -145,3 +188,59 @@ class PurchaseIndentItem(models.Model):
     indent = models.ForeignKey(PurchaseIndent, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     required_quantity = models.PositiveIntegerField()
+
+
+# =============================================================================
+# E-WAY BILL & E-INVOICE (Stubs — requires NIC API credentials for production)
+# =============================================================================
+
+class EWayBill(models.Model):
+    """Feature 74: E-Way Bill generation stub."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.OneToOneField(SalesInvoice, on_delete=models.CASCADE, related_name='eway_bill')
+    eway_bill_number = models.CharField(max_length=50, blank=True, help_text="Generated e-way bill number")
+    
+    vehicle_number = models.CharField(max_length=20, blank=True)
+    transporter_name = models.CharField(max_length=100, blank=True)
+    transporter_id = models.CharField(max_length=20, blank=True, help_text="GSTIN of transporter")
+    distance_km = models.PositiveIntegerField(default=0)
+    
+    generated_at = models.DateTimeField(null=True, blank=True)
+    valid_until = models.DateTimeField(null=True, blank=True)
+    
+    status = models.CharField(max_length=20, default='draft', choices=[
+        ('draft', 'Draft'),
+        ('generated', 'Generated'),
+        ('cancelled', 'Cancelled'),
+    ])
+    
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"E-Way Bill: {self.eway_bill_number or 'Draft'} for {self.invoice.invoice_number}"
+
+
+class EInvoice(models.Model):
+    """Feature 75: E-Invoice (IRN) generation stub."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.OneToOneField(SalesInvoice, on_delete=models.CASCADE, related_name='e_invoice')
+    
+    irn = models.CharField(max_length=100, blank=True, help_text="Invoice Reference Number from NIC")
+    ack_number = models.CharField(max_length=50, blank=True)
+    ack_date = models.DateTimeField(null=True, blank=True)
+    
+    signed_invoice = models.JSONField(default=dict, blank=True, help_text="Signed JSON from NIC")
+    qr_code_data = models.TextField(blank=True, help_text="QR code data string")
+    
+    status = models.CharField(max_length=20, default='pending', choices=[
+        ('pending', 'Pending'),
+        ('generated', 'Generated'),
+        ('cancelled', 'Cancelled'),
+    ])
+    
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"E-Invoice IRN: {self.irn or 'Pending'} for {self.invoice.invoice_number}"

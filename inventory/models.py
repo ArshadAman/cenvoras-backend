@@ -133,4 +133,6 @@ def product_recalculate_stock(self):
 Product.recalculate_stock = product_recalculate_stock
 
 # Import Sidecar Models to ensure they are registered
+# Import Sidecar Models to ensure they are registered
 from .models_sidecar import ProductMeta, ProductBatchMeta, BillOfMaterial, StockJournal, StockJournalItem
+from .models_pricing import PriceList, PriceListItem, Scheme

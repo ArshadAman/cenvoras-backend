@@ -31,6 +31,12 @@ class Command(BaseCommand):
         from billing.models import PurchaseBill, PurchaseBillItem
         PurchaseBillItem.objects.all().delete()
         PurchaseBill.objects.all().delete()
+
+        # Delete Inventory Data
+        from inventory.models import Warehouse, ProductBatch, StockPoint
+        StockPoint.objects.all().delete()
+        ProductBatch.objects.all().delete()
+        Warehouse.objects.all().delete()
         
         # Reset Products and Customers
         Product.objects.all().update(stock=0) # Reset to 0, let purchases build it up
@@ -42,6 +48,16 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR('No user found! Create a superuser first.'))
             return
             
+        # 1.5 Create Warehouses
+        main_warehouse, _ = Warehouse.objects.get_or_create(
+            name="Main Warehouse",
+            defaults={'address': '123 Industrial Area', 'created_by': user}
+        )
+        shop_floor, _ = Warehouse.objects.get_or_create(
+            name="Shop Floor",
+            defaults={'address': 'Retail Counter', 'created_by': user}
+        )
+        
         # 2. Ensure Products Exist (SME Context)
         products_data = [
             {'name': 'Tempered Glass (Generic)', 'price': 150, 'tax': 18},
@@ -74,7 +90,26 @@ class Command(BaseCommand):
             product.tax = p_data['tax']
             product.save()
             db_products.append(product)
-            
+
+            # Create Opening Stock Batch for every product
+            batch, _ = ProductBatch.objects.get_or_create(
+                product=product,
+                batch_number="OPN-001",
+                defaults={
+                    'expiry_date': timezone.now().date() + timedelta(days=365),
+                    'mrp': product.sale_price * Decimal('1.2'),
+                    'sale_price': product.sale_price,
+                    'cost_price': product.sale_price * Decimal('0.7'),
+                }
+            )
+            # Add some stock to Main Warehouse
+            StockPoint.objects.create(
+                batch=batch,
+                warehouse=main_warehouse,
+                quantity=100
+            )
+
+
         # 3. Ensure Customers Exist
         customer_names = [
             "Raju Bhai", "Anjali Ma'am", "Vikram Mechanic", "Sharma Ji", 
@@ -83,15 +118,72 @@ class Command(BaseCommand):
         ]
         
         db_customers = []
+        categories = ['retailer', 'wholesaler', 'distributor', 'consumer']
+        
+        from billing.models_sidecar import PartyMeta
+
         for name in customer_names:
+            cat = random.choice(categories)
+            limit = random.choice([10000, 25000, 50000, 100000]) if cat != 'consumer' else 0
+            
             customer, _ = Customer.objects.get_or_create(
                 name=name,
                 created_by=user,
                 defaults={'phone': f"98765{random.randint(10000, 99999)}", 'current_balance': 0}
             )
+            
+            # Update Customer Fields
+            customer.credit_limit = limit
             customer.current_balance = 0
             customer.save()
+            
+            # Create or Update PartyMeta
+            PartyMeta.objects.update_or_create(
+                customer=customer,
+                defaults={
+                    'party_category': cat,
+                    'credit_days': 30 if cat != 'consumer' else 0,
+                    'gst_type': 'regular' if cat in ['distributor', 'wholesaler'] else 'unregistered'
+                }
+            )
+            
             db_customers.append(customer)
+
+        # 3.5 Create Price Lists and Schemes (New)
+        from inventory.models_pricing import PriceList, PriceListItem, Scheme
+        PriceList.objects.all().delete()
+        Scheme.objects.all().delete()
+        
+        today = date.today()
+        # Wholesale Price List
+        pl_wholesale = PriceList.objects.create(
+            name="Wholesale Standard",
+            party_category="wholesaler",
+            is_active=True,
+            created_by=user
+        )
+        for prod in db_products:
+            PriceListItem.objects.create(
+                price_list=pl_wholesale,
+                product=prod,
+                price=prod.sale_price * Decimal('0.85'), # 15% cheaper
+                min_qty=10
+            )
+            
+        # Retail Scheme (Buy 2 Get 1)
+        scheme_prod = db_products[0] # Tempered Glass
+        Scheme.objects.create(
+            name="Tempered Glass BOGO",
+            scheme_type="bogo",
+            start_date=today - timedelta(days=30),
+            end_date=today + timedelta(days=30),
+            product=scheme_prod,
+            free_product=scheme_prod,
+            min_qty=2,
+            free_qty=1,
+            is_active=True,
+            created_by=user
+        )
             
         # 4. Chronological Seeding Review (Purchases -> Sales)
         # We process day by day from -90 days to today.

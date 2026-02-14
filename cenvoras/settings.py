@@ -40,6 +40,8 @@ INSTALLED_APPS = [
     'analytics',
     'ai_assistant',
     'integration',
+    'reports',
+    'audit_log',
 ]
 
 MIDDLEWARE = [
@@ -51,6 +53,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'audit_log.middleware.AuditMiddleware',
 ]
 
 ROOT_URLCONF = 'cenvoras.urls'
@@ -163,3 +166,18 @@ CSRF_TRUSTED_ORIGINS = ["https://devapi.cenvora.app"]
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'
+
+# =============================================================================
+# INTEGRATION SETTINGS
+# =============================================================================
+
+# SendGrid Email (replace with real key in production)
+SENDGRID_API_KEY = 'SG.demo_key_replace_me'
+SENDGRID_FROM_EMAIL = 'noreply@cenvora.app'
+
+# WhatsApp Business API (replace with real token in production)
+WHATSAPP_API_TOKEN = 'demo_whatsapp_token'
+WHATSAPP_PHONE_ID = 'demo_phone_id'
+
+# Gemini AI (replace with real key from Google AI Studio)
+GEMINI_API_KEY = 'AIzaSyCVg4qljRqzF_2eDpJwocErDqznDL88Dwo'

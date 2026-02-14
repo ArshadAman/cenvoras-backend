@@ -1,10 +1,10 @@
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
-from .models import Product, Warehouse, StockPoint, StockTransfer
+from .models import Product, Warehouse, StockPoint, StockTransfer, ProductBatch
 from .serializers import (
     ProductSerializer, WarehouseSerializer, StockPointSerializer, 
-    StockTransferSerializer
+    StockTransferSerializer, ProductBatchSerializer
 )
 
 class ProductListCreateView(generics.ListCreateAPIView):
@@ -64,3 +64,19 @@ class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return StockTransfer.objects.filter(created_by=self.request.user)
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def batch_list(request):
+    """
+    List product batches.
+    Optional filters: ?product=UUID
+    """
+    queryset = ProductBatch.objects.filter(product__created_by=request.user)
+    
+    product_id = request.query_params.get('product')
+    if product_id:
+        queryset = queryset.filter(product__id=product_id)
+        
+    serializer = ProductBatchSerializer(queryset, many=True)
+    return Response(serializer.data)

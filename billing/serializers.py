@@ -309,28 +309,39 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         user = request.user if request else None
         
         # We need to resolve the customer to check their limit
-        # This is tricky because the customer might be created dynamically in to_internal_value
-        # But global validation runs after to_internal_value
+        # Use the customer object resolved in to_internal_value
+        customer = getattr(self, '_customer_obj', None)
         
-        # In a real scenario, we might want to check the email in data against existing customers
-        customer_email = data.get('customer_email')
+        # Fallback: Try to resolve by email if _customer_obj is missing but email is in data
+        # (This happens if to_internal_value didn't run or didn't find it, but we shouldn't rely on it)
+        if not customer:
+             customer_email = data.get('customer_email')
+             if customer_email and user:
+                 try:
+                     customer = Customer.objects.get(email=customer_email, created_by=user)
+                 except Customer.DoesNotExist:
+                     pass
+
         total_amount = data.get('total_amount', 0)
         
-        if customer_email and user:
-            try:
-                customer = Customer.objects.get(email=customer_email, created_by=user)
-                if not customer.allow_credit:
-                    # Strict Check: If allow_credit is False, STRICTLY enforce the limit
-                    new_balance = customer.current_balance + total_amount
-                    if new_balance > customer.credit_limit:
-                        raise serializers.ValidationError(
-                            f"Credit Limit Exceeded! Current Balance: {customer.current_balance}, Limit: {customer.credit_limit}. "
-                            f"This invoice would take balance to {new_balance}."
-                        )
-            except Customer.DoesNotExist:
-                # New customer usually starts with 0 balance, so likely safe unless default limit is 0
-                pass
+        if customer:
+            if not customer.allow_credit:
+                # Strict Check: If allow_credit is False, STRICTLY enforce the limit
+                # We interpret allow_credit=False as "Credit Limit is Enforced"
+                # If allow_credit=True, we might allow overriding (blocking warning vs error)
+                # For now, simplistic login:
                 
+                # Check current balance (Owes us positive) + New Bill
+                new_balance = customer.current_balance + total_amount
+                
+                # Debug print
+                print(f"DEBUG Credit Check: Customer={customer.name}, Bal={customer.current_balance}, Limit={customer.credit_limit}, New={new_balance}")
+                
+                if new_balance > customer.credit_limit:
+                    raise serializers.ValidationError(
+                        f"Credit Limit Exceeded! Current Balance: {customer.current_balance}, Limit: {customer.credit_limit}. "
+                        f"This invoice would take balance to {new_balance}."
+                    )
         return data
 
     def to_internal_value(self, data):
@@ -452,6 +463,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             else:
                 TransactionMeta.objects.create(invoice=sales_invoice)
                 
+            # Feature 28: Loyalty Points Accrual (1 Point per ₹100)
+            if customer_obj and hasattr(customer_obj, 'meta'):
+                try:
+                    points_earned = int(sales_invoice.total_amount / 100)
+                    if points_earned > 0:
+                        customer_obj.meta.loyalty_points += points_earned
+                        customer_obj.meta.save()
+                        print(f"DEBUG: Accrued {points_earned} loyalty points for {customer_obj.name}")
+                except Exception as e:
+                     print(f"DEBUG: Failed to accrue loyalty points: {e}")
+                
             return sales_invoice
         except Exception as e:
             print("DEBUG SalesInvoiceSerializer: Error in create method:", str(e))
@@ -484,15 +506,19 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     
 
 
+from .serializers_sidecar import PartyMetaSerializer
+from .models_sidecar import PartyMeta
+
 class CustomerSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    meta = PartyMetaSerializer(required=False)
     
     class Meta:
         model = Customer
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
             'credit_limit', 'current_balance', 'allow_credit',
-            'created_by', 'created_at'
+            'created_by', 'created_at', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
 
@@ -508,8 +534,34 @@ class CustomerSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        meta_data = validated_data.pop('meta', None)
         validated_data['created_by'] = self.context['request'].user
-        return super().create(validated_data)
+        
+        customer = super().create(validated_data)
+        
+        if meta_data:
+            PartyMeta.objects.create(customer=customer, **meta_data)
+        else:
+            PartyMeta.objects.create(customer=customer)
+            
+        return customer
+
+    def update(self, instance, validated_data):
+        meta_data = validated_data.pop('meta', None)
+        
+        # Update customer fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Update meta fields
+        if meta_data:
+            meta, created = PartyMeta.objects.get_or_create(customer=instance)
+            for attr, value in meta_data.items():
+                setattr(meta, attr, value)
+            meta.save()
+            
+        return instance
 
 class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)

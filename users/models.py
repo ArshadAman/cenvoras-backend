@@ -42,6 +42,15 @@ class User(AbstractUser):
     # Profile completion tracking
     profile_completed = models.BooleanField(default=False, help_text="Has user completed profile setup")
     
+    # Feature 90: Role Based Access Control
+    ROLE_CHOICES = (
+        ('admin', 'Admin'),
+        ('manager', 'Manager'),
+        ('salesman', 'Salesman'),
+        ('accountant', 'Accountant'),
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='admin', help_text="User capability role")
+    
     def __str__(self):
         return f"{self.business_name} ({self.username})" if self.business_name else self.username
     

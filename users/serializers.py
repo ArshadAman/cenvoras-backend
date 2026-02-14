@@ -178,12 +178,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
             'business_name', 'business_address', 'gstin', 'subscription_status',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
-            'is_trial_active', 'date_joined', 'last_login_at'
+            'is_trial_active', 'date_joined', 'last_login_at', 'role'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'trial_ends_at', 
             'profile_completed', 'can_generate_gst_invoice', 'is_trial_active',
-            'date_joined', 'last_login_at'
+            'date_joined', 'last_login_at', 'role'
         )
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -193,4 +193,5 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # Add custom claims if needed
         token['username'] = user.username
         token['email'] = user.email
+        token['role'] = user.role
         return token

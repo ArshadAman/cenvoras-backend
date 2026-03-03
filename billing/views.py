@@ -203,6 +203,11 @@ def purchase_bill_detail(request, pk):
 def sales_invoice_list_create(request):
     if request.method == 'GET':
         invoices = SalesInvoice.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product').order_by('-invoice_date')
+        
+        customer_id = request.GET.get('customer')
+        if customer_id:
+            invoices = invoices.filter(customer_id=customer_id)
+            
         serializer = SalesInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':

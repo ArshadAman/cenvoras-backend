@@ -9,7 +9,10 @@ from datetime import date, datetime
 import uuid
 
 # Models to exclude from logging to avoid noise/recursion
-EXCLUDED_MODELS = ['AuditLog', 'Session', 'LogEntry']
+EXCLUDED_MODELS = [
+    'AuditLog', 'Session', 'LogEntry', 'Migration', 'ContentType', 
+    'Permission', 'Group', 'Token', 'OutstandingToken', 'BlacklistedToken'
+]
 
 class AuditJSONEncoder(json.JSONEncoder):
     """

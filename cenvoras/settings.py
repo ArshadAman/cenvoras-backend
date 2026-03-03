@@ -205,5 +205,5 @@ SENDGRID_FROM_EMAIL = 'noreply@cenvora.app'
 WHATSAPP_API_TOKEN = 'demo_whatsapp_token'
 WHATSAPP_PHONE_ID = 'demo_phone_id'
 
-# Gemini AI (replace with real key from Google AI Studio)
-GEMINI_API_KEY = 'AIzaSyCVg4qljRqzF_2eDpJwocErDqznDL88Dwo'
+# Gemini AI (load from environment variables)
+GEMINI_API_KEY = os.environ.get('Gemini_Key', '')

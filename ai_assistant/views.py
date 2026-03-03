@@ -120,7 +120,11 @@ def call_gemini(question, business_context, user):
         f"LIVE DATA:\n{json.dumps(business_context, indent=2)}"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json"
+    }
 
     payload = {
         "contents": [
@@ -136,7 +140,7 @@ def call_gemini(question, business_context, user):
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
         data = response.json()
 
@@ -149,6 +153,10 @@ def call_gemini(question, business_context, user):
 
         return "Sorry, I couldn't generate a response. Please try again."
 
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP Error: {e}\nResponse: {e.response.text}"
+        logger.error(error_msg)
+        return f"⚠️ AI service unavailable. Detailed Error: {e.response.text[:200]}"
     except requests.exceptions.RequestException as e:
         logger.error(f"Gemini API error: {e}")
         return f"⚠️ AI service unavailable. Error: {str(e)[:100]}"

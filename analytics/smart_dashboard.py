@@ -179,12 +179,19 @@ class SmartDashboard:
         } for p in out_of_stock]
     
     def _get_low_stock_warnings(self):
-        """Products below low stock alert threshold"""
-        low_stock = Product.objects.filter(
+        """Products below low stock alert threshold (fallback to 10)"""
+        products = Product.objects.filter(
             created_by=self.user,
-            stock__gt=0,
-            stock__lte=F('low_stock_alert')
-        ).values('id', 'name', 'stock', 'low_stock_alert')[:5]
+            stock__gt=0
+        ).values('id', 'name', 'stock', 'low_stock_alert')
+        
+        low_stock = []
+        for p in products:
+            threshold = p['low_stock_alert'] or 10
+            if p['stock'] <= threshold:
+                low_stock.append(p)
+                if len(low_stock) >= 5:
+                    break
         
         warnings = []
         for p in low_stock:
@@ -560,10 +567,20 @@ class SmartDashboard:
     
     def get_full_dashboard(self):
         """Get complete smart dashboard data"""
+        def safe_call(func, default):
+            try:
+                return func()
+            except Exception as e:
+                import logging
+                logging.error(f"Dashboard Error in {func.__name__}: {e}")
+                return default
+
         return {
-            'pulse': self.get_pulse(),
-            'warnings': self.get_warnings(),
-            'insights': self.get_insights(),
-            'gst_shield': self.get_gst_shield(),
-            'health_status': self.get_health_status(),
+            'pulse': safe_call(self.get_pulse, {}),
+            'warnings': safe_call(self.get_warnings, []),
+            'insights': safe_call(self.get_insights, {}),
+            'gst_shield': safe_call(self.get_gst_shield, {}),
+            'health_status': safe_call(self.get_health_status, {
+                'status': 'green', 'emoji': '🟢', 'message': 'Business is running smoothly (Safe mode)'
+            }),
         }

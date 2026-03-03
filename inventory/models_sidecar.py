@@ -46,6 +46,11 @@ class ProductMeta(models.Model):
     # Feature 72: Barcode/QR
     barcode = models.CharField(max_length=100, blank=True, null=True, unique=True, help_text="EAN/UPC barcode for scanning")
     
+    # Feature 66: Returnable Packaging (Caret/Crate)
+    is_returnable_packaging = models.BooleanField(default=False, help_text="Product uses returnable crates/containers")
+    crate_qty = models.PositiveIntegerField(default=0, help_text="Number of crates/containers issued")
+    crate_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Deposit rate per crate")
+    
     def __str__(self):
         return f"Meta for {self.product.name}"
 

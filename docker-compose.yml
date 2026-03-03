@@ -3,15 +3,52 @@ version: "3.9"
 services:
   web:
     build: .
-    command: uvicorn cenvoras.asgi:application --host 0.0.0.0 --port 8000
+    command: ./entrypoint.sh
     volumes:
       - .:/app
     ports:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/1
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       - db
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  celery_worker:
+    build: .
+    command: celery -A cenvoras worker -l info --pool=gevent --concurrency=100
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/1
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - web
+
+  dozzle:
+    image: amir20/dozzle:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8080:8080"
+    environment:
+      # DOZZLE_USERNAME and DOZZLE_PASSWORD restrict logs visually via UI
+      - DOZZLE_USERNAME=admin
+      - DOZZLE_PASSWORD=cenvoras_logs
 
   db:
     image: postgres:14

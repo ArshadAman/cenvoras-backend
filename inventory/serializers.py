@@ -102,3 +102,64 @@ class StockTransferSerializer(serializers.ModelSerializer):
             StockTransferItem.objects.create(transfer=transfer, **item_data)
             
         return transfer
+
+
+# ── Price Lists & Schemes ──────────────────────────────────────
+
+from .models_pricing import PriceList, PriceListItem, Scheme
+
+class PriceListItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    class Meta:
+        model = PriceListItem
+        fields = ['id', 'product', 'product_name', 'price', 'min_qty']
+
+
+class PriceListSerializer(serializers.ModelSerializer):
+    items = PriceListItemSerializer(many=True, required=False)
+
+    class Meta:
+        model = PriceList
+        fields = ['id', 'name', 'currency', 'party_category', 'is_active', 'created_by', 'created_at', 'items']
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        validated_data['created_by'] = self.context['request'].user
+        price_list = PriceList.objects.create(**validated_data)
+        for item_data in items_data:
+            PriceListItem.objects.create(price_list=price_list, **item_data)
+        return price_list
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if items_data is not None:
+            instance.items.all().delete()
+            for item_data in items_data:
+                PriceListItem.objects.create(price_list=instance, **item_data)
+        return instance
+
+
+class SchemeSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    free_product_name = serializers.CharField(source='free_product.name', read_only=True, default=None)
+
+    class Meta:
+        model = Scheme
+        fields = [
+            'id', 'name', 'scheme_type',
+            'start_date', 'end_date', 'is_active',
+            'product', 'product_name', 'min_qty',
+            'free_product', 'free_product_name', 'free_qty',
+            'discount_amount', 'discount_percent',
+            'created_by',
+        ]
+        read_only_fields = ['id', 'created_by']
+
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        return super().create(validated_data)

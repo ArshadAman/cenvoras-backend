@@ -48,7 +48,7 @@ from drf_yasg import openapi
 @permission_classes([IsAuthenticated])
 def purchase_bill_list_create(request):
     if request.method == 'GET':
-        bills = PurchaseBill.objects.filter(created_by=request.user).order_by('-bill_date')
+        bills = PurchaseBill.objects.filter(created_by=request.user).order_by('-bill_date').prefetch_related('items__product')
         
         # Pagination
         page = int(request.GET.get('page', 1))
@@ -202,7 +202,7 @@ def purchase_bill_detail(request, pk):
 @permission_classes([IsAuthenticated])
 def sales_invoice_list_create(request):
     if request.method == 'GET':
-        invoices = SalesInvoice.objects.filter(created_by=request.user).order_by('-invoice_date')
+        invoices = SalesInvoice.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product').order_by('-invoice_date')
         serializer = SalesInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':

@@ -10,6 +10,7 @@ import csv
 from django.http import HttpResponse
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from django.views.decorators.cache import cache_page
 
 # Create your views here.
 
@@ -666,6 +667,7 @@ def stock_summary_report(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cache_page(60 * 15)  # Cache for 15 minutes in Redis
 def smart_dashboard(request):
     """
     Smart Dashboard API - Returns intelligent business metrics
@@ -708,6 +710,7 @@ def smart_dashboard(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cache_page(60 * 60 * 24)  # Cache ML predictions for 24 hours
 def ml_predictions(request):
     """
     ML Predictions API - Sales Forecasting and Restock Predictions

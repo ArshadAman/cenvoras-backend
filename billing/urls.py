@@ -7,6 +7,8 @@ from . import customer_views
 from . import payment_views
 from . import report_views
 from . import views_sidecar
+from . import gst_views
+from . import returns_views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -26,6 +28,7 @@ urlpatterns = [
     
     # Reports
     path('reports/overdue-bills/', report_views.overdue_bills_report, name='overdue_bills_report'),
+    path('reports/item-pl/', report_views.item_wise_pl_report, name='item_wise_pl_report'),
 
     # Sidecar Features (Sales Orders, Challans, Settings)
     path('sales-orders/', views_sidecar.sales_order_list_create, name='sales_order_list_create'),
@@ -36,4 +39,17 @@ urlpatterns = [
     path('delivery-challans/<uuid:pk>/', views_sidecar.delivery_challan_detail, name='delivery_challan_detail'),
     
     path('invoice-settings/', views_sidecar.invoice_settings_view, name='invoice_settings_view'),
+    
+    # GST Compliance
+    path('gst/hsn-summary/', gst_views.hsn_summary_report, name='hsn_summary_report'),
+    path('gst/tax-register/', gst_views.tax_register, name='tax_register'),
+    path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
+    path('gst/e-invoice/', gst_views.generate_einvoice, name='generate_einvoice'),
+    path('gst/e-way-bill/', gst_views.generate_eway_bill, name='generate_eway_bill'),
+    
+    # Returns (Credit Notes / Debit Notes)
+    path('credit-notes/', returns_views.credit_note_list_create, name='credit_note_list_create'),
+    path('credit-notes/<uuid:pk>/', returns_views.credit_note_detail, name='credit_note_detail'),
+    path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),
+    path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
 ]

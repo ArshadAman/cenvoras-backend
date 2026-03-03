@@ -126,3 +126,93 @@ def get_item_wise_profit(start_date, end_date):
         'total_profit': total_profit,
         'items': sorted(report, key=lambda x: x['gross_profit'], reverse=True)
     }
+
+def get_stock_ledger(product_id, start_date=None, end_date=None):
+    """
+    Generate a chronological item cardex / stock ledger for a specific product.
+    Matches all In/Out movements across bills, invoices, returns, and journals.
+    """
+    from billing.models import PurchaseBillItem, SalesInvoiceItem
+    from billing.models_returns import CreditNoteItem, DebitNoteItem
+    from inventory.models_sidecar import StockJournalItem
+    
+    transactions = []
+    
+    # Purchases (In)
+    purchases = PurchaseBillItem.objects.filter(product_id=product_id).select_related('purchase_bill', 'batch')
+    for p in purchases:
+        transactions.append({
+            'date': p.purchase_bill.bill_date,
+            'type': 'Purchase',
+            'reference': p.purchase_bill.bill_number,
+            'qty_in': p.quantity,
+            'qty_out': 0,
+            'batch': p.batch.batch_number if p.batch else None
+        })
+        
+    # Sales (Out)
+    sales = SalesInvoiceItem.objects.filter(product_id=product_id).select_related('sales_invoice', 'batch')
+    for s in sales:
+        transactions.append({
+            'date': s.sales_invoice.invoice_date,
+            'type': 'Sales',
+            'reference': s.sales_invoice.invoice_number,
+            'qty_in': 0,
+            'qty_out': s.quantity,
+            'batch': s.batch.batch_number if s.batch else None
+        })
+        
+    # Credit Notes / Sales Return (In)
+    cnotes = CreditNoteItem.objects.filter(product_id=product_id).select_related('credit_note', 'batch')
+    for c in cnotes:
+        transactions.append({
+            'date': c.credit_note.date,
+            'type': 'Sales Return',
+            'reference': c.credit_note.credit_note_number,
+            'qty_in': c.quantity,
+            'qty_out': 0,
+            'batch': c.batch.batch_number if c.batch else None
+        })
+        
+    # Debit Notes / Purchase Return (Out)
+    dnotes = DebitNoteItem.objects.filter(product_id=product_id).select_related('debit_note', 'batch')
+    for d in dnotes:
+        transactions.append({
+            'date': d.debit_note.date,
+            'type': 'Purchase Return',
+            'reference': d.debit_note.debit_note_number,
+            'qty_in': 0,
+            'qty_out': d.quantity,
+            'batch': d.batch.batch_number if d.batch else None
+        })
+        
+    # Stock Journal (In/Out depending on qty sign)
+    journals = StockJournalItem.objects.filter(product_id=product_id).select_related('journal', 'batch')
+    for j in journals:
+        transactions.append({
+            'date': j.journal.date,
+            'type': f'Stock Journal ({j.journal.adjustment_type})',
+            'reference': j.journal.voucher_no,
+            'qty_in': j.quantity if j.quantity > 0 else 0,
+            'qty_out': abs(j.quantity) if j.quantity < 0 else 0,
+            'batch': j.batch.batch_number if j.batch else None
+        })
+        
+    # Sort chronologically
+    transactions.sort(key=lambda x: x['date'])
+    
+    # Calculate running balance
+    running_balance = 0
+    for i, t in enumerate(transactions):
+        running_balance += t['qty_in']
+        running_balance -= t['qty_out']
+        t['balance'] = running_balance
+        t['id'] = i  # simple unique id for frontend mapped to index
+        
+    # Filter by date range AFTER running balance is calculated
+    if start_date:
+        transactions = [t for t in transactions if t['date'] >= start_date]
+    if end_date:
+        transactions = [t for t in transactions if t['date'] <= end_date]
+        
+    return transactions

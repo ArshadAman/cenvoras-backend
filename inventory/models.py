@@ -72,6 +72,17 @@ class ProductBatch(models.Model):
         unique_together = ['product', 'batch_number']
         ordering = ['expiry_date']  # Default to FEFO (First Expiry First Out)
 
+    def save(self, *args, **kwargs):
+        # Feature 24: Separator Batch — sanitize batch names
+        import re
+        if self.batch_number:
+            self.batch_number = self.batch_number.strip()
+            # Normalize multiple separators (---, ///, ___) to single dash
+            self.batch_number = re.sub(r'[-_/\\]{2,}', '-', self.batch_number)
+            # Remove leading/trailing separators
+            self.batch_number = self.batch_number.strip('-_/')
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.product.name} - {self.batch_number} (Exp: {self.expiry_date})"
 

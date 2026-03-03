@@ -17,6 +17,7 @@ from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
 from django.core.mail import send_mail
 from django.conf import settings
+from .tasks import send_async_email
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
@@ -450,12 +451,14 @@ def password_reset_request_view(request):
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
         reset_link = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
-        send_mail(
+        
+        # Dispatch email asynchronously via Celery
+        send_async_email.delay(
             subject="Password Reset Request",
             message=f"Click the link to reset your password: {reset_link}",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
+            recipient_list=[email]
         )
+        
         return Response({'message': 'Password reset link sent.'})
     except User.DoesNotExist:
         # Do not reveal if email exists for security

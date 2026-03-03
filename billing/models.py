@@ -132,4 +132,4 @@ class SalesInvoiceItem(models.Model):
 
 # Import Sidecar Models to ensure they are registered
 from .models_sidecar import TransactionMeta, InvoiceSettings, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem
-
+from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem

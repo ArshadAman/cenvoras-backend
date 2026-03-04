@@ -171,6 +171,19 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
             current_balance=F('current_balance') - instance.amount
         )
         print(f"DEBUG: Atomically decreased balance by {instance.amount}")
+        
+        # Create ledger entries
+        try:
+            from ledger.services import AccountingService
+            AccountingService.create_payment_received_entries(
+                customer=instance.customer,
+                amount=instance.amount,
+                description=instance.notes or f"Payment received - {instance.reference or ''}",
+                date=instance.date,
+                user=instance.created_by
+            )
+        except Exception as e:
+            print(f"ERROR creating ledger entries for payment: {e}")
 
 @receiver(post_delete, sender=Payment)
 def revert_balance_on_payment_delete(sender, instance, **kwargs):

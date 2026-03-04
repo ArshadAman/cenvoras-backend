@@ -41,6 +41,7 @@ class GeneralLedgerEntry(models.Model):
     # Link to source documents
     sales_invoice = models.ForeignKey('billing.SalesInvoice', on_delete=models.CASCADE, null=True, blank=True)
     purchase_bill = models.ForeignKey('billing.PurchaseBill', on_delete=models.CASCADE, null=True, blank=True)
+    customer = models.ForeignKey('billing.Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     

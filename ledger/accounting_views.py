@@ -417,6 +417,11 @@ def general_ledger_entries_list(request):
     if account:
         entries = entries.filter(account_id=account)
     
+    # Filter by customer
+    customer = request.query_params.get('customer')
+    if customer:
+        entries = entries.filter(customer_id=customer)
+    
     # Search by description
     description = request.query_params.get('description')
     if description:
@@ -574,6 +579,8 @@ def get_ledger_stats(request):
         entries = entries.filter(date__gte=date_from_str)
     if date_to_str:
         entries = entries.filter(date__lte=date_to_str)
+    if customer_id:
+        entries = entries.filter(customer_id=customer_id)
         
     # Stats calculation
     total_payments = entries.filter(account__account_type='asset', credit__gt=0).aggregate(total=Sum('credit'))['total'] or 0

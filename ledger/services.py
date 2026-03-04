@@ -97,6 +97,7 @@ class AccountingService:
             description=detailed_description,
             reference=sales_invoice.invoice_number,
             sales_invoice=sales_invoice,
+            customer=sales_invoice.customer,
             created_by=user
         )
         
@@ -130,6 +131,7 @@ class AccountingService:
                 description=item_description,
                 reference=f"{sales_invoice.invoice_number}-{item.id}",
                 sales_invoice=sales_invoice,
+                customer=sales_invoice.customer,
                 created_by=user
             )
         
@@ -231,6 +233,7 @@ class AccountingService:
             credit=0,
             description=f"Payment received from {customer.name if customer else 'Customer'}",
             reference="Payment Received",
+            customer=customer,
             created_by=user
         )
         
@@ -242,6 +245,7 @@ class AccountingService:
             credit=amount,
             description=f"Payment received from {customer.name if customer else 'Customer'}",
             reference="Payment Received",
+            customer=customer,
             created_by=user
         )
         

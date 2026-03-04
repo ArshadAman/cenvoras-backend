@@ -136,11 +136,11 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = (
+        fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
             'business_address', 'gstin', 'email', 'current_password',
             'new_password', 'confirm_new_password'
-        )
+        ]
         extra_kwargs = {
             'phone': {'required': False},
             'business_name': {'required': False},
@@ -218,42 +218,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             instance.username = instance.email
             instance.save(update_fields=['username'])
         
-    def get_plan_name(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.name
-        except Exception:
-            return "Starter Plan"
 
-    def get_plan_code(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.code
-        except Exception:
-            return "starter"
-        
-    def get_max_managers(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.max_managers
-        except Exception:
-            return 0
-            
-    class Meta:
-        model = User
-        fields = (
-            'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'business_address', 'gstin', 'subscription_status',
-            'subscription_tier', 'permissions',
-            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
-            'is_trial_active', 'date_joined', 'last_login_at', 'role',
-            'parent_business_name', 'plan_name', 'plan_code', 'max_managers'
-        )
-        read_only_fields = (
-            'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
-            'profile_completed', 'can_generate_gst_invoice', 'is_trial_active',
-            'date_joined', 'last_login_at', 'role'
-        )
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod

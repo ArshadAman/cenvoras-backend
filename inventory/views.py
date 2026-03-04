@@ -49,6 +49,7 @@ class WarehouseDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return Warehouse.objects.none()
         return Warehouse.objects.filter(created_by=self.request.user.active_tenant)
 
 
@@ -98,6 +99,7 @@ class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return StockTransfer.objects.none()
         return StockTransfer.objects.filter(created_by=self.request.user.active_tenant)
 
 @api_view(['GET'])
@@ -275,6 +277,7 @@ class PriceListDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return PriceList.objects.none()
         return PriceList.objects.filter(created_by=self.request.user.active_tenant)
 
 
@@ -293,4 +296,5 @@ class SchemeDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return Scheme.objects.none()
         return Scheme.objects.filter(created_by=self.request.user.active_tenant)

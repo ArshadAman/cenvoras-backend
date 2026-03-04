@@ -21,6 +21,7 @@ class BOMDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return BillOfMaterial.objects.none()
         return BillOfMaterial.objects.filter(created_by=self.request.user.active_tenant)
 
 
@@ -48,4 +49,5 @@ class StockJournalDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return StockJournal.objects.none()
         return StockJournal.objects.filter(created_by=self.request.user.active_tenant)

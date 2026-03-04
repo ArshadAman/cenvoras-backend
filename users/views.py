@@ -521,6 +521,8 @@ class TeamViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         User = get_user_model()
+        if getattr(self, 'swagger_fake_view', False): return User.objects.none()
+        
         user = self.request.user
         tenant = user.active_tenant
         

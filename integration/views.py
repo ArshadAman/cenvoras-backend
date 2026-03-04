@@ -221,7 +221,10 @@ class BarcodeLookupView(APIView):
                 "hsn_sac_code": meta.hsn_sac_code or '',
             })
         except Product.DoesNotExist:
-            return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "error": "Product not found",
+                "barcode": barcode
+            }, status=status.HTTP_404_NOT_FOUND)
 
 
 # =============================================================================

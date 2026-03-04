@@ -114,7 +114,6 @@ def quick_signup_view(request):
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
-    permission_classes = [AllowAny]
     serializer_class = CustomTokenObtainPairSerializer
 
 @swagger_auto_schema(

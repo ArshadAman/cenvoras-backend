@@ -1,4 +1,5 @@
 from django.urls import path
+from rest_framework.permissions import AllowAny
 from .views import (
     quick_signup_view, CustomTokenObtainPairView, view_profile, update_profile,
     profile_setup_view, password_reset_request_view, password_reset_confirm_view

@@ -14,7 +14,7 @@ urlpatterns = [
     # 🚀 Optimized Signup Flow
     path('signup/', quick_signup_view, name='quick_signup'),  # Step 1: Minimal friction signup
     path('login/', CustomTokenObtainPairView.as_view(), name='login'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', TokenRefreshView.as_view(permission_classes=[AllowAny]), name='token_refresh'),
     
     # 👤 Profile Management
     path('profile/', view_profile, name='view_profile'),  # GET: View complete profile

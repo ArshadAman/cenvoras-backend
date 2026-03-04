@@ -30,7 +30,36 @@ class StockJournalListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockJournal.objects.filter(created_by=self.request.user.active_tenant).order_by('-date')
+        qs = StockJournal.objects.filter(created_by=self.request.user.active_tenant).order_by('-date')
+        
+        # Filtering logic
+        search = self.request.query_params.get('search', '').strip()
+        warehouse_id = self.request.query_params.get('warehouse')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        product_name = self.request.query_params.get('product')
+        
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(voucher_no__icontains=search) | 
+                Q(id__icontains=search) | 
+                Q(notes__icontains=search)
+            )
+            
+        if warehouse_id:
+            qs = qs.filter(warehouse_id=warehouse_id)
+            
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+            
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+            
+        if product_name:
+            qs = qs.filter(items__product__name__icontains=product_name).distinct()
+
+        return qs
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)

@@ -58,7 +58,11 @@ class WarehouseSerializer(serializers.ModelSerializer):
 class ProductBatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductBatch
-        fields = ['id', 'product', 'batch_number', 'expiry_date', 'mrp', 'sale_price', 'is_active']
+        fields = [
+            'id', 'product', 'batch_number', 'expiry_date', 
+            'manufacturing_date', 'mrp', 'cost_price', 'sale_price', 
+            'is_active', 'notes'
+        ]
 
 class StockPointSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
@@ -67,7 +71,10 @@ class StockPointSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = StockPoint
-        fields = ['id', 'warehouse', 'warehouse_name', 'batch', 'batch_number', 'expiry_date', 'quantity']
+        fields = [
+            'id', 'warehouse', 'warehouse_name', 'batch', 'batch_number', 
+            'expiry_date', 'quantity'
+        ]
 
 class StockTransferItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)

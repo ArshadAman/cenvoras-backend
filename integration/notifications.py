@@ -1,5 +1,5 @@
 """
-Notification Service — SendGrid for Email, WhatsApp Business API stub.
+Notification Service — Email Service API for Email, WhatsApp Business API stub.
 Uses demo API keys by default. Replace with real keys in .env for production.
 """
 import logging
@@ -12,7 +12,7 @@ from .tasks import send_async_email_notification
 
 def send_email(user, to_email, subject, body, related_model='', related_id=''):
     """
-    Dispatches email to Celery worker via SendGrid.
+    Dispatches email to Celery worker.
     """
     user_id = user.id if user else None
     # Dispatch asynchronously

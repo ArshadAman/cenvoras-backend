@@ -20,6 +20,7 @@ from inventory.serializers import ProductSerializer
 from billing.models import SalesInvoice, SalesInvoiceItem, Customer, Payment
 
 
+
 # =============================================================================
 # Existing API Key Integration Views
 # =============================================================================
@@ -138,6 +139,42 @@ class SendInvoiceNotificationView(APIView):
 
         results = send_invoice_notification(request.user, invoice, channels)
         return Response({"message": "Notification processed", "results": results})
+
+
+class SendCustomEmailView(APIView):
+    """POST: Send a one-off custom email."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        recipient = request.data.get('recipient', '')
+        subject = request.data.get('subject', '').strip() or 'Message from Cenvora'
+        body = request.data.get('body', '')
+        if not recipient or not body:
+            return Response({'error': 'recipient and body are required'}, status=status.HTTP_400_BAD_REQUEST)
+        result = send_email(
+            request.user, recipient, subject, body,
+            related_model='custom', related_id=''
+        )
+        return Response({'message': 'Email queued', 'result': result})
+
+
+class SendPaymentRemindersView(APIView):
+    """POST: Trigger bulk payment reminder emails for all customers with outstanding balance."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .tasks import send_payment_reminders_for_user
+        overdue_days = request.data.get('overdue_days', 30)
+        # Count eligible before dispatching
+        count = Customer.objects.filter(
+            created_by=request.user,
+            current_balance__gt=0,
+        ).exclude(email='').count()
+        send_payment_reminders_for_user.delay(str(request.user.id), overdue_days)
+        return Response({
+            'message': f'Payment reminders queued for {count} customer(s) with outstanding balance.',
+            'queued': count
+        })
 
 
 class NotificationLogListView(generics.ListAPIView):

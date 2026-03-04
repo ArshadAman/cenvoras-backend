@@ -118,6 +118,38 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
+        user = self.context['request'].user
+        
+        # Smart Feature: Auto-create/sync vendor details
+        vendor_name = validated_data.get('vendor_name')
+        vendor_address = validated_data.get('vendor_address')
+        vendor_gstin = validated_data.get('vendor_gstin')
+        
+        if vendor_name:
+            try:
+                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                updated = False
+                if vendor_address and not vendor.address:
+                    vendor.address = vendor_address
+                    updated = True
+                if vendor_gstin and not vendor.gstin:
+                    vendor.gstin = vendor_gstin
+                    updated = True
+                if updated:
+                    vendor.save()
+            except Customer.DoesNotExist:
+                vendor = Customer.objects.create(
+                    name=vendor_name,
+                    address=vendor_address,
+                    gstin=vendor_gstin,
+                    created_by=user
+                )
+                from .models_sidecar import PartyMeta
+                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
+        
+        # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
+        validated_data['created_by'] = user
+        
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
@@ -125,6 +157,34 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
+        user = self.context['request'].user
+        
+        # Smart Feature: Auto-create/sync vendor details
+        vendor_name = validated_data.get('vendor_name', instance.vendor_name)
+        vendor_address = validated_data.get('vendor_address', instance.vendor_address)
+        vendor_gstin = validated_data.get('vendor_gstin', instance.vendor_gstin)
+        
+        if vendor_name:
+            try:
+                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                updated = False
+                if vendor_address and not vendor.address:
+                    vendor.address = vendor_address
+                    updated = True
+                if vendor_gstin and not vendor.gstin:
+                    vendor.gstin = vendor_gstin
+                    updated = True
+                if updated:
+                    vendor.save()
+            except Customer.DoesNotExist:
+                vendor = Customer.objects.create(
+                    name=vendor_name,
+                    address=vendor_address,
+                    gstin=vendor_gstin,
+                    created_by=user
+                )
+                from .models_sidecar import PartyMeta
+                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
         
         # Update the purchase bill fields
         for attr, value in validated_data.items():
@@ -570,7 +630,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
         fields = [
-            'id', 'customer', 'customer_name', 'date', 'amount', 
+            'id', 'customer', 'customer_name', 'invoice', 'date', 'amount', 
             'mode', 'reference', 'notes', 'created_by', 'created_at'
         ]
         read_only_fields = ['id', 'created_by', 'created_at']

@@ -64,6 +64,7 @@ class ProductBatch(models.Model):
     mrp = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Maximum Retail Price for this batch")
     cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Purchase cost for this batch")
     sale_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Selling price for this batch")
+    notes = models.TextField(blank=True, null=True, help_text="Custom remarks for this batch")
     
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

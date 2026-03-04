@@ -200,13 +200,17 @@ AUTH_USER_MODEL = 'users.User'
 # INTEGRATION SETTINGS
 # =============================================================================
 
-# SendGrid Email (replace with real key in production)
-SENDGRID_API_KEY = 'SG.demo_key_replace_me'
-SENDGRID_FROM_EMAIL = 'noreply@cenvora.app'
+# Transactional Email Service
+# Set these in .env / environment
+TRANSACTIONAL_EMAIL_API_KEY = os.environ.get('TRANSACTIONAL_EMAIL_API_KEY', '') 
+TRANSACTIONAL_EMAIL_SENDER_EMAIL = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
+TRANSACTIONAL_EMAIL_SENDER_NAME = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_NAME', 'Cenvora')
+TRANSACTIONAL_EMAIL_API_URL = os.environ.get('TRANSACTIONAL_EMAIL_API_URL', '')
 
-# WhatsApp Business API (replace with real token in production)
-WHATSAPP_API_TOKEN = 'demo_whatsapp_token'
-WHATSAPP_PHONE_ID = 'demo_phone_id'
+# WhatsApp Business API — Coming Soon
+# Set these when the WhatsApp integration is launched
+WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN', '')
+WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 
 # Gemini AI (load from environment variables)
 GEMINI_API_KEY = os.environ.get('Gemini_Key', '')

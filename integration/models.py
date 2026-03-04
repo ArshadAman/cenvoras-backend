@@ -22,7 +22,7 @@ class ApiKey(models.Model):
 
 
 # =============================================================================
-# NOTIFICATION SYSTEM (WhatsApp + Email via SendGrid)
+# NOTIFICATION SYSTEM (WhatsApp + Email)
 # =============================================================================
 
 class NotificationTemplate(models.Model):

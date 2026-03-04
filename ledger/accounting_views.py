@@ -9,6 +9,10 @@ from .models import Account, GeneralLedgerEntry, AccountType
 from .serializers import AccountSerializer, AccountBalanceSerializer
 from .services import AccountingService
 import logging
+from django.db.models import Sum, Avg, Max, Count
+from django.utils import timezone
+from datetime import timedelta
+import decimal
 
 logger = logging.getLogger(__name__)
 
@@ -550,6 +554,61 @@ def create_sales_invoice_ledger_entries(request):
             'success': False,
             'error': f'Internal server error: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_ledger_stats(request):
+    """Get ledger statistics for the dashboard"""
+    user = request.user
+    
+    # Date range filters
+    date_from_str = request.query_params.get('date_from')
+    date_to_str = request.query_params.get('date_to')
+    customer_id = request.query_params.get('customer')
+    
+    # Base queries
+    from .models import GeneralLedgerEntry
+    entries = GeneralLedgerEntry.objects.filter(created_by=user)
+    if date_from_str:
+        entries = entries.filter(date__gte=date_from_str)
+    if date_to_str:
+        entries = entries.filter(date__lte=date_to_str)
+        
+    # Stats calculation
+    total_payments = entries.filter(account__account_type='asset', credit__gt=0).aggregate(total=Sum('credit'))['total'] or 0
+    total_invoices = entries.filter(account__account_type='asset', debit__gt=0).aggregate(total=Sum('debit'))['total'] or 0
+    net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
+    
+    # Customer specific logic
+    from billing.models import Customer
+    customers_query = Customer.objects.filter(created_by=user)
+    if customer_id:
+        customers_query = customers_query.filter(id=customer_id)
+        
+    total_customers = customers_query.count()
+    outstanding_balance = customers_query.aggregate(total=Sum('current_balance'))['total'] or 0
+    
+    # Recent transactions (last 30 days)
+    thirty_days_ago = timezone.now().date() - timedelta(days=30)
+    recent_count = GeneralLedgerEntry.objects.filter(created_by=user, date__gte=thirty_days_ago).count()
+    
+    # Average and Largest
+    payment_stats = GeneralLedgerEntry.objects.filter(created_by=user, account__account_type='asset', credit__gt=0).aggregate(
+        avg=Avg('credit'),
+        max=Max('credit')
+    )
+    
+    return Response({
+        'total_payments': float(total_payments),
+        'total_invoices': float(total_invoices),
+        'net_balance': float(net_balance),
+        'total_customers': total_customers,
+        'recent_transactions': recent_count,
+        'average_payment': float(payment_stats['avg'] or 0),
+        'largest_payment': float(payment_stats['max'] or 0),
+        'outstanding_balance': float(outstanding_balance)
+    })
 
 
 @swagger_auto_schema(

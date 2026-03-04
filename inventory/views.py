@@ -23,6 +23,26 @@ class ProductListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)
 
+class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = ProductSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False): return Product.objects.none()
+        return Product.objects.filter(created_by=self.request.user.active_tenant)
+
+    def destroy(self, request, *args, **kwargs):
+        from django.db.models.deletion import ProtectedError
+        try:
+            instance = self.get_object()
+            self.perform_destroy(instance)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError:
+            return Response(
+                {"error": "This product cannot be deleted because it is linked to existing invoices, purchases, or stock transfers."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
 class ProductBatchListView(generics.ListAPIView):
     serializer_class = ProductBatchSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -216,6 +236,9 @@ def batch_split(request):
     batch_id = request.data.get('batch_id')
     new_batch_number = request.data.get('new_batch_number', '').strip()
     split_qty = int(request.data.get('split_quantity', 0))
+    manufacturing_date = request.data.get('manufacturing_date')
+    expiry_date = request.data.get('expiry_date')
+    notes = request.data.get('notes')
 
     if not batch_id or not new_batch_number or split_qty <= 0:
         return Response({'error': 'batch_id, new_batch_number, and split_quantity (>0) are required.'},
@@ -236,8 +259,9 @@ def batch_split(request):
     new_batch = ProductBatch.objects.create(
         product=original.product,
         batch_number=new_batch_number,
-        expiry_date=original.expiry_date,
-        manufacturing_date=original.manufacturing_date,
+        expiry_date=expiry_date if expiry_date else original.expiry_date,
+        manufacturing_date=manufacturing_date if manufacturing_date else original.manufacturing_date,
+        notes=notes if notes else original.notes,
         mrp=original.mrp,
         cost_price=original.cost_price,
         sale_price=original.sale_price,

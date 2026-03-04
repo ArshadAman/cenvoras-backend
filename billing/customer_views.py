@@ -5,6 +5,7 @@ from rest_framework import status
 from .serializers import CustomerSerializer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from django.db import models
 from .models import Customer
 
 
@@ -219,15 +220,20 @@ def customer_update_delete(request, pk):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     elif request.method == 'DELETE':
-        # Check if customer has any related invoices before deletion
-        if customer.salesinvoice_set.exists():
+        from django.db.models import ProtectedError
+        try:
+            customer.delete()
+            return Response({
+                "success": True,
+                "message": "Customer deleted successfully."
+            }, status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError:
             return Response({
                 "success": False,
-                "message": "Cannot delete customer with existing sales invoices."
+                "message": "Cannot delete this customer. They are currently linked to existing transactions (like invoices, orders, etc.). You must delete those transactions first."
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        customer.delete()
-        return Response({
-            "success": True,
-            "message": "Customer deleted successfully."
-        }, status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response({
+                "success": False,
+                "message": f"Failed to delete customer: {str(e)}"
+            }, status=status.HTTP_400_BAD_REQUEST)

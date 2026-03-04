@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from .models import Product
 from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal, StockJournalItem
 
 class ProductMetaSerializer(serializers.ModelSerializer):
@@ -11,12 +12,26 @@ class ProductMetaSerializer(serializers.ModelSerializer):
         ]
 
 class BillOfMaterialSerializer(serializers.ModelSerializer):
-    finished_good_name = serializers.CharField(source='finished_good.name', read_only=True)
+    finished_good = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(), 
+        required=False, 
+        allow_null=True
+    )
+    finished_good_display = serializers.SerializerMethodField()
     
     class Meta:
         model = BillOfMaterial
-        fields = ['id', 'finished_good', 'finished_good_name', 'name', 'is_active', 'components', 'created_by', 'created_at']
+        fields = [
+            'id', 'finished_good', 'finished_good_name', 'finished_good_display',
+            'name', 'is_active', 'components', 'production_time', 
+            'batch_size', 'testing_notes', 'created_by', 'created_at'
+        ]
         read_only_fields = ['id', 'created_by', 'created_at']
+
+    def get_finished_good_display(self, obj):
+        if obj.finished_good:
+            return obj.finished_good.name
+        return obj.finished_good_name
 
 class StockJournalItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)

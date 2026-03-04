@@ -1,7 +1,8 @@
 from django.urls import path
 from .views import (
     PublicProductListView, PublicOrderCreateView,
-    SendInvoiceNotificationView, NotificationLogListView,
+    SendInvoiceNotificationView, SendCustomEmailView, SendPaymentRemindersView,
+    NotificationLogListView,
     NotificationTemplateListView,
     BarcodeLookupView,
     DataExportView, DataImportView,
@@ -15,6 +16,8 @@ urlpatterns = [
     
     # Notifications
     path('notifications/send/', SendInvoiceNotificationView.as_view(), name='send-notification'),
+    path('notifications/send-email/', SendCustomEmailView.as_view(), name='send-custom-email'),
+    path('notifications/send-reminders/', SendPaymentRemindersView.as_view(), name='send-payment-reminders'),
     path('notifications/logs/', NotificationLogListView.as_view(), name='notification-logs'),
     path('notifications/templates/', NotificationTemplateListView.as_view(), name='notification-templates'),
     

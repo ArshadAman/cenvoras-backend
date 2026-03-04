@@ -79,18 +79,27 @@ class BillOfMaterial(models.Model):
     Logic: Deduct Raw Material, Add Finished Good.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    finished_good = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='boms')
+    # Refined: Can be a linked Product OR just a plain text name
+    finished_good = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True, related_name='boms')
+    finished_good_name = models.CharField(max_length=255, blank=True, help_text="Plain text name if no product is linked")
+    
     name = models.CharField(max_length=100, help_text="BOM Name e.g. 'Standard Pack'")
     is_active = models.BooleanField(default=True)
     
     # Components structure: [{"product_id": "uuid", "quantity": 1}, ...]
     components = models.JSONField(default=list)
     
+    # Feature 12: Expanded BOM info
+    production_time = models.CharField(max_length=50, blank=True, null=True, help_text="e.g., 2 Hours, 1 Day")
+    batch_size = models.DecimalField(max_digits=10, decimal_places=2, default=1)
+    testing_notes = models.TextField(blank=True, null=True, help_text="Quality testing notes for the finished good")
+    
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     
     def __str__(self):
-        return f"BOM: {self.name} for {self.finished_good.name}"
+        fg_display = self.finished_good.name if self.finished_good else self.finished_good_name
+        return f"BOM: {self.name} for {fg_display}"
 
 class StockJournal(models.Model):
     """

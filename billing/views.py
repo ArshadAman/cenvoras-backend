@@ -4,8 +4,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, generics, filters
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import PurchaseBill, SalesInvoice
+from .models import PurchaseBill, SalesInvoice, PurchaseBillItem
 from .serializers import PurchaseBillSerializer, SalesInvoiceSerializer
+from inventory.serializers import ProductSerializer
 from .filters import PurchaseBillFilter, SalesInvoiceFilter
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -124,6 +125,31 @@ def purchase_bill_detail(request, pk):
         return Response({"success": False, "message": "Not found."}, status=404)
     serializer = PurchaseBillSerializer(bill)
     return Response({"success": True, "data": serializer.data})
+
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('vendor_name', openapi.IN_QUERY, description="Vendor Name exactly as stored", type=openapi.TYPE_STRING, required=True),
+    ],
+    responses={200: "List of products"}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def vendor_products(request):
+    vendor_name = request.GET.get('vendor_name', '').strip()
+    if not vendor_name:
+        return Response({"success": False, "message": "vendor_name is required."}, status=400)
+    
+    # Get distinct product IDs from PurchaseBillItems for this vendor
+    product_ids = PurchaseBillItem.objects.filter(
+        purchase_bill__vendor_name=vendor_name,
+        purchase_bill__created_by=request.user.active_tenant
+    ).values_list('product_id', flat=True).distinct()
+    
+    from inventory.models import Product
+    products = Product.objects.filter(id__in=product_ids)
+    serializer = ProductSerializer(products, many=True)
+    return Response(serializer.data)
 
 
 @swagger_auto_schema(

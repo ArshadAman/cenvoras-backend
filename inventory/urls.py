@@ -4,6 +4,7 @@ from . import views_sidecar
 
 urlpatterns = [
     path('products/', views.ProductListCreateView.as_view(), name='product-list-create'),
+    path('products/<uuid:pk>/', views.ProductDetailView.as_view(), name='product-detail'),
     path('warehouses/', views.WarehouseListCreateView.as_view(), name='warehouse-list-create'),
     path('warehouses/<uuid:pk>/', views.WarehouseDetailView.as_view(), name='warehouse-detail'),
     path('stock-points/', views.stock_point_list, name='stock-point-list'),

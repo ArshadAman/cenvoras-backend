@@ -3,6 +3,8 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
+RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 ENV PIP_ROOT_USER_ACTION=ignore
 

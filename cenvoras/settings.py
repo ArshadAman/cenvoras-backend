@@ -42,6 +42,9 @@ INSTALLED_APPS = [
     'integration',
     'reports',
     'audit_log',
+    'cloudinary',
+    'cloudinary_storage',
+    'dbbackup',
 ]
 
 MIDDLEWARE = [
@@ -207,3 +210,17 @@ WHATSAPP_PHONE_ID = 'demo_phone_id'
 
 # Gemini AI (load from environment variables)
 GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
+
+# =============================================================================
+# BACKUP & STORAGE SETTINGS (Cloudinary)
+# =============================================================================
+
+# Cloudinary requires these environment variables (or CLOUDINARY_URL)
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
+}
+
+# django-dbbackup storage configuration
+DBBACKUP_STORAGE = 'cloudinary_storage.storage.RawMediaCloudinaryStorage'

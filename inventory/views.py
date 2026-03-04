@@ -18,10 +18,10 @@ class ProductListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Product.objects.filter(created_by=self.request.user)
+        return Product.objects.filter(created_by=self.request.user.active_tenant)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(created_by=self.request.user.active_tenant)
 
 class ProductBatchListView(generics.ListAPIView):
     serializer_class = ProductBatchSerializer
@@ -30,17 +30,17 @@ class ProductBatchListView(generics.ListAPIView):
     def get_queryset(self):
         # Corrected `request.user` to `self.request.user` for class-based view
         # Removed `perform_create` as it's a ListAPIView
-        return ProductBatch.objects.select_related('product').filter(product__created_by=self.request.user)
+        return ProductBatch.objects.select_related('product').filter(product__created_by=self.request.user.active_tenant.active_tenant)
 
 class WarehouseListCreateView(generics.ListCreateAPIView):
     serializer_class = WarehouseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Warehouse.objects.filter(created_by=self.request.user)
+        return Warehouse.objects.filter(created_by=self.request.user.active_tenant)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(created_by=self.request.user.active_tenant)
 
 
 # Feature 2: Multi-Store / Godown — Detail/Update/Delete
@@ -49,7 +49,7 @@ class WarehouseDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Warehouse.objects.filter(created_by=self.request.user)
+        return Warehouse.objects.filter(created_by=self.request.user.active_tenant)
 
 
 @api_view(['GET'])
@@ -62,7 +62,7 @@ def stock_point_list(request):
     queryset = StockPoint.objects.all()
     
     # Filter by user's warehouses
-    user_warehouses = Warehouse.objects.filter(created_by=request.user)
+    user_warehouses = Warehouse.objects.filter(created_by=request.user.active_tenant)
     queryset = queryset.filter(warehouse__in=user_warehouses)
     
     product_id = request.query_params.get('product')
@@ -83,7 +83,7 @@ class StockPointListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Corrected the incomplete line and added user filtering
-        user_warehouses = Warehouse.objects.filter(created_by=self.request.user)
+        user_warehouses = Warehouse.objects.filter(created_by=self.request.user.active_tenant)
         return StockPoint.objects.select_related('batch', 'warehouse', 'batch__product').filter(warehouse__in=user_warehouses)
 
 class StockTransferListCreateView(generics.ListCreateAPIView):
@@ -91,14 +91,14 @@ class StockTransferListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockTransfer.objects.filter(created_by=self.request.user).order_by('-transfer_date')
+        return StockTransfer.objects.filter(created_by=self.request.user.active_tenant).order_by('-transfer_date')
 
 class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StockTransferSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockTransfer.objects.filter(created_by=self.request.user)
+        return StockTransfer.objects.filter(created_by=self.request.user.active_tenant)
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
@@ -107,7 +107,7 @@ def batch_list(request):
     List product batches.
     Optional filters: ?product=UUID
     """
-    queryset = ProductBatch.objects.filter(product__created_by=request.user)
+    queryset = ProductBatch.objects.filter(product__created_by=request.user.active_tenant.active_tenant)
     
     product_id = request.query_params.get('product')
     if product_id:
@@ -133,7 +133,7 @@ def expiry_report(request):
     cutoff = today + timedelta(days=days)
 
     batches = ProductBatch.objects.filter(
-        product__created_by=request.user,
+        product__created_by=request.user.active_tenant.active_tenant,
         expiry_date__isnull=False,
         expiry_date__lte=cutoff,
         is_active=True,
@@ -175,7 +175,7 @@ def shortage_report(request):
     Products where current stock < low_stock_alert threshold.
     """
     products = Product.objects.filter(
-        created_by=request.user,
+        created_by=request.user.active_tenant,
         low_stock_alert__gt=0,
     ).order_by('stock')
 
@@ -220,7 +220,7 @@ def batch_split(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        original = ProductBatch.objects.get(id=batch_id, product__created_by=request.user)
+        original = ProductBatch.objects.get(id=batch_id, product__created_by=request.user.active_tenant.active_tenant)
     except ProductBatch.DoesNotExist:
         return Response({'error': 'Batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -267,7 +267,7 @@ class PriceListListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return PriceList.objects.filter(created_by=self.request.user).order_by('-created_at')
+        return PriceList.objects.filter(created_by=self.request.user.active_tenant).order_by('-created_at')
 
 
 class PriceListDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -275,7 +275,7 @@ class PriceListDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return PriceList.objects.filter(created_by=self.request.user)
+        return PriceList.objects.filter(created_by=self.request.user.active_tenant)
 
 
 # ── Schemes ────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ class SchemeListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Scheme.objects.filter(created_by=self.request.user).order_by('-start_date')
+        return Scheme.objects.filter(created_by=self.request.user.active_tenant).order_by('-start_date')
 
 
 class SchemeDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -293,4 +293,4 @@ class SchemeDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Scheme.objects.filter(created_by=self.request.user)
+        return Scheme.objects.filter(created_by=self.request.user.active_tenant)

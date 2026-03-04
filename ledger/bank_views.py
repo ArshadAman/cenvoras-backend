@@ -36,7 +36,7 @@ def upload_bank_statement(request):
             bank_name=bank_name,
             account_number=account_number,
             file_name=file_obj.name,
-            uploaded_by=request.user
+            uploaded_by=request.user.active_tenant
         )
 
     # Dispatch to Celery
@@ -73,7 +73,7 @@ def reconciliation_status(request, statement_id):
             # Look for UNMATCHED entries in that date range
             qs = GeneralLedgerEntry.objects.filter(
                 date__range=[start_date, end_date],
-                created_by=request.user,
+                created_by=request.user.active_tenant,
                 bank_matches__isnull=True  # Ensure not already matched
             )
 

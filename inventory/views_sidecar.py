@@ -10,10 +10,10 @@ class BOMListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return BillOfMaterial.objects.filter(created_by=self.request.user)
+        return BillOfMaterial.objects.filter(created_by=self.request.user.active_tenant)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(created_by=self.request.user.active_tenant)
 
 
 class BOMDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -21,7 +21,7 @@ class BOMDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return BillOfMaterial.objects.filter(created_by=self.request.user)
+        return BillOfMaterial.objects.filter(created_by=self.request.user.active_tenant)
 
 
 class StockJournalListCreateView(generics.ListCreateAPIView):
@@ -29,10 +29,10 @@ class StockJournalListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockJournal.objects.filter(created_by=self.request.user).order_by('-date')
+        return StockJournal.objects.filter(created_by=self.request.user.active_tenant).order_by('-date')
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(created_by=self.request.user.active_tenant)
         # TODO: Implement Stock Ledger Updates here (Feature 11)
         # For phase 1, we just record the journal. Phase 2/3 will link to StockPoint updates.
         # Actually, if we want stock updates now, we should do it.
@@ -48,4 +48,4 @@ class StockJournalDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockJournal.objects.filter(created_by=self.request.user)
+        return StockJournal.objects.filter(created_by=self.request.user.active_tenant)

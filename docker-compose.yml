@@ -93,6 +93,7 @@ services:
   celery_beat:
     build: .
     command: celery -A cenvoras beat -l info --schedule /app/celerybeat-data/celerybeat-schedule
+    user: "0:0"
     env_file:
       - .env
     environment:

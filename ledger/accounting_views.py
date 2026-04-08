@@ -371,12 +371,27 @@ def general_ledger_entry_detail(request, entry_id):
         })
     
     elif request.method == 'DELETE':
-        # Check if this entry is linked to an invoice or bill
-        if entry.sales_invoice or entry.purchase_bill:
+        # Never allow deleting debit entries to preserve accounting integrity.
+        if entry.debit and entry.debit > 0:
             return Response({
                 'success': False,
-                'error': 'Cannot delete entries linked to invoices or bills. Delete the source document instead.'
+                'error': 'Debit ledger entries cannot be deleted.'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Credit entries linked with bills are deletable only when bill is still pending.
+        if entry.sales_invoice:
+            if entry.sales_invoice.payment_status != 'pending':
+                return Response({
+                    'success': False,
+                    'error': 'Cannot delete credit ledger entry for non-pending sales bill.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        if entry.purchase_bill:
+            if entry.purchase_bill.payment_status != 'pending':
+                return Response({
+                    'success': False,
+                    'error': 'Cannot delete credit ledger entry for non-pending purchase bill.'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         # Store entry details for response
         entry_info = f"{entry.account.name} - Dr: ${entry.debit} Cr: ${entry.credit}"

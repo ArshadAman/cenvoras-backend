@@ -5,6 +5,7 @@ from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, Deliver
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 import uuid
+from decimal import Decimal
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):
@@ -117,12 +118,18 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
             'warehouse', 'journal',
-            'total_amount', 'created_by', 'created_at', 'items', 'meta'
+            'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
 
     def get_vendor_display(self, obj):
         return obj.vendor.name if obj.vendor else obj.vendor_name
+
+    def validate(self, data):
+        items = data.get('items')
+        if self.instance is None and (items is None or len(items) == 0):
+            raise serializers.ValidationError({'items': 'At least one item is required.'})
+        return data
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -201,9 +208,19 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         instance.save()
 
         # Delete existing items and create new ones
-        instance.items.all().delete()
-        for item_data in items_data:
-            PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
+        if items_data:
+            instance.items.all().delete()
+            for item_data in items_data:
+                PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
+
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
+            instance.total_amount = recalculated_total
+
+            if instance.amount_paid > instance.total_amount:
+                instance.amount_paid = instance.total_amount
+
+            instance.refresh_payment_status(save=False)
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
         
         return instance
 
@@ -370,7 +387,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'created_by', 'created_at', 'items', 'meta']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta']
 
     def validate(self, data):
         """
@@ -393,7 +410,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                  except Customer.DoesNotExist:
                      pass
 
-        total_amount = data.get('total_amount', 0)
+        total_amount = data.get('total_amount', getattr(self.instance, 'total_amount', 0))
+
+        if self.instance and self.instance.payment_status in ['partial_paid', 'paid']:
+            immutable_fields = ['invoice_number', 'invoice_date', 'customer_name', 'place_of_supply']
+            immutable_errors = {}
+            for field in immutable_fields:
+                if field in data and data[field] != getattr(self.instance, field):
+                    immutable_errors[field] = f'{field} cannot be changed after payment has been recorded.'
+            if immutable_errors:
+                raise serializers.ValidationError(immutable_errors)
         
         if customer:
             if not customer.allow_credit:
@@ -560,10 +586,20 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
 
-        # Delete existing items and create new ones
-        instance.items.all().delete()
-        for item_data in items_data:
-            SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
+        # Delete existing items and create new ones when provided
+        if items_data:
+            instance.items.all().delete()
+            for item_data in items_data:
+                SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
+
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
+            instance.total_amount = recalculated_total
+
+        if instance.amount_paid > instance.total_amount:
+            instance.amount_paid = instance.total_amount
+
+        instance.refresh_payment_status(save=False)
+        instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
         
         # Update Meta
         meta_data = validated_data.pop('meta', None)

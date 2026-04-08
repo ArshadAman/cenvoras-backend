@@ -2,9 +2,16 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from django.db import transaction
 from django.utils import timezone
+from django.http import HttpResponse
 import uuid
+import csv
+import io
+import zipfile
+from decimal import Decimal, InvalidOperation
+from django.utils.dateparse import parse_date
 
 from .authentication import ApiKeyAuthentication
 from .models import ApiKey, NotificationLog, NotificationTemplate
@@ -237,6 +244,7 @@ class DataExportView(APIView):
 
     def get(self, request):
         user = request.user
+        export_format = (request.query_params.get('format') or 'json').lower()
         
         products = list(Product.objects.filter(created_by=user).values(
             'id', 'name', 'description', 'price', 'sale_price', 'stock',
@@ -261,33 +269,119 @@ class DataExportView(APIView):
             "products": json.loads(json.dumps(products, cls=DjangoJSONEncoder)),
             "customers": json.loads(json.dumps(customers, cls=DjangoJSONEncoder)),
             "invoices": json.loads(json.dumps(invoices, cls=DjangoJSONEncoder)),
+            "payments": json.loads(json.dumps(list(Payment.objects.filter(created_by=user).values(
+                'id', 'date', 'amount', 'mode', 'reference', 'notes', 'customer_id', 'invoice_id'
+            )), cls=DjangoJSONEncoder)),
             "summary": {
                 "total_products": len(products),
                 "total_customers": len(customers),
                 "total_invoices": len(invoices),
             }
         }
-        
+
+        if export_format == 'csv':
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                def write_csv(file_name, rows, headers):
+                    text_buffer = io.StringIO()
+                    writer = csv.DictWriter(text_buffer, fieldnames=headers)
+                    writer.writeheader()
+                    for row in rows:
+                        normalized = {k: row.get(k, '') for k in headers}
+                        writer.writerow(normalized)
+                    zf.writestr(file_name, text_buffer.getvalue())
+
+                write_csv(
+                    'products.csv',
+                    export_data['products'],
+                    ['id', 'name', 'description', 'price', 'sale_price', 'stock', 'hsn_sac_code', 'unit', 'low_stock_alert']
+                )
+                write_csv(
+                    'customers.csv',
+                    export_data['customers'],
+                    ['id', 'name', 'email', 'phone', 'gstin', 'address', 'credit_limit', 'current_balance', 'state']
+                )
+                write_csv(
+                    'invoices.csv',
+                    export_data['invoices'],
+                    ['id', 'invoice_number', 'invoice_date', 'customer_name', 'total_amount', 'place_of_supply']
+                )
+                write_csv(
+                    'payments.csv',
+                    export_data['payments'],
+                    ['id', 'date', 'amount', 'mode', 'reference', 'notes', 'customer_id', 'invoice_id']
+                )
+                zf.writestr('summary.json', json.dumps(export_data['summary'], indent=2))
+
+            buffer.seek(0)
+            response = HttpResponse(buffer.read(), content_type='application/zip')
+            response['Content-Disposition'] = f'attachment; filename="cenvora-backup-{timezone.now().date()}.zip"'
+            return response
+
         return Response(export_data)
 
 
 class DataImportView(APIView):
     """POST: Import data from JSON backup."""
     permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     @transaction.atomic
     def post(self, request):
+        import_format = (request.query_params.get('format') or request.data.get('format') or 'json').lower()
         data = request.data
         user = request.user
-        imported = {"products": 0, "customers": 0}
+        imported = {"products": 0, "customers": 0, "invoices": 0, "payments": 0}
+
+        def parse_decimal(value, default='0'):
+            if value in [None, '']:
+                return Decimal(default)
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError):
+                return Decimal(default)
+
+        if import_format == 'csv':
+            upload = request.FILES.get('file')
+            if not upload:
+                return Response({'error': 'file is required for CSV import'}, status=status.HTTP_400_BAD_REQUEST)
+
+            csv_payload = {'products': [], 'customers': [], 'invoices': [], 'payments': []}
+            try:
+                with zipfile.ZipFile(upload, 'r') as zf:
+                    if 'products.csv' in zf.namelist():
+                        with zf.open('products.csv') as f:
+                            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                            csv_payload['products'] = list(reader)
+                    if 'customers.csv' in zf.namelist():
+                        with zf.open('customers.csv') as f:
+                            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                            csv_payload['customers'] = list(reader)
+                    if 'invoices.csv' in zf.namelist():
+                        with zf.open('invoices.csv') as f:
+                            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                            csv_payload['invoices'] = list(reader)
+                    if 'payments.csv' in zf.namelist():
+                        with zf.open('payments.csv') as f:
+                            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig'))
+                            csv_payload['payments'] = list(reader)
+            except zipfile.BadZipFile:
+                return Response({'error': 'Invalid ZIP file for CSV import'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = csv_payload
+
+        customer_id_map = {}
+        invoice_id_map = {}
 
         # Import products
         for p in data.get('products', []):
+            if not p.get('name'):
+                continue
             Product.objects.update_or_create(
                 created_by=user, name=p['name'],
                 defaults={
-                    'price': p.get('price', 0),
-                    'sale_price': p.get('sale_price', 0),
+                    'price': parse_decimal(p.get('price', 0)),
+                    'sale_price': parse_decimal(p.get('sale_price', 0)) if p.get('sale_price') not in [None, ''] else None,
                     'hsn_sac_code': p.get('hsn_sac_code', ''),
                     'unit': p.get('unit', 'pcs'),
                     'description': p.get('description', ''),
@@ -297,19 +391,72 @@ class DataImportView(APIView):
 
         # Import customers
         for c in data.get('customers', []):
-            Customer.objects.update_or_create(
+            if not c.get('name'):
+                continue
+            customer, _ = Customer.objects.update_or_create(
                 created_by=user, name=c['name'],
                 defaults={
                     'email': c.get('email', ''),
                     'phone': c.get('phone', ''),
                     'gstin': c.get('gstin', ''),
                     'address': c.get('address', ''),
-                    'credit_limit': c.get('credit_limit', 0),
+                    'credit_limit': parse_decimal(c.get('credit_limit', 0)),
                 }
             )
+            old_customer_id = c.get('id')
+            if old_customer_id:
+                customer_id_map[str(old_customer_id)] = customer
             imported["customers"] += 1
 
-        return Response({"message": "Import completed", "imported": imported})
+        # Import invoices
+        for inv in data.get('invoices', []):
+            if not inv.get('invoice_number'):
+                continue
+
+            invoice_date = parse_date(str(inv.get('invoice_date'))) or timezone.now().date()
+            invoice, _ = SalesInvoice.objects.update_or_create(
+                created_by=user,
+                invoice_number=inv['invoice_number'],
+                defaults={
+                    'invoice_date': invoice_date,
+                    'customer_name': inv.get('customer_name', 'Cash'),
+                    'total_amount': parse_decimal(inv.get('total_amount', 0)),
+                    'place_of_supply': inv.get('place_of_supply') or None,
+                }
+            )
+            old_invoice_id = inv.get('id')
+            if old_invoice_id:
+                invoice_id_map[str(old_invoice_id)] = invoice
+            imported["invoices"] += 1
+
+        # Import payments
+        for pay in data.get('payments', []):
+            old_customer_id = str(pay.get('customer_id') or '')
+            old_invoice_id = str(pay.get('invoice_id') or '')
+            customer_obj = customer_id_map.get(old_customer_id)
+            invoice_obj = invoice_id_map.get(old_invoice_id)
+
+            if not customer_obj:
+                continue
+
+            payment_date = parse_date(str(pay.get('date'))) or timezone.now().date()
+            amount = parse_decimal(pay.get('amount', 0))
+            if amount <= 0:
+                continue
+
+            Payment.objects.create(
+                created_by=user,
+                customer=customer_obj,
+                invoice=invoice_obj,
+                date=payment_date,
+                amount=amount,
+                mode=pay.get('mode') or 'cash',
+                reference=pay.get('reference') or '',
+                notes=pay.get('notes') or '',
+            )
+            imported["payments"] += 1
+
+        return Response({"message": "Import completed", "format": import_format, "imported": imported})
 
 
 # =============================================================================

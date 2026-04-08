@@ -171,6 +171,13 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
             current_balance=F('current_balance') - instance.amount
         )
         print(f"DEBUG: Atomically decreased balance by {instance.amount}")
+
+        if instance.invoice_id:
+            SalesInvoice.objects.filter(pk=instance.invoice_id).update(
+                amount_paid=F('amount_paid') + instance.amount
+            )
+            invoice = SalesInvoice.objects.get(pk=instance.invoice_id)
+            invoice.refresh_payment_status(save=True)
         
         # Create ledger entries
         try:
@@ -192,6 +199,13 @@ def revert_balance_on_payment_delete(sender, instance, **kwargs):
             current_balance=F('current_balance') + instance.amount
         )
         print(f"DEBUG: Reverted balance for deleted payment {instance.pk}")
+
+        if instance.invoice_id:
+            SalesInvoice.objects.filter(pk=instance.invoice_id).update(
+                amount_paid=Greatest(F('amount_paid') - instance.amount, 0)
+            )
+            invoice = SalesInvoice.objects.get(pk=instance.invoice_id)
+            invoice.refresh_payment_status(save=True)
 
 @receiver(post_save, sender=SalesInvoice)
 def check_credit_limit_pre_save(sender, instance, created, **kwargs):

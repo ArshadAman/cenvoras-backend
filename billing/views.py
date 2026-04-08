@@ -52,8 +52,22 @@ def purchase_bill_list_create(request):
         bills = PurchaseBill.objects.filter(created_by=request.user.active_tenant).order_by('-bill_date').prefetch_related('items__product')
         
         # Pagination
-        page = int(request.GET.get('page', 1))
-        limit = int(request.GET.get('limit', 10))
+        try:
+            page = int(request.GET.get('page', 1))
+            limit = int(request.GET.get('limit', 10))
+        except (TypeError, ValueError):
+            return Response({
+                "success": False,
+                "message": "Validation error.",
+                "errors": {"pagination": ["page and limit must be valid integers."]}
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if page < 1 or limit < 1:
+            return Response({
+                "success": False,
+                "message": "Validation error.",
+                "errors": {"pagination": ["page and limit must be greater than 0."]}
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         total_count = bills.count()
         start = (page - 1) * limit
@@ -375,6 +389,11 @@ def purchase_bill_update_delete(request, pk):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
+        if bill.payment_status != 'pending':
+            return Response({
+                "success": False,
+                "message": "Only pending purchase bills can be deleted."
+            }, status=status.HTTP_400_BAD_REQUEST)
         bill.delete()
         return Response({
             "success": True,
@@ -428,6 +447,10 @@ def sales_invoice_update_delete(request, pk):
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
+        if invoice.payment_status != 'pending':
+            return Response({
+                'error': 'Only pending sales invoices can be deleted.'
+            }, status=status.HTTP_400_BAD_REQUEST)
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Sum, Q
+from django.shortcuts import get_object_or_404
 from .models import Account, AccountType, GeneralLedgerEntry
 from .services import AccountingService
 
@@ -210,6 +211,73 @@ def balance_sheet(request):
         },
         'is_balanced': is_balanced,
         'difference': float(total_assets - (total_liabilities + total_equity)),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def balance_sheet_account_detail(request, account_id):
+    """
+    Drill-down for a specific balance-sheet account.
+    Query Params: ?as_of=YYYY-MM-DD
+    """
+    user = request.user
+    as_of = request.query_params.get('as_of')
+
+    account = get_object_or_404(
+        Account,
+        id=account_id,
+        created_by=user,
+        is_active=True,
+        account_type__in=[AccountType.ASSET, AccountType.LIABILITY, AccountType.EQUITY],
+    )
+
+    entries = GeneralLedgerEntry.objects.filter(account=account, created_by=user)
+    if as_of:
+        entries = entries.filter(date__lte=as_of)
+    entries = entries.order_by('date', 'created_at')
+
+    running_balance = Decimal('0')
+    results = []
+    for entry in entries:
+        if account.account_type == AccountType.ASSET:
+            running_balance += (entry.debit - entry.credit)
+        else:
+            running_balance += (entry.credit - entry.debit)
+
+        results.append({
+            'id': str(entry.id),
+            'date': str(entry.date),
+            'description': entry.description,
+            'reference': entry.reference,
+            'debit': float(entry.debit),
+            'credit': float(entry.credit),
+            'running_balance': float(running_balance),
+        })
+
+    totals = entries.aggregate(total_debit=Sum('debit'), total_credit=Sum('credit'))
+    total_debit = totals['total_debit'] or Decimal('0')
+    total_credit = totals['total_credit'] or Decimal('0')
+    if account.account_type == AccountType.ASSET:
+        net_balance = total_debit - total_credit
+    else:
+        net_balance = total_credit - total_debit
+
+    return Response({
+        'account': {
+            'id': str(account.id),
+            'code': account.code,
+            'name': account.name,
+            'account_type': account.account_type,
+        },
+        'as_of': as_of or 'current',
+        'totals': {
+            'debit': float(total_debit),
+            'credit': float(total_credit),
+            'net_balance': float(net_balance),
+        },
+        'count': len(results),
+        'entries': results,
     })
 
 

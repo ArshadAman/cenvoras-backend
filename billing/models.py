@@ -7,6 +7,12 @@ import uuid
 from inventory.models import Product, ProductBatch, Warehouse
 from cenvoras.constants import IndianStates
 
+
+class BillPaymentStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    PARTIAL_PAID = 'partial_paid', 'Partial Paid'
+    PAID = 'paid', 'Paid'
+
 class Customer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, null=True)
@@ -94,8 +100,22 @@ class PurchaseBill(models.Model):
     journal = models.CharField(max_length=50, default="Purchases")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse where items are received")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def refresh_payment_status(self, save=True):
+        if self.amount_paid <= 0:
+            status_value = BillPaymentStatus.PENDING
+        elif self.amount_paid < self.total_amount:
+            status_value = BillPaymentStatus.PARTIAL_PAID
+        else:
+            status_value = BillPaymentStatus.PAID
+        self.payment_status = status_value
+        if save:
+            self.save(update_fields=['payment_status'])
+        return status_value
 
 class PurchaseBillItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -137,8 +157,22 @@ class SalesInvoice(models.Model):
     journal = models.CharField(max_length=50, default="Sales")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where items are sold")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def refresh_payment_status(self, save=True):
+        if self.amount_paid <= 0:
+            status_value = BillPaymentStatus.PENDING
+        elif self.amount_paid < self.total_amount:
+            status_value = BillPaymentStatus.PARTIAL_PAID
+        else:
+            status_value = BillPaymentStatus.PAID
+        self.payment_status = status_value
+        if save:
+            self.save(update_fields=['payment_status'])
+        return status_value
 
 class SalesInvoiceItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

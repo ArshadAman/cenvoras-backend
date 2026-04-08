@@ -51,6 +51,7 @@ urlpatterns = [
     # GST Compliance
     path('gst/hsn-summary/', gst_views.hsn_summary_report, name='hsn_summary_report'),
     path('gst/tax-register/', gst_views.tax_register, name='tax_register'),
+    path('gst/tax-register/<uuid:invoice_id>/', gst_views.tax_register_invoice_detail, name='tax_register_invoice_detail'),
     path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
     path('gst/e-invoice/', gst_views.generate_einvoice, name='generate_einvoice'),
     path('gst/e-way-bill/', gst_views.generate_eway_bill, name='generate_eway_bill'),

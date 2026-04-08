@@ -25,5 +25,6 @@ urlpatterns = [
     # Financial Statements
     path('profit-loss/', financial_views.profit_loss_statement, name='profit_loss_statement'),
     path('balance-sheet/', financial_views.balance_sheet, name='balance_sheet'),
+    path('balance-sheet/account/<uuid:account_id>/', financial_views.balance_sheet_account_detail, name='balance_sheet_account_detail'),
     path('cashbook/', financial_views.cashbook, name='cashbook'),
 ]

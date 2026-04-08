@@ -137,8 +137,10 @@ def tax_register(request):
 
     for inv in invoices:
         items = inv.items.all()
-        taxable = sum(i.amount - i.tax for i in items)
-        total_tax = sum(i.tax for i in items)
+        taxable = sum((i.amount - i.tax for i in items), Decimal('0'))
+        if taxable < 0:
+            taxable = Decimal('0')
+        total_tax = sum((i.tax for i in items), Decimal('0'))
 
         # Determine intra-state vs inter-state
         is_inter_state = False
@@ -158,6 +160,7 @@ def tax_register(request):
             igst = Decimal('0')
 
         row = {
+            'id': str(inv.id),
             'invoice_number': inv.invoice_number if report_type == 'sales' else inv.bill_number,
             'date': str(inv.invoice_date if report_type == 'sales' else inv.bill_date),
             'party_name': (inv.customer_name or (inv.customer.name if inv.customer else 'Cash')) if report_type == 'sales' else inv.vendor_name,
@@ -184,6 +187,115 @@ def tax_register(request):
         'count': len(results),
         'totals': {k: float(v) for k, v in totals.items()},
         'results': results,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tax_register_invoice_detail(request, invoice_id):
+    """
+    Drill-down for a single invoice/bill in tax register.
+    Query Params: ?type=sales|purchase
+    """
+    user = request.user
+    report_type = request.query_params.get('type', 'sales')
+
+    if report_type == 'sales':
+        try:
+            invoice = SalesInvoice.objects.prefetch_related('items__product', 'customer').get(
+                id=invoice_id, created_by=user
+            )
+        except SalesInvoice.DoesNotExist:
+            return Response({'error': 'Sales invoice not found'}, status=404)
+
+        items = invoice.items.all()
+        is_inter_state = bool(
+            invoice.place_of_supply and hasattr(user, 'state') and user.state and invoice.place_of_supply != user.state
+        )
+        invoice_number = invoice.invoice_number
+        invoice_date = invoice.invoice_date
+        party_name = invoice.customer_name or (invoice.customer.name if invoice.customer else 'Cash')
+        gstin = invoice.customer.gstin if invoice.customer and invoice.customer.gstin else ''
+        total_amount = invoice.total_amount
+    else:
+        try:
+            invoice = PurchaseBill.objects.prefetch_related('items__product').get(
+                id=invoice_id, created_by=user
+            )
+        except PurchaseBill.DoesNotExist:
+            return Response({'error': 'Purchase bill not found'}, status=404)
+
+        items = invoice.items.all()
+        is_inter_state = False
+        invoice_number = invoice.bill_number
+        invoice_date = invoice.bill_date
+        party_name = invoice.vendor_name
+        gstin = invoice.vendor_gstin or ''
+        total_amount = invoice.total_amount
+
+    line_items = []
+    total_taxable = Decimal('0')
+    total_tax = Decimal('0')
+    total_cgst = Decimal('0')
+    total_sgst = Decimal('0')
+    total_igst = Decimal('0')
+
+    for item in items:
+        taxable = item.amount - item.tax
+        if taxable < 0:
+            taxable = Decimal('0')
+        tax = item.tax or Decimal('0')
+
+        if is_inter_state:
+            cgst = Decimal('0')
+            sgst = Decimal('0')
+            igst = tax
+        else:
+            half = (tax / 2).quantize(Decimal('0.01')) if tax else Decimal('0')
+            cgst = half
+            sgst = half
+            igst = Decimal('0')
+
+        line_items.append({
+            'id': str(item.id),
+            'product_id': str(item.product_id),
+            'product_name': item.product.name if item.product else '',
+            'hsn_code': item.hsn_sac_code or '',
+            'quantity': item.quantity,
+            'unit': item.unit or (item.product.unit if item.product else ''),
+            'price': float(item.price),
+            'discount': float(item.discount),
+            'taxable_value': float(taxable),
+            'cgst': float(cgst),
+            'sgst': float(sgst),
+            'igst': float(igst),
+            'tax': float(tax),
+            'line_total': float(item.amount),
+        })
+
+        total_taxable += taxable
+        total_tax += tax
+        total_cgst += cgst
+        total_sgst += sgst
+        total_igst += igst
+
+    return Response({
+        'id': str(invoice.id),
+        'type': report_type,
+        'invoice_number': invoice_number,
+        'date': str(invoice_date),
+        'party_name': party_name,
+        'gstin': gstin,
+        'is_inter_state': is_inter_state,
+        'totals': {
+            'taxable': float(total_taxable),
+            'cgst': float(total_cgst),
+            'sgst': float(total_sgst),
+            'igst': float(total_igst),
+            'tax': float(total_tax),
+            'total_amount': float(total_amount),
+        },
+        'items': line_items,
     })
 
 

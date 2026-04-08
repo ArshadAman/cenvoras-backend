@@ -422,7 +422,11 @@ def batch_split(request):
     """
     batch_id = request.data.get('batch_id')
     new_batch_number = request.data.get('new_batch_number', '').strip()
-    split_qty = int(request.data.get('split_quantity', 0))
+    raw_split_qty = request.data.get('split_quantity', 0)
+    try:
+        split_qty = int(raw_split_qty)
+    except (TypeError, ValueError):
+        return Response({'error': 'split_quantity must be a valid integer.'}, status=status.HTTP_400_BAD_REQUEST)
     manufacturing_date = request.data.get('manufacturing_date')
     expiry_date = request.data.get('expiry_date')
     notes = request.data.get('notes')
@@ -432,7 +436,7 @@ def batch_split(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        original = ProductBatch.objects.get(id=batch_id, product__created_by=request.user.active_tenant.active_tenant)
+        original = ProductBatch.objects.get(id=batch_id, product__created_by=request.user.active_tenant)
     except ProductBatch.DoesNotExist:
         return Response({'error': 'Batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 

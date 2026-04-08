@@ -9,10 +9,20 @@ git pull origin "$1"
 echo " ---- Removing old images ----- "
 # Try graceful shutdown first
 if ! docker compose down; then
-  echo " ---- Warning: Graceful shutdown failed, attempting force removal of stuck containers ----- "
-  # Force remove known container names if they are stuck
+  echo " ---- Warning: Graceful shutdown failed. Attempting to force remove containers... ----- "
   docker rm -f cenvoras-backend-web-1 cenvoras-backend-celery_worker-1 cenvoras-backend-celery_beat-1 cenvoras-backend-nginx-1 2>/dev/null
-  # Clean up any dangling networks if down failed halfway
+  
+  # Check if containers are still alive (permission denied might have blocked rm -f too)
+  if docker ps -a | grep -q "cenvoras-backend"; then
+    echo " ---- Critical: Containers still stuck. Restarting Docker service to clear filesystem locks... ----- "
+    systemctl restart docker || service docker restart
+    # Give it a second to wake up
+    sleep 2
+    # Final cleanup attempt
+    docker compose down 2>/dev/null
+  fi
+  
+  # Clean up any dangling networks
   docker network prune -f
 fi
 

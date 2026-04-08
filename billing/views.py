@@ -241,6 +241,17 @@ def sales_invoice_list_create(request):
         print("DEBUG: Request data:", request.data)
         print("DEBUG: Request user:", request.user)
         
+        # Check for invoice number collision
+        invoice_number = request.data.get('invoice_number')
+        if invoice_number and SalesInvoice.objects.filter(
+            invoice_number=invoice_number, 
+            created_by=request.user.active_tenant
+        ).exists():
+            return Response({
+                'error': 'Invoice number already exists',
+                'details': f"Invoice with number {invoice_number} already exists."
+            }, status=status.HTTP_409_CONFLICT)
+        
         serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             print("DEBUG: Serializer is valid, creating sales invoice")
@@ -415,3 +426,72 @@ def sales_invoice_update_delete(request, pk):
     elif request.method == 'DELETE':
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+from django.db.models import Sum, Count
+from django.utils import timezone
+import re
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_next_invoice_number(request):
+    prefix = request.GET.get('prefix', 'INV-')
+    tenant_id = str(request.user.active_tenant.id)[:4].upper()
+    full_prefix = f"{prefix}{tenant_id}-"
+    
+    # Find max invoice number with this prefix
+    invoices = SalesInvoice.objects.filter(
+        created_by=request.user.active_tenant,
+        invoice_number__startswith=full_prefix
+    )
+    
+    max_num = 0
+    for inv in invoices:
+        suffix = inv.invoice_number.replace(full_prefix, '')
+        try:
+            num = int(suffix)
+            if num > max_num:
+                max_num = num
+        except ValueError:
+            pass
+            
+    next_num = max_num + 1
+    next_invoice = f"{full_prefix}{next_num:03d}"
+    return Response({
+        "success": True,
+        "uuid_prefix": tenant_id,
+        "next_number": next_invoice,
+        "suffix": f"{next_num:03d}"
+    })
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def sales_summary_analytics(request):
+    start_date = request.GET.get('start_date')
+    end_date = request.GET.get('end_date')
+    
+    qs = SalesInvoice.objects.filter(created_by=request.user.active_tenant)
+    if start_date:
+        qs = qs.filter(invoice_date__gte=start_date)
+    if end_date:
+        qs = qs.filter(invoice_date__lte=end_date)
+        
+    total_revenue = qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
+    total_invoices = qs.count()
+    
+    now = timezone.now()
+    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    this_month_qs = SalesInvoice.objects.filter(
+        created_by=request.user.active_tenant,
+        invoice_date__gte=this_month_start.date()
+    )
+    this_month_revenue = this_month_qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
+    this_month_invoices = this_month_qs.count()
+    
+    return Response({
+        "success": True,
+        "total_revenue": total_revenue,
+        "total_invoices": total_invoices,
+        "this_month_revenue": this_month_revenue,
+        "this_month_invoices": this_month_invoices,
+    })

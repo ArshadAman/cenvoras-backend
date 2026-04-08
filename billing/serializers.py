@@ -355,7 +355,8 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesInvoiceItemSerializer(many=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
-    customer_name = serializers.CharField()  # Always required - the name to display
+    customer_name = serializers.CharField(required=False, allow_blank=True)  # Name to display, optional for draft
+    status = serializers.CharField(required=False, default='final')
     customer_email = serializers.EmailField(write_only=True, required=False)
     customer_phone = serializers.CharField(write_only=True, required=False)
     customer_address = serializers.CharField(write_only=True, required=False)
@@ -369,7 +370,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items', 'meta']
+                  'journal', 'warehouse', 'status', 'total_amount', 'created_by', 'created_at', 'items', 'meta']
 
     def validate(self, data):
         """
@@ -429,8 +430,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
         
-        if not customer_name or not str(customer_name).strip():
-            error_msg = 'Customer name is required.'
+        if data.get('status') != 'draft' and (not customer_name or not str(customer_name).strip()):
+            error_msg = 'Customer name is required for final invoices.'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
             raise serializers.ValidationError({'customer_name': error_msg})
         

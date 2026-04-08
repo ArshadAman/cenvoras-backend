@@ -1,1 +1,4 @@
 .env
+celerybeat-schedule
+.DS_Store
+__pycache__

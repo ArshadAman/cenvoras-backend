@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/ap
 
 # Copy wheels and install
 COPY --from=builder /install /install
-RUN pip install --no-cache-dir /install/*
+RUN pip install --no-cache-dir /install/*.whl
 
 # Copy app
 COPY . /app

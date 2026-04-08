@@ -470,6 +470,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         status_value = data.get('status', getattr(self.instance, 'status', 'final'))
         customer_name = data.get('customer_name')
         if self.instance and (not customer_name or not str(customer_name).strip()):
+            related_customer = getattr(self.instance, 'customer', None)
+            if related_customer and related_customer.name:
+                customer_name = related_customer.name
+        if self.instance and (not customer_name or not str(customer_name).strip()):
             customer_name = self.instance.customer_name or ''
         customer_name = customer_name or ''
         customer_email = data.get('customer_email', '')
@@ -493,7 +497,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         user = request.user
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
-        customer_obj = None
+        customer_obj = getattr(self.instance, 'customer', None) if self.instance else None
         
         # Only create/find Customer object if email is provided
         if customer_email and customer_email.strip():
@@ -620,6 +624,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
         validated_data.pop('total_amount', None)
+        meta_data = validated_data.pop('meta', None)
         
         # Update the sales invoice fields
         for attr, value in validated_data.items():
@@ -642,8 +647,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         instance.refresh_payment_status(save=False)
         instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
         
-        # Update Meta
-        meta_data = validated_data.pop('meta', None)
         if meta_data:
             meta, created = TransactionMeta.objects.get_or_create(invoice=instance)
             for attr, value in meta_data.items():

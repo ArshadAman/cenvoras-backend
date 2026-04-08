@@ -4,6 +4,9 @@ from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal
 from .serializers_sidecar import ProductMetaSerializer, BillOfMaterialSerializer, StockJournalSerializer
 
 class ProductSerializer(serializers.ModelSerializer):
+    unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, required=False)
+    cost_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, required=False)
+    sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     meta = ProductMetaSerializer(required=False)
     
     class Meta:
@@ -11,10 +14,10 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'hsn_sac_code', 'description', 'tax', 'stock', 'unit',
             'secondary_unit', 'conversion_factor',
-            'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'created_by',
+            'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'created_by',
             'meta'
         ]
-        read_only_fields = ['id', 'created_by']
+        read_only_fields = ['id', 'created_by', 'price']
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)

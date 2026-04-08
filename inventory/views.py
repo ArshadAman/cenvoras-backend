@@ -1,8 +1,13 @@
+import csv
+from io import TextIOWrapper
+
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
+from django.http import HttpResponse
 from django.utils import timezone
 from datetime import timedelta
+from django.db import transaction
 from django.db.models import Sum, F
 from .models import Product, Warehouse, StockPoint, StockTransfer, ProductBatch
 from .models_pricing import PriceList, Scheme
@@ -15,6 +20,18 @@ from .serializers import (
 from django_filters.rest_framework import DjangoFilterBackend
 
 from rest_framework import filters
+
+
+def _product_template_fields():
+    fields = []
+    for field in Product._meta.concrete_fields:
+        if field.name in {'id', 'created_by'}:
+            continue
+        if not field.editable:
+            continue
+        # Expose user-facing pricing key while keeping DB column intact.
+        fields.append('cost_price' if field.name == 'price' else field.name)
+    return fields
 
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
@@ -172,6 +189,108 @@ def batch_list(request):
         
     serializer = ProductBatchSerializer(queryset, many=True)
     return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def download_product_csv_template(request):
+    """
+    Download a CSV template for bulk product upload.
+    The header is generated from Product model fields.
+    """
+    headers = _product_template_fields()
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="product_bulk_template.csv"'
+
+    writer = csv.writer(response)
+    writer.writerow(headers)
+    # Add one sample row for quick guidance in spreadsheet tools.
+    sample = ['' for _ in headers]
+    if 'unit' in headers:
+        sample[headers.index('unit')] = 'pcs'
+    if 'conversion_factor' in headers:
+        sample[headers.index('conversion_factor')] = '1'
+    writer.writerow(sample)
+
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def bulk_upload_products(request):
+    """
+    Bulk create products from a CSV file.
+    Expected file form key: file
+    """
+    uploaded_file = request.FILES.get('file')
+    if not uploaded_file:
+        return Response({'error': 'CSV file is required using form key "file".'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not uploaded_file.name.lower().endswith('.csv'):
+        return Response({'error': 'Only CSV files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    def normalize_key(key):
+        return (key or '').strip().lower()
+
+    expected_fields = _product_template_fields()
+    optional_nullable_fields = {'hsn_sac_code', 'description', 'secondary_unit', 'sale_price'}
+
+    try:
+        text_stream = TextIOWrapper(uploaded_file.file, encoding='utf-8-sig')
+        reader = csv.DictReader(text_stream)
+    except Exception:
+        return Response({'error': 'Unable to parse CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not reader.fieldnames:
+        return Response({'error': 'CSV must include a header row.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    created_count = 0
+    errors = []
+
+    with transaction.atomic():
+        for index, row in enumerate(reader, start=2):
+            normalized_row = {normalize_key(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
+
+            payload = {}
+            for field in expected_fields:
+                incoming_key = 'cost_price' if field == 'cost_price' else field
+                # Backward compatibility for old files that still use "price".
+                value = normalized_row.get(incoming_key)
+                if field == 'cost_price' and value in (None, ''):
+                    value = normalized_row.get('price')
+
+                if value in (None, ''):
+                    if field in optional_nullable_fields:
+                        payload[field] = None
+                    continue
+
+                payload[field] = value
+
+            serializer = ProductSerializer(data=payload, context={'request': request})
+            if serializer.is_valid():
+                serializer.save(created_by=request.user.active_tenant)
+                created_count += 1
+            else:
+                errors.append({'row': index, 'errors': serializer.errors})
+
+    if errors:
+        return Response(
+            {
+                'created_count': created_count,
+                'failed_count': len(errors),
+                'errors': errors,
+                'expected_columns': expected_fields,
+            },
+            status=status.HTTP_207_MULTI_STATUS,
+        )
+
+    return Response(
+        {
+            'message': 'Bulk upload completed successfully.',
+            'created_count': created_count,
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 
 # =============================================================================

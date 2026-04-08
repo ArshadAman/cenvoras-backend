@@ -5,18 +5,34 @@ from django.conf import settings
 # Create your models here.
 
 class Product(models.Model):
+    UNIT_CHOICES = [
+        ("pcs", "pcs"),
+        ("kg", "kg"),
+        ("g", "g"),
+        ("mg", "mg"),
+        ("l", "l"),
+        ("ml", "ml"),
+        ("cm", "cm"),
+        ("m", "m"),
+        ("mm", "mm"),
+        ("box", "box"),
+        ("pack", "pack"),
+        ("dozen", "dozen"),
+        ("other", "other"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    unit = models.CharField(max_length=20, default="pcs")  # e.g., pcs, kg, box
+    unit = models.CharField(max_length=20, choices=UNIT_CHOICES, default="pcs")
     
     # Unit Conversion (Phase 4)
     secondary_unit = models.CharField(max_length=20, blank=True, null=True, help_text="e.g., Box")
     conversion_factor = models.PositiveIntegerField(default=1, help_text="1 Secondary Unit = X Primary Units")
     
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, default=None)
     tax = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # GST %
     warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
     stock = models.PositiveIntegerField(default=0, help_text="Global stock count (Cached)")

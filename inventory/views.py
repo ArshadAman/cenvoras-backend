@@ -230,7 +230,17 @@ def bulk_upload_products(request):
         return Response({'error': 'Only CSV files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
 
     def normalize_key(key):
-        return (key or '').strip().lower()
+        return (key or '').strip().lower().replace(' ', '_').replace('-', '_')
+
+    header_aliases = {
+        'cost_price': ['cost_price', 'price', 'purchase_price', 'cost'],
+        'sale_price': ['sale_price', 'sales_price', 'selling_price', 'saleprice', 'salesprice'],
+        'hsn_sac_code': ['hsn_sac_code', 'hsn_code', 'hsn'],
+        'low_stock_alert': ['low_stock_alert', 'min_stock_level', 'reorder_level'],
+        'stock': ['stock', 'opening_stock', 'current_stock'],
+        'secondary_unit': ['secondary_unit', 'secondaryunit'],
+        'conversion_factor': ['conversion_factor', 'conversionfactor'],
+    }
 
     expected_fields = _product_template_fields()
     optional_nullable_fields = {'hsn_sac_code', 'description', 'secondary_unit', 'sale_price'}
@@ -247,22 +257,34 @@ def bulk_upload_products(request):
     created_count = 0
     errors = []
 
+    processed_rows = 0
+
     with transaction.atomic():
         for index, row in enumerate(reader, start=2):
             normalized_row = {normalize_key(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
+            if not any(v not in (None, '') for v in normalized_row.values()):
+                continue
+
+            processed_rows += 1
 
             payload = {}
             for field in expected_fields:
-                incoming_key = 'cost_price' if field == 'cost_price' else field
-                # Backward compatibility for old files that still use "price".
-                value = normalized_row.get(incoming_key)
-                if field == 'cost_price' and value in (None, ''):
-                    value = normalized_row.get('price')
+                lookup_key = 'cost_price' if field == 'cost_price' else field
+                value = normalized_row.get(lookup_key)
+                if value in (None, ''):
+                    for alias in header_aliases.get(lookup_key, []):
+                        alias_value = normalized_row.get(alias)
+                        if alias_value not in (None, ''):
+                            value = alias_value
+                            break
 
                 if value in (None, ''):
                     if field in optional_nullable_fields:
                         payload[field] = None
                     continue
+
+                if field == 'unit' and isinstance(value, str):
+                    value = value.lower()
 
                 payload[field] = value
 
@@ -278,10 +300,21 @@ def bulk_upload_products(request):
             {
                 'created_count': created_count,
                 'failed_count': len(errors),
+                'processed_rows': processed_rows,
                 'errors': errors,
                 'expected_columns': expected_fields,
             },
             status=status.HTTP_207_MULTI_STATUS,
+        )
+
+    if created_count == 0:
+        return Response(
+            {
+                'error': 'No products were created from the CSV file.',
+                'processed_rows': processed_rows,
+                'expected_columns': expected_fields,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     return Response(

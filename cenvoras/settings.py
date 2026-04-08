@@ -205,6 +205,8 @@ TRANSACTIONAL_EMAIL_API_KEY = os.environ.get('TRANSACTIONAL_EMAIL_API_KEY', '')
 TRANSACTIONAL_EMAIL_SENDER_EMAIL = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
 TRANSACTIONAL_EMAIL_SENDER_NAME = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_NAME', 'Cenvora')
 TRANSACTIONAL_EMAIL_API_URL = os.environ.get('TRANSACTIONAL_EMAIL_API_URL', '')
+TRANSACTIONAL_EMAIL_SEND_ENDPOINT = os.environ.get('TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
+TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS = int(os.environ.get('TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS', 20))
 
 # WhatsApp Business API — Coming Soon
 # Set these when the WhatsApp integration is launched
@@ -229,3 +231,10 @@ CLOUDINARY_STORAGE = {
 # DBBACKUP_STORAGE = 'cloudinary_storage.storage.RawMediaCloudinaryStorage'
 DBBACKUP_CLEANUP_KEEP = 7
 DBBACKUP_EXTENSION = 'backup'  # Cloudinary blocks .bin, 'backup' is safer for Raw uploads
+
+# Resilient backup scheduler configuration
+BACKUP_CLOUDINARY_FOLDER = os.environ.get('BACKUP_CLOUDINARY_FOLDER', 'cenvoras/db_backups')
+BACKUP_SCHEDULE_MINUTE = int(os.environ.get('BACKUP_SCHEDULE_MINUTE', 15))
+BACKUP_MAX_ATTEMPTS = int(os.environ.get('BACKUP_MAX_ATTEMPTS', 3))
+BACKUP_CIRCUIT_OPEN_SECONDS = int(os.environ.get('BACKUP_CIRCUIT_OPEN_SECONDS', 21600))
+BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'cenvoras@gmail.com')

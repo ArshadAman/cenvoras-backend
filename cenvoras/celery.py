@@ -24,6 +24,8 @@ app = Celery('cenvoras')
 # - namespace='CELERY' means all celery-related configuration keys
 #   should have a `CELERY_` prefix.
 app.config_from_object('django.conf:settings', namespace='CELERY')
+app.conf.timezone = os.environ.get('CELERY_TIMEZONE', 'Asia/Kolkata')
+app.conf.enable_utc = False
 
 # Load task modules from all registered Django apps.
 app.autodiscover_tasks()
@@ -38,7 +40,7 @@ def debug_task(self):
 app.conf.beat_schedule = {
     'daily-database-backup': {
         'task': 'users.tasks.run_database_backup',
-        # Run daily at midnight
-        'schedule': crontab(minute=0, hour=0),
+        # Run daily within 2AM-3AM IST window.
+        'schedule': crontab(minute=int(os.environ.get('BACKUP_SCHEDULE_MINUTE', '15')), hour=2),
     },
 }

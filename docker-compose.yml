@@ -61,9 +61,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # DOZZLE_USERNAME and DOZZLE_PASSWORD restrict logs visually via UI
-      - DOZZLE_USERNAME=admin
-      - DOZZLE_PASSWORD=cenvoras_logs
+      # DOZZLE_USERNAME and DOZZLE_PASSWORD are read from .env
+      - DOZZLE_USERNAME=${DOZZLE_USERNAME:-admin}
+      - DOZZLE_PASSWORD=${DOZZLE_PASSWORD:-change_me_in_env}
+      - DOZZLE_FILTER=status=running
+      - DOZZLE_NO_ANALYTICS=true
+    restart: unless-stopped
 
   db:
     image: postgres:14

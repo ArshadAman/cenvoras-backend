@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 # ---- Transactional Email Async Task ----
 
-@shared_task
-def send_async_email_notification(user_id, to_email, subject, body, related_model='', related_id=''):
+@shared_task(bind=True, autoretry_for=(http_requests.RequestException,), retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 3})
+def send_async_email_notification(self, user_id, to_email, subject, body, related_model='', related_id=''):
     """
     Asynchronously sends an email via transactional email API.
     Set TRANSACTIONAL_EMAIL_API_KEY and TRANSACTIONAL_EMAIL_SENDER_EMAIL in Django settings/.env.
@@ -47,7 +47,9 @@ def send_async_email_notification(user_id, to_email, subject, body, related_mode
     API_KEY = getattr(settings, 'TRANSACTIONAL_EMAIL_API_KEY', '')
     FROM_EMAIL = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', f"{sanitized_name}@email.cenvora.app")
     FROM_NAME = business_name
-    BASE_URL = getattr(settings, 'TRANSACTIONAL_EMAIL_API_URL', '') or 'https://api.ahasend.com/v1'
+    BASE_URL = (getattr(settings, 'TRANSACTIONAL_EMAIL_API_URL', '') or 'https://api.ahasend.com/v1').rstrip('/')
+    SEND_ENDPOINT = getattr(settings, 'TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
+    TIMEOUT_SECONDS = int(getattr(settings, 'TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS', 20))
 
     if not API_KEY or not BASE_URL:
         # Fallback if API key or URL not set
@@ -65,8 +67,6 @@ def send_async_email_notification(user_id, to_email, subject, body, related_mode
                 "subject": subject,
                 "html_body": body.replace("\n", "<br>"),
                 "text_body": body,
-                "html": body.replace("\n", "<br>"),  # Dual coverage for compatibility
-                "text": body,
                 "reply_to": {"email": FROM_EMAIL, "name": FROM_NAME},
             },
             "headers": {
@@ -74,19 +74,45 @@ def send_async_email_notification(user_id, to_email, subject, body, related_mode
                 "X-Priority": "3 (Normal)",
             }
         }
-        logger.info(f"EMAIL REQUEST: URL={BASE_URL}/email/send | Payload={payload}")
-        
-        response = http_requests.post(
-            f"{BASE_URL}/email/send",
-            headers={
-                "X-Api-Key": API_KEY,
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=15,
-        )
-        
-        logger.info(f"EMAIL RESPONSE: Status={response.status_code} | Body={response.text}")
+
+        candidate_endpoints = [SEND_ENDPOINT, '/email/send', '/send-email']
+        # Preserve order but avoid duplicates
+        unique_endpoints = []
+        for endpoint in candidate_endpoints:
+            if endpoint and endpoint not in unique_endpoints:
+                unique_endpoints.append(endpoint)
+
+        response = None
+        last_error = None
+        for endpoint in unique_endpoints:
+            try:
+                endpoint = endpoint if endpoint.startswith('/') else f"/{endpoint}"
+                url = f"{BASE_URL}{endpoint}"
+                logger.info("EMAIL REQUEST: URL=%s | To=%s | Subject=%s", url, to_email, subject)
+                response = http_requests.post(
+                    url,
+                    headers={
+                        "X-Api-Key": API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=TIMEOUT_SECONDS,
+                )
+                # Fallback only on not found style errors
+                if response.status_code not in (404, 405):
+                    break
+                last_error = f"Endpoint {endpoint} returned {response.status_code}"
+            except Exception as endpoint_exc:
+                last_error = str(endpoint_exc)
+                continue
+
+        if response is None:
+            raise RuntimeError(f"Email API not reachable: {last_error or 'unknown error'}")
+
+        logger.info("EMAIL RESPONSE: Status=%s | Body=%s", response.status_code, response.text)
+
+        if response.status_code >= 500:
+            raise self.retry(exc=RuntimeError(f"AHASEND server error: {response.status_code}"))
 
         # Provider might return 200/201 even if some/all recipients fail
         try:
@@ -95,14 +121,18 @@ def send_async_email_notification(user_id, to_email, subject, body, related_mode
             fail_count = res_json.get('fail_count', 0)
             errors = res_json.get('errors', [])
             
-            if success_count > 0:
+            if response.status_code in [200, 201, 202] and success_count > 0:
                 log.status = 'sent'
                 log.error_message = f"Sent: {success_count} | Failed: {fail_count}"
                 if errors:
                     log.error_message += f" | Errors: {', '.join(errors)[:400]}"
             else:
                 log.status = 'failed'
-                log.error_message = f"Failed to send. Errors: {', '.join(errors)[:500]}"
+                log.error_message = (
+                    f"Provider response not successful. Status={response.status_code}, "
+                    f"success_count={success_count}, fail_count={fail_count}, "
+                    f"errors={', '.join(errors)[:300]}"
+                )
         except Exception:
             # Fallback for non-JSON or unexpected structure
             if response.status_code in [200, 201, 202]:

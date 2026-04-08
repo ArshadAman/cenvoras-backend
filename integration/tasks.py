@@ -4,6 +4,7 @@ TRANSACTIONAL_EMAIL_API_KEY and TRANSACTIONAL_EMAIL_SENDER_EMAIL must be set in 
 """
 import logging
 import requests as http_requests
+from decimal import Decimal, ROUND_HALF_UP
 from celery import shared_task
 from django.conf import settings
 from .models import NotificationLog
@@ -25,8 +26,9 @@ def send_async_email_notification(self, user_id, to_email, subject, body, relate
         from django.contrib.auth import get_user_model
         User = get_user_model()
         user = User.objects.get(id=user_id)
-    except Exception:
-        user = None
+    except Exception as exc:
+        logger.error("Email task rejected due to invalid user_id=%s: %s", user_id, exc)
+        return {'status': 'failed', 'error': f'invalid_user:{exc}'}
 
     log = NotificationLog.objects.create(
         user=user,
@@ -240,18 +242,23 @@ def send_payment_reminders_for_user(user_id, overdue_days=30):
     ).exclude(email='')
 
     sent = 0
-    for customer in overdue_customers:
-        subject = f"Payment Reminder — ₹{customer.current_balance} Outstanding"
+    for idx, customer in enumerate(overdue_customers):
+        outstanding_amount = Decimal(str(customer.current_balance or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        subject = f"Payment Reminder: Outstanding Balance of Rs. {outstanding_amount}"
         body = (
             f"Dear {customer.name},\n\n"
-            f"This is a friendly reminder that you have an outstanding balance of "
-            f"₹{customer.current_balance} with {user.business_name or 'Cenvora'}.\n\n"
-            f"Please clear the dues at your earliest convenience.\n\n"
-            f"Thank you!\n— {user.business_name or 'Cenvora'}"
+            f"We hope you are doing well. This is a gentle reminder that your current outstanding balance is "
+            f"Rs. {outstanding_amount}.\n\n"
+            f"We kindly request you to arrange payment at your earliest convenience. "
+            f"If payment has already been made, please ignore this message.\n\n"
+            f"Regards,\n"
+            f"{user.business_name or 'Cenvora'}"
         )
-        send_async_email_notification.delay(
-            user.id, customer.email, subject, body,
-            related_model='Customer', related_id=str(customer.id)
+        # Stagger reminder sends by 2 seconds each to avoid provider bursts.
+        countdown_seconds = (idx + 1) * 2
+        send_async_email_notification.apply_async(
+            args=[str(user.id), customer.email, subject, body, 'Customer', str(customer.id)],
+            countdown=countdown_seconds,
         )
         sent += 1
 

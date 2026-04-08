@@ -172,15 +172,19 @@ class SendPaymentRemindersView(APIView):
     def post(self, request):
         from .tasks import send_payment_reminders_for_user
         overdue_days = request.data.get('overdue_days', 30)
+        stagger_seconds = 2
         # Count eligible before dispatching
         count = Customer.objects.filter(
             created_by=request.user,
             current_balance__gt=0,
         ).exclude(email='').count()
         send_payment_reminders_for_user.delay(str(request.user.id), overdue_days)
+        total_dispatch_window_seconds = count * stagger_seconds
         return Response({
             'message': f'Payment reminders queued for {count} customer(s) with outstanding balance.',
-            'queued': count
+            'queued': count,
+            'stagger_seconds': stagger_seconds,
+            'dispatch_window_seconds': total_dispatch_window_seconds,
         })
 
 

@@ -2,8 +2,6 @@ services:
   web:
     build: .
     command: ./entrypoint.sh
-    volumes:
-      - .:/app
     ports:
       - "8000:8000"
     env_file:
@@ -12,52 +10,89 @@ services:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    restart: unless-stopped
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8000)); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
 
   redis:
     image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "900"
+      - "1"
+      - --save
+      - "300"
+      - "10"
+      - --save
+      - "60"
+      - "10000"
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   celery_worker:
     build: .
     command: celery -A cenvoras worker -l info --pool=gevent --concurrency=100
-    volumes:
-      - .:/app
     env_file:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    restart: unless-stopped
     depends_on:
-      - db
-      - redis
-      - web
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
 
   celery_beat:
     build: .
-    command: celery -A cenvoras beat -l info
-    volumes:
-      - .:/app
+    command: celery -A cenvoras beat -l info --schedule /app/celerybeat-data/celerybeat-schedule
     env_file:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - celerybeat_data:/app/celerybeat-data
+    restart: unless-stopped
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
   dozzle:
     image: amir20/dozzle:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       # DOZZLE_USERNAME and DOZZLE_PASSWORD are read from .env
       - DOZZLE_USERNAME=${DOZZLE_USERNAME:-admin}
@@ -68,12 +103,35 @@ services:
 
   db:
     image: postgres:14
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - min_wal_size=512MB
+      - -c
+      - checkpoint_timeout=10min
+      - -c
+      - synchronous_commit=on
+      - -c
+      - fsync=on
+      - -c
+      - full_page_writes=on
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     env_file:
       - .env
     volumes:
       - pgdata:/var/lib/postgresql/data/
+    restart: unless-stopped
+    stop_grace_period: 1m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   nginx:
     image: nginx:latest
@@ -87,7 +145,11 @@ services:
       - ./staticfiles:/app/static:ro
       - ./media:/app/media:ro
     depends_on:
-      - web
+      web:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
+  redisdata:
+  celerybeat_data:

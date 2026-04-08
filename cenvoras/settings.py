@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -8,12 +9,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-^b68wd86pdzoj4goxo_o--!6w4tygg0sgzl)r7mb4m_^j-n0x0'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-local-dev-fallback')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS = ['*']
+raw_allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
+if raw_allowed_hosts.strip():
+    ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
 
 
 # Application definition
@@ -90,8 +95,6 @@ WSGI_APPLICATION = 'cenvoras.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-import os
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -100,8 +103,13 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        'ATOMIC_REQUESTS': True,
         'CONN_MAX_AGE': int(os.environ.get('CONN_MAX_AGE', 120)),  # Preserve and reuse TCP connections for 2 minutes
         'CONN_HEALTH_CHECKS': True,
+        'OPTIONS': {
+            'connect_timeout': int(os.environ.get('POSTGRES_CONNECT_TIMEOUT', 10)),
+            'sslmode': os.environ.get('POSTGRES_SSLMODE', 'prefer'),
+        },
     }
 }
 
@@ -189,8 +197,19 @@ REST_FRAMEWORK = {
 }
 
 # CORS configuration (allow all for development, restrict in production)
-CORS_ALLOW_ALL_ORIGINS = True
-CSRF_TRUSTED_ORIGINS = ["https://devapi.cenvora.app"]
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('1', 'true', 'yes', 'on')
+raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://devapi.cenvora.app')
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in raw_csrf_trusted.split(',') if origin.strip()]
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', 31536000))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'

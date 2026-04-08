@@ -234,6 +234,10 @@ def sales_invoice_list_create(request):
         if customer_id:
             invoices = invoices.filter(customer_id=customer_id)
             
+        status_filter = request.GET.get('status')
+        if status_filter and status_filter != 'all':
+            invoices = invoices.filter(status=status_filter)
+            
         serializer = SalesInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':

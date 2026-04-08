@@ -92,6 +92,34 @@ def _parse_cloudinary_created_at(value):
         return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
 
+def _resolve_backup_env():
+    explicit = os.environ.get("BACKUP_ENV") or os.environ.get("APP_ENV")
+    if explicit:
+        return str(explicit).strip().lower().replace(" ", "-")
+    # Fallback to debug-derived environment label.
+    return "dev" if getattr(settings, "DEBUG", False) else "prod"
+
+
+def _resolve_backup_version():
+    explicit = os.environ.get("BACKUP_VERSION")
+    if explicit:
+        return str(explicit).strip()
+
+    try:
+        run = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if run.returncode == 0 and run.stdout.strip():
+            return f"git-{run.stdout.strip()}"
+    except Exception:
+        pass
+
+    return "git-unknown"
+
+
 def _upload_backup_to_cloudinary(file_path, backup_name):
     cloud_name = getattr(settings, "CLOUDINARY_STORAGE", {}).get("CLOUD_NAME", "")
     api_key = getattr(settings, "CLOUDINARY_STORAGE", {}).get("API_KEY", "")
@@ -279,8 +307,12 @@ def run_database_backup(triggered_by_user_id=None, manual=False):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".sql") as tmp:
                 temp_sql_path = tmp.name
 
-            timestamp = timezone.localtime().strftime("%Y-%m-%d_%H-%M-%S")
-            backup_name = f"backup_{timestamp}.sql.gz"
+            now_local = timezone.localtime()
+            date_part = now_local.strftime("%Y-%m-%d")
+            time_part = now_local.strftime("%H-%M-%S")
+            env_part = _resolve_backup_env()
+            version_part = _resolve_backup_version()
+            backup_name = f"backup_{env_part}_{date_part}_{time_part}_{version_part}.sql.gz"
 
             dump_output = _pg_dump_to_file(temp_sql_path)
             temp_gz_path = _gzip_file(temp_sql_path)

@@ -10,6 +10,27 @@ fi
 
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
 
+free_http_ports() {
+  echo " ---- Checking for processes using ports 80/443 ----- "
+
+  # Stop common host web servers if they are running.
+  for svc in nginx apache2 caddy; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      echo " ---- Stopping host service: $svc ----- "
+      systemctl stop "$svc" || true
+    fi
+  done
+
+  # Remove any docker container (outside this compose stack) holding 80/443.
+  local ids
+  ids=$(docker ps --format '{{.ID}} {{.Ports}}' | awk '/0\.0\.0\.0:80->|\[::\]:80->|0\.0\.0\.0:443->|\[::\]:443->/ {print $1}')
+  if [ -n "$ids" ]; then
+    echo " ---- Removing containers bound to 80/443: $ids ----- "
+    # shellcheck disable=SC2086
+    docker rm -f $ids || true
+  fi
+}
+
 echo " ---- Redeploying Cenvoras (PRODUCTION) via $DOCKER_CMD -----"
 echo " ---- Using Let's Encrypt certificates -----"
 echo " ---- Pulling latest changes from Git ----- "
@@ -21,6 +42,8 @@ if [ -z "$1" ]; then
 fi
 
 git pull origin "$1"
+
+free_http_ports
 
 echo " ---- Removing old images ----- "
 # Try graceful shutdown with production override
@@ -47,14 +70,28 @@ if ! $DOCKER_CMD $COMPOSE_FILES down; then
   docker network prune -f
 fi
 
+# One more pass in case compose down surfaced old binders.
+free_http_ports
+
 echo " ---- Building new images with production overrides ----- "
-$DOCKER_CMD $COMPOSE_FILES up --build -d
+if ! $DOCKER_CMD $COMPOSE_FILES up --build -d; then
+  echo " ---- Error: compose up failed. Showing nginx logs ----- "
+  $DOCKER_CMD $COMPOSE_FILES logs --tail=120 nginx || true
+  exit 1
+fi
 
 echo " ---- Waiting for services to be healthy ----- "
 sleep 10
 
 echo " ---- Running database migrations ----- "
 $DOCKER_CMD $COMPOSE_FILES exec -T web python manage.py migrate
+
+echo " ---- Validating Nginx is running ----- "
+if ! $DOCKER_CMD $COMPOSE_FILES ps nginx | grep -q "Up"; then
+  echo " ---- Error: Nginx is not running. Logs below ----- "
+  $DOCKER_CMD $COMPOSE_FILES logs --tail=120 nginx || true
+  exit 1
+fi
 
 echo " ---- Verifying services ----- "
 $DOCKER_CMD $COMPOSE_FILES ps

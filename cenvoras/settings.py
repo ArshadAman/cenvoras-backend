@@ -184,6 +184,8 @@ REST_FRAMEWORK = {
         'rest_framework.filters.OrderingFilter',
         'rest_framework.filters.SearchFilter',
     ],
+    'DEFAULT_PAGINATION_CLASS': 'cenvoras.pagination.StandardResultsSetPagination',
+    'PAGE_SIZE': 15,
 }
 
 # CORS configuration (allow all for development, restrict in production)
@@ -225,3 +227,5 @@ CLOUDINARY_STORAGE = {
 
 # django-dbbackup storage configuration
 DBBACKUP_STORAGE = 'cloudinary_storage.storage.RawMediaCloudinaryStorage'
+DBBACKUP_CLEANUP_KEEP = 7
+DBBACKUP_EXTENSION = 'backup'  # Cloudinary blocks .bin, 'backup' is safer for Raw uploads

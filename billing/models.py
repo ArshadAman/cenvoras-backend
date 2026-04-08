@@ -58,11 +58,35 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"{self.customer.name} - {self.amount} ({self.date})"
+
+class Vendor(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    email = models.EmailField(blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    gstin = models.CharField(max_length=15, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    
+    state = models.CharField(
+        max_length=2, 
+        choices=IndianStates.choices, 
+        blank=True, 
+        null=True,
+        help_text="Vendor's State (Determines IGST vs CGST/SGST)"
+    )
+    
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+
+    def __str__(self):
+        return self.name
+
 class PurchaseBill(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bill_number = models.CharField(max_length=100)
     bill_date = models.DateField()
     due_date = models.DateField(null=True, blank=True)
+    vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, null=True, blank=True)
     vendor_name = models.CharField(max_length=255)
     vendor_address = models.TextField(blank=True, null=True)
     vendor_gstin = models.CharField(max_length=15, blank=True, null=True)

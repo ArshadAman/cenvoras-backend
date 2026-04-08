@@ -33,12 +33,24 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         fields = ['id', 'credit_note_number', 'date', 'original_invoice',
                   'customer', 'customer_name', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items']
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at']
 
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         validated_data['created_by'] = self.context['request'].user
+        
+        # Auto-generate credit note number if not provided
+        last_note = CreditNote.objects.order_by('-created_at').first()
+        if last_note and last_note.credit_note_number.startswith('CN-'):
+            try:
+                last_num = int(last_note.credit_note_number.split('-')[1])
+                validated_data['credit_note_number'] = f"CN-{last_num + 1:04d}"
+            except ValueError:
+                validated_data['credit_note_number'] = "CN-0001"
+        else:
+            validated_data['credit_note_number'] = "CN-0001"
+            
         credit_note = CreditNote.objects.create(**validated_data)
 
         user = self.context['request'].user
@@ -86,12 +98,24 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         fields = ['id', 'debit_note_number', 'date', 'original_bill',
                   'vendor_name', 'vendor_gstin', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items']
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'debit_note_number', 'created_by', 'created_at']
 
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         validated_data['created_by'] = self.context['request'].user
+        
+        # Auto-generate debit note number if not provided
+        last_note = DebitNote.objects.order_by('-created_at').first()
+        if last_note and last_note.debit_note_number.startswith('DN-'):
+            try:
+                last_num = int(last_note.debit_note_number.split('-')[1])
+                validated_data['debit_note_number'] = f"DN-{last_num + 1:04d}"
+            except ValueError:
+                validated_data['debit_note_number'] = "DN-0001"
+        else:
+            validated_data['debit_note_number'] = "DN-0001"
+            
         debit_note = DebitNote.objects.create(**validated_data)
 
         user = self.context['request'].user
@@ -129,7 +153,11 @@ def credit_note_list_create(request):
         return Response(serializer.data)
 
     serializer = CreditNoteSerializer(data=request.data, context={'request': request})
-    serializer.is_valid(raise_exception=True)
+    if not serializer.is_valid():
+        print("===== CREDIT NOTE VALIDATION ERROR =====")
+        print(serializer.errors)
+        print("========================================")
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     serializer.save()
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 

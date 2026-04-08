@@ -16,6 +16,8 @@ urlpatterns = [
     # Reports
     path('reports/expiry/', views.expiry_report, name='expiry-report'),
     path('reports/shortage/', views.shortage_report, name='shortage-report'),
+    path('reports/warranty/', views.warranty_report, name='warranty-report'),
+    path('reports/expiry-summary/', views.expiry_dashboard_summary, name='expiry-dashboard-summary'),
     
     # Sidecar (BOM & Stock Journal)
     path('bom/', views_sidecar.BOMListCreateView.as_view(), name='bom-list-create'),

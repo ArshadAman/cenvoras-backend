@@ -12,13 +12,17 @@ from .serializers import (
     PriceListSerializer, SchemeSerializer
 
 )
+from django_filters.rest_framework import DjangoFilterBackend
+
+from rest_framework import filters
 
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
 
     def get_queryset(self):
-        return Product.objects.filter(created_by=self.request.user.active_tenant)
+        return Product.objects.filter(created_by=self.request.user.active_tenant).order_by('name')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)
@@ -42,6 +46,24 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
                 {"error": "This product cannot be deleted because it is linked to existing invoices, purchases, or stock transfers."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        if not serializer.is_valid():
+            print("==== PRODUCT UPDATE VALIDATION ERROR ====")
+            print(serializer.errors)
+            print("=========================================")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        self.perform_update(serializer)
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            # If 'prefetch_related' has been applied to a queryset, we need to
+            # forcibly invalidate the prefetch cache on the instance.
+            instance._prefetched_objects_cache = {}
+
+        return Response(serializer.data)
 
 class ProductBatchListView(generics.ListAPIView):
     serializer_class = ProductBatchSerializer
@@ -127,13 +149,26 @@ class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
 def batch_list(request):
     """
     List product batches.
-    Optional filters: ?product=UUID
+    Optional filters: ?product=UUID &search=name
     """
-    queryset = ProductBatch.objects.filter(product__created_by=request.user.active_tenant.active_tenant)
+    queryset = ProductBatch.objects.filter(
+        product__created_by=request.user.active_tenant.active_tenant
+    ).select_related('product').order_by('-created_at')
     
     product_id = request.query_params.get('product')
     if product_id:
         queryset = queryset.filter(product__id=product_id)
+
+    search = request.query_params.get('search', '')
+    if search:
+        queryset = queryset.filter(product__name__icontains=search)
+
+    from cenvoras.pagination import StandardResultsSetPagination
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    if page is not None:
+        serializer = ProductBatchSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
         
     serializer = ProductBatchSerializer(queryset, many=True)
     return Response(serializer.data)
@@ -322,3 +357,143 @@ class SchemeDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False): return Scheme.objects.none()
         return Scheme.objects.filter(created_by=self.request.user.active_tenant)
+
+
+# =============================================================================
+# Feature: Warranty Tracking Report
+# =============================================================================
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def warranty_report(request):
+    """
+    Returns all sold products that have a warranty.
+    Shows warranty start date (= invoice date), warranty end date,
+    and a human-readable countdown like "2 years 10 months 5 days left".
+    """
+    from billing.models import SalesInvoice, SalesInvoiceItem
+    from dateutil.relativedelta import relativedelta
+
+    today = timezone.now().date()
+
+    # Find all sales invoice items where the product has a warranty > 0
+    items = SalesInvoiceItem.objects.filter(
+        sales_invoice__created_by=request.user.active_tenant,
+        product__warranty_months__gt=0,
+    ).select_related('sales_invoice', 'product').order_by('-sales_invoice__invoice_date')
+
+    results = []
+    for item in items:
+        warranty_months = item.product.warranty_months
+        start_date = item.sales_invoice.invoice_date
+        end_date = start_date + relativedelta(months=warranty_months)
+        
+        delta = relativedelta(end_date, today)
+        
+        if end_date < today:
+            countdown = "Expired"
+            status = "expired"
+            days_left = (end_date - today).days
+        else:
+            days_left = (end_date - today).days
+            parts = []
+            if delta.years > 0:
+                parts.append(f"{delta.years} year{'s' if delta.years > 1 else ''}")
+            if delta.months > 0:
+                parts.append(f"{delta.months} month{'s' if delta.months > 1 else ''}")
+            if delta.days > 0:
+                parts.append(f"{delta.days} day{'s' if delta.days > 1 else ''}")
+            countdown = " ".join(parts) + " left" if parts else "Expiring today"
+            
+            if days_left <= 30:
+                status = "critical"
+            elif days_left <= 90:
+                status = "warning"
+            else:
+                status = "active"
+
+        results.append({
+            'invoice_id': str(item.sales_invoice.id),
+            'invoice_number': item.sales_invoice.invoice_number,
+            'invoice_date': start_date,
+            'customer_name': item.sales_invoice.customer_name or (item.sales_invoice.customer.name if item.sales_invoice.customer else 'N/A'),
+            'product_id': str(item.product.id),
+            'product_name': item.product.name,
+            'quantity': item.quantity,
+            'warranty_months': warranty_months,
+            'warranty_start': start_date,
+            'warranty_end': end_date,
+            'days_left': days_left,
+            'countdown': countdown,
+            'status': status,
+        })
+
+    # Stats
+    active_count = sum(1 for r in results if r['status'] == 'active')
+    warning_count = sum(1 for r in results if r['status'] == 'warning')
+    critical_count = sum(1 for r in results if r['status'] == 'critical')
+    expired_count = sum(1 for r in results if r['status'] == 'expired')
+
+    return Response({
+        'count': len(results),
+        'active_count': active_count,
+        'warning_count': warning_count,
+        'critical_count': critical_count,
+        'expired_count': expired_count,
+        'results': results,
+    })
+
+
+# =============================================================================
+# Feature: Expiry Dashboard Summary (for dashboard card)
+# =============================================================================
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def expiry_dashboard_summary(request):
+    """
+    Returns a summary for the dashboard card:
+    - Count of batches expiring within N days (default 30, configurable via ?days=N)
+    - Total value at risk
+    Used by the "Expiring Soon" card on the Dashboard.
+    """
+    today = timezone.now().date()
+    days = int(request.query_params.get('days', 30))
+    cutoff = today + timedelta(days=days)
+
+    batches = ProductBatch.objects.filter(
+        product__created_by=request.user.active_tenant.active_tenant,
+        expiry_date__isnull=False,
+        expiry_date__lte=cutoff,
+        is_active=True,
+    ).select_related('product')
+
+    count = 0
+    total_value = 0
+    items = []
+    for batch in batches:
+        total_qty = batch.stock_points.aggregate(total=Sum('quantity'))['total'] or 0
+        if total_qty <= 0:
+            continue
+        days_left = (batch.expiry_date - today).days
+        value = float(batch.mrp * total_qty)
+        count += 1
+        total_value += value
+        items.append({
+            'batch_id': str(batch.id),
+            'product_name': batch.product.name,
+            'batch_number': batch.batch_number,
+            'expiry_date': batch.expiry_date,
+            'days_left': days_left,
+            'status': 'expired' if days_left < 0 else ('critical' if days_left <= 7 else 'warning'),
+            'quantity': total_qty,
+            'value': value,
+        })
+
+    # Sort by days_left ascending (most urgent first)
+    items.sort(key=lambda x: x['days_left'])
+
+    return Response({
+        'count': count,
+        'total_value': round(total_value, 2),
+        'items': items,
+    })
+

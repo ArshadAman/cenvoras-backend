@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from .models_sidecar import SalesOrder, DeliveryChallan, InvoiceSettings
 from .serializers_sidecar import SalesOrderSerializer, DeliveryChallanSerializer, InvoiceSettingsSerializer
 from .models import SalesInvoice, SalesInvoiceItem
+from cenvoras.pagination import StandardResultsSetPagination
 import random
 from datetime import date
 
@@ -28,20 +29,14 @@ def sales_order_list_create(request):
             
         orders = orders.order_by('-date')
         
-        # Simple pagination
-        page = int(request.GET.get('page', 1))
-        limit = int(request.GET.get('limit', 10))
-        start = (page - 1) * limit
-        end = start + limit
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(orders, request)
+        if page is not None:
+            serializer = SalesOrderSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
         
-        paginated = orders[start:end]
-        serializer = SalesOrderSerializer(paginated, many=True)
-        
-        return Response({
-            "success": True, 
-            "data": serializer.data,
-            "total_count": orders.count()
-        })
+        serializer = SalesOrderSerializer(orders, many=True)
+        return Response(serializer.data)
         
     elif request.method == 'POST':
         serializer = SalesOrderSerializer(data=request.data, context={'request': request})
@@ -128,17 +123,14 @@ def delivery_challan_list_create(request):
             
         challans = challans.order_by('-date')
         
-        page = int(request.GET.get('page', 1))
-        limit = int(request.GET.get('limit', 10))
-        start = (page - 1) * limit
-        end = start + limit
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(challans, request)
+        if page is not None:
+            serializer = DeliveryChallanSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
         
-        serializer = DeliveryChallanSerializer(challans[start:end], many=True)
-        return Response({
-            "success": True, 
-            "data": serializer.data,
-            "total_count": challans.count()
-        })
+        serializer = DeliveryChallanSerializer(challans, many=True)
+        return Response(serializer.data)
         
     elif request.method == 'POST':
         serializer = DeliveryChallanSerializer(data=request.data, context={'request': request})

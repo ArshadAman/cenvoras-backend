@@ -27,16 +27,43 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
 
 class SalesOrderSerializer(serializers.ModelSerializer):
     items = SalesOrderItemSerializer(many=True)
-    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    customer_name = serializers.CharField(write_only=True, required=True)
+    customer_display_name = serializers.CharField(source='customer.name', read_only=True)
+    customer_email = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'stage', 'total_amount', 'notes', 'items', 'created_by', 'created_at']
-        read_only_fields = ['id', 'created_at', 'created_by']
+        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'items', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_at', 'created_by', 'customer']
+
+    def _resolve_customer(self, validated_data):
+        """Find or create a Customer from the customer_name field."""
+        from .models import Customer
+        customer_name = validated_data.pop('customer_name', None)
+        customer_email = validated_data.pop('customer_email', None) or ''
+        customer_phone = validated_data.pop('customer_phone', None) or ''
+        user = self.context['request'].user
+
+        if not customer_name:
+            raise serializers.ValidationError({'customer_name': 'Customer name is required.'})
+
+        # Try to find existing customer by name for this user
+        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+        if not customer:
+            customer = Customer.objects.create(
+                name=customer_name,
+                email=customer_email if customer_email else None,
+                phone=customer_phone if customer_phone else None,
+                created_by=user,
+            )
+        return customer
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
+        customer = self._resolve_customer(validated_data)
+        validated_data['customer'] = customer
         validated_data['created_by'] = self.context['request'].user
         
         order = SalesOrder.objects.create(**validated_data)
@@ -45,6 +72,30 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             SalesOrderItem.objects.create(order=order, **item_data)
             
         return order
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        
+        # Handle customer name change
+        if 'customer_name' in validated_data:
+            customer = self._resolve_customer(validated_data)
+            instance.customer = customer
+        # Pop leftover write-only fields
+        validated_data.pop('customer_email', None)
+        validated_data.pop('customer_phone', None)
+
+        # Update scalar fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Replace items if provided
+        if items_data is not None:
+            instance.items.all().delete()
+            for item_data in items_data:
+                SalesOrderItem.objects.create(order=instance, **item_data)
+
+        return instance
 
 class DeliveryChallanItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)

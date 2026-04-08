@@ -4,6 +4,19 @@ from celery import Celery
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cenvoras.settings')
 
+# Monkeypatch django-dbbackup to prevent it from appending .bin
+# Cloudinary Raw Media Storage strictly rejects .bin files for security.
+try:
+    from dbbackup.db.postgresql import PgDumpConnector
+    # Override the property/method that returns the extension
+    original_init = PgDumpConnector.__init__
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.extension = "psql" # Force .psql instead of letting it append .bin
+    PgDumpConnector.__init__ = patched_init
+except ImportError:
+    pass
+
 app = Celery('cenvoras')
 
 # Using a string here means the worker doesn't have to serialize

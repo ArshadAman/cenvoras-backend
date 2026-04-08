@@ -9,9 +9,9 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'hsn_sac_code', 'stock', 'unit',
+            'id', 'name', 'hsn_sac_code', 'description', 'tax', 'stock', 'unit',
             'secondary_unit', 'conversion_factor',
-            'price', 'low_stock_alert', 'created_by',
+            'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'created_by',
             'meta'
         ]
         read_only_fields = ['id', 'created_by']
@@ -56,10 +56,12 @@ class WarehouseSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_by']
 
 class ProductBatchSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    
     class Meta:
         model = ProductBatch
         fields = [
-            'id', 'product', 'batch_number', 'expiry_date', 
+            'id', 'product', 'product_name', 'batch_number', 'expiry_date', 
             'manufacturing_date', 'mrp', 'cost_price', 'sale_price', 
             'is_active', 'notes'
         ]
@@ -68,12 +70,14 @@ class StockPointSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
     expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
+    product_name = serializers.CharField(source='batch.product.name', read_only=True)
+    product_id = serializers.PrimaryKeyRelatedField(source='batch.product', read_only=True)
     
     class Meta:
         model = StockPoint
         fields = [
             'id', 'warehouse', 'warehouse_name', 'batch', 'batch_number', 
-            'expiry_date', 'quantity'
+            'expiry_date', 'quantity', 'product_name', 'product_id'
         ]
 
 class StockTransferItemSerializer(serializers.ModelSerializer):

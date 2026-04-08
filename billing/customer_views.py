@@ -7,6 +7,7 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.db import models
 from .models import Customer
+from cenvoras.pagination import StandardResultsSetPagination
 
 
 @swagger_auto_schema(
@@ -101,6 +102,12 @@ def customer_list_create(request):
         # Apply ordering
         if ordering:
             customers = customers.order_by(ordering)
+        
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(customers, request)
+        if page is not None:
+            serializer = CustomerSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
         
         serializer = CustomerSerializer(customers, many=True)
         return Response(serializer.data)

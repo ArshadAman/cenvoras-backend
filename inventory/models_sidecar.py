@@ -15,7 +15,7 @@ class ProductMeta(models.Model):
     product = models.OneToOneField(Product, on_delete=models.CASCADE, related_name='meta')
     
     # Feature 12: Secondary Stock (held at distributor)
-    secondary_stock = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Stock held at distributor/secondary location")
+    secondary_stock = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True, help_text="Stock held at distributor/secondary location")
     
     # Feature 14: Alternate/Substitute Search
     tags = models.JSONField(default=list, blank=True, help_text="List of tags/substitutes for search")
@@ -26,12 +26,12 @@ class ProductMeta(models.Model):
     
     # Feature 20: Krishi Mandi (Bags)
     # Billing Logic: Qty = Bags * (UnitWeight - Tare)
-    bag_weight = models.DecimalField(max_digits=10, decimal_places=3, default=0, help_text="Weight per bag")
-    tare_weight = models.DecimalField(max_digits=10, decimal_places=3, default=0, help_text="Empty bag weight")
+    bag_weight = models.DecimalField(max_digits=10, decimal_places=3, default=0, null=True, blank=True, help_text="Weight per bag")
+    tare_weight = models.DecimalField(max_digits=10, decimal_places=3, default=0, null=True, blank=True, help_text="Empty bag weight")
     
     # Feature 21: Mandi Expenses
-    mandi_tax = models.DecimalField(max_digits=5, decimal_places=2, default=0, help_text="Mandi Tax %")
-    labour_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Labour charge per unit/bag")
+    mandi_tax = models.DecimalField(max_digits=5, decimal_places=2, default=0, null=True, blank=True, help_text="Mandi Tax %")
+    labour_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True, help_text="Labour charge per unit/bag")
     
     # Feature 26: New Launched Items
     is_new_launch = models.BooleanField(default=False, help_text="Highlight in UI as New Launch")
@@ -45,6 +45,7 @@ class ProductMeta(models.Model):
     
     # Feature 72: Barcode/QR
     barcode = models.CharField(max_length=100, blank=True, null=True, unique=True, help_text="EAN/UPC barcode for scanning")
+    expiry_date = models.DateField(null=True, blank=True, help_text="Default expiry date for the product")
     
     # Feature 66: Returnable Packaging (Caret/Crate)
     is_returnable_packaging = models.BooleanField(default=False, help_text="Product uses returnable crates/containers")

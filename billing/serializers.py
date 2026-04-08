@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework import serializers
-from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Payment
+from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment
 from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem, InvoiceSettings
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
@@ -108,16 +108,25 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
 class PurchaseBillSerializer(serializers.ModelSerializer):
     items = PurchaseBillItemSerializer(many=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    meta = TransactionMetaSerializer(required=False)
+    vendor_display = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = PurchaseBill
         fields = [
-            'id', 'bill_number', 'bill_date', 'due_date', 'vendor_name', 'vendor_address', 'vendor_gstin',
-            'gst_treatment', 'journal', 'warehouse', 'total_amount', 'created_by', 'created_at', 'items'
+            'id', 'bill_number', 'bill_date', 'due_date',
+            'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
+            'warehouse', 'journal',
+            'total_amount', 'created_by', 'created_at', 'items', 'meta'
         ]
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def get_vendor_display(self, obj):
+        return obj.vendor.name if obj.vendor else obj.vendor_name
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
+        meta_data = validated_data.pop('meta', None)
         user = self.context['request'].user
         
         # Smart Feature: Auto-create/sync vendor details
@@ -217,6 +226,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
 
     def get_product_detail(self, obj):
         return {
+            "id": str(obj.product.id),
             "name": obj.product.name,
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
@@ -563,11 +573,61 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             meta.save()
 
         return instance
-    
-
 
 from .serializers_sidecar import PartyMetaSerializer
 from .models_sidecar import PartyMeta
+
+class VendorSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    meta = PartyMetaSerializer(required=False)
+    
+    class Meta:
+        model = Vendor
+        fields = [
+            'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
+            'created_by', 'created_at', 'meta'
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+    def validate_email(self, value):
+        if value:
+            # Check for duplicate email within the same user's vendors
+            user = self.context['request'].user
+            queryset = Vendor.objects.filter(email=value, created_by=user)
+            if self.instance:
+                queryset = queryset.exclude(pk=self.instance.pk)
+            if queryset.exists():
+                raise serializers.ValidationError("A vendor with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        meta_data = validated_data.pop('meta', None)
+        validated_data['created_by'] = self.context['request'].user
+        
+        vendor = Vendor.objects.create(**validated_data)
+        
+        if meta_data:
+            PartyMeta.objects.create(vendor=vendor, **meta_data)
+        else:
+            PartyMeta.objects.create(vendor=vendor)
+            
+        return vendor
+
+    def update(self, instance, validated_data):
+        meta_data = validated_data.pop('meta', None)
+        
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        if meta_data:
+            meta, _ = PartyMeta.objects.get_or_create(vendor=instance)
+            for attr, value in meta_data.items():
+                setattr(meta, attr, value)
+            meta.save()
+            
+        return instance
+    
 
 class CustomerSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)

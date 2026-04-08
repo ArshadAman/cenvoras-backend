@@ -217,6 +217,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         if 'email' in validated_data:
             instance.username = instance.email
             instance.save(update_fields=['username'])
+            
+        return instance
         
 
 
@@ -232,7 +234,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class TeamMemberSerializer(serializers.ModelSerializer):
     """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, min_length=8, required=False)
     
     class Meta:
         model = User
@@ -240,7 +242,10 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'date_joined')
         
     def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
+        qs = User.objects.filter(email=value)
+        if self.instance:
+            qs = qs.exclude(id=self.instance.id)
+        if qs.exists():
             raise serializers.ValidationError("An account with this email already exists.")
         return value
 

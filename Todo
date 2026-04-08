@@ -35,3 +35,19 @@
 
 - Update product(inventory), delete not working
 - filter by customer client ledger ui issues
+
+
+Work for AI:
+	1. view warrenty of a perticular bill by sending bill id or customer name and product name
+	2. expiring product info
+	3. sales summary
+	4. business summary
+	5. monthly summary
+	6. Create invoice by AI: by asking product imformation(all those required by invoice and addtional info), only product with stock will be suggested
+	7. Debit Note
+	8. Credit Note
+	9. Stock information
+	10. customer and vendor informatin (including email, new customer, everything)
+	11. GST filing assistant (auto-generate GSTR-1, GSTR-3B drafts).
+	12. AI-powered insights: “Your sales dipped 15% this month compared to last.”
+	13.  

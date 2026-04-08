@@ -3,10 +3,20 @@ from .models import Product
 from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal, StockJournalItem
 
 class ProductMetaSerializer(serializers.ModelSerializer):
+    secondary_stock = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    bag_weight = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, allow_null=True)
+    tare_weight = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, allow_null=True)
+    mandi_tax = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    labour_charge = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    is_h1 = serializers.BooleanField(required=False, allow_null=True)
+    is_narcotic = serializers.BooleanField(required=False, allow_null=True)
+    is_new_launch = serializers.BooleanField(required=False, allow_null=True)
+    expiry_date = serializers.DateField(required=False, allow_null=True)
+
     class Meta:
         model = ProductMeta
         fields = [
-            'secondary_stock', 'tags', 'is_h1', 'is_narcotic', 
+            'barcode', 'expiry_date', 'secondary_stock', 'tags', 'is_h1', 'is_narcotic', 
             'bag_weight', 'tare_weight', 'mandi_tax', 'labour_charge', 
             'is_new_launch', 'salt_composition', 'bundle_items'
         ]

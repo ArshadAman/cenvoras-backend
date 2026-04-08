@@ -5,6 +5,7 @@ from .views import (
     vendor_products
 )
 from . import customer_views
+from . import vendor_views
 from . import payment_views
 from . import report_views
 from . import views_sidecar
@@ -23,6 +24,9 @@ urlpatterns = [
     path('customers/<uuid:pk>/', customer_views.customer_detail, name='customer_detail'),
     path('customers/<uuid:pk>/edit/', customer_views.customer_update_delete, name='customer_update_delete'),
     
+    path('vendors/', vendor_views.vendor_list_create, name='vendor_list_create'),
+    path('vendors/<uuid:pk>/', vendor_views.vendor_detail, name='vendor_detail'),
+    path('vendors/<uuid:pk>/edit/', vendor_views.vendor_update_delete, name='vendor_update_delete'),
     
     # Payments
     path('payments/', payment_views.payment_list_create, name='payment_list_create'),

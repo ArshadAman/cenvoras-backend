@@ -4,8 +4,72 @@ from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceIt
 from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem, InvoiceSettings
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
+from cenvoras.constants import IndianStates
 import uuid
 from decimal import Decimal
+
+
+GST_STATE_CODE_TO_ALPHA = {
+    '01': IndianStates.JAMMU_AND_KASHMIR,
+    '02': IndianStates.HIMACHAL_PRADESH,
+    '03': IndianStates.PUNJAB,
+    '04': IndianStates.CHANDIGARH,
+    '05': IndianStates.UTTARAKHAND,
+    '06': IndianStates.HARYANA,
+    '07': IndianStates.DELHI,
+    '08': IndianStates.RAJASTHAN,
+    '09': IndianStates.UTTAR_PRADESH,
+    '10': IndianStates.BIHAR,
+    '11': IndianStates.SIKKIM,
+    '12': IndianStates.ARUNACHAL_PRADESH,
+    '13': IndianStates.NAGALAND,
+    '14': IndianStates.MANIPUR,
+    '15': IndianStates.MIZORAM,
+    '16': IndianStates.TRIPURA,
+    '17': IndianStates.MEGHALAYA,
+    '18': IndianStates.ASSAM,
+    '19': IndianStates.WEST_BENGAL,
+    '20': IndianStates.JHARKHAND,
+    '21': IndianStates.ODISHA,
+    '22': IndianStates.CHHATTISGARH,
+    '23': IndianStates.MADHYA_PRADESH,
+    '24': IndianStates.GUJARAT,
+    '26': IndianStates.DADRA_AND_NAGAR_HAVELI_AND_DAMAN_AND_DIU,
+    '27': IndianStates.MAHARASHTRA,
+    '29': IndianStates.KARNATAKA,
+    '30': IndianStates.GOA,
+    '31': IndianStates.LAKSHADWEEP,
+    '32': IndianStates.KERALA,
+    '33': IndianStates.TAMIL_NADU,
+    '34': IndianStates.PUDUCHERRY,
+    '35': IndianStates.ANDAMAN_AND_NICOBAR_ISLANDS,
+    '36': IndianStates.TELANGANA,
+    '37': IndianStates.ANDHRA_PRADESH,
+    '38': IndianStates.LADAKH,
+}
+
+
+def normalize_indian_state_choice(value):
+    if value is None:
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    # Support GST numeric codes (e.g. 29 -> KA) and decorated values (e.g. 29-Karnataka)
+    numeric = raw.split('-', 1)[0].strip()
+    if numeric.isdigit():
+        numeric = numeric.zfill(2)
+        mapped = GST_STATE_CODE_TO_ALPHA.get(numeric)
+        if mapped:
+            return mapped
+
+    upper = raw.upper()
+    valid_choices = {choice for choice, _label in IndianStates.choices}
+    if upper in valid_choices:
+        return upper
+
+    return raw
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):
@@ -540,6 +604,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Remove customer fields that aren't in Meta.fields
         temp_data = data.copy()
         temp_data['customer_name'] = customer_name
+        if 'place_of_supply' in temp_data:
+            temp_data['place_of_supply'] = normalize_indian_state_choice(temp_data.get('place_of_supply'))
         temp_data.pop('customer_email', None)
         temp_data.pop('customer_phone', None) 
         temp_data.pop('customer_address', None)

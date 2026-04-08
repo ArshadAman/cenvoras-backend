@@ -46,20 +46,37 @@ def payment_detail(request, pk):
         return Response(serializer.data)
 
     elif request.method == 'PUT':
+        old_amount = payment.amount
+        old_customer_id = payment.customer_id
+        
         serializer = PaymentSerializer(payment, data=request.data, context={'request': request})
         if serializer.is_valid():
-            # Note: Logic to reverse previous balance impact and apply new one 
-            # is handled by sophisticated signals or should be handled here manually if signals are too simple.
-            # For now, we assume simple editing is rare or minor.
-            serializer.save()
+            from django.db import transaction
+            from django.db.models import F
+            
+            with transaction.atomic():
+                updated_payment = serializer.save()
+                
+                # post_save signal in signals.py only runs logic if `created` is True, 
+                # so we must manually calculate and apply the balance difference for edits.
+                if old_customer_id == updated_payment.customer_id:
+                    amount_diff = old_amount - updated_payment.amount
+                    if amount_diff != 0:
+                        Customer.objects.filter(pk=updated_payment.customer_id).update(
+                            current_balance=F('current_balance') + amount_diff
+                        )
+                else:
+                    # They changed the customer for the payment
+                    Customer.objects.filter(pk=old_customer_id).update(
+                        current_balance=F('current_balance') + old_amount
+                    )
+                    Customer.objects.filter(pk=updated_payment.customer_id).update(
+                        current_balance=F('current_balance') - updated_payment.amount
+                    )
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
-        # Reverse the balance impact before deleting
-        customer = payment.customer
-        customer.current_balance += payment.amount # Add debt back
-        customer.save()
-        
+        # Rely on the post_delete signal in signals.py to revert the customer balance
         payment.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

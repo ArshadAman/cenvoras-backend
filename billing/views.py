@@ -10,6 +10,9 @@ from inventory.serializers import ProductSerializer
 from .filters import PurchaseBillFilter, SalesInvoiceFilter
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from decimal import Decimal
+from django.db.models import Sum
+from django.utils import timezone
 
 
 @swagger_auto_schema(
@@ -521,4 +524,30 @@ def sales_summary_analytics(request):
         "total_invoices": total_invoices,
         "this_month_revenue": this_month_revenue,
         "this_month_invoices": this_month_invoices,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def recalculate_invoice_totals(request):
+    """
+    Recalculate invoice totals from items for all invoices (for fixing data inconsistencies).
+    """
+    invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant)
+    fixed_count = 0
+    
+    for invoice in invoices:
+        items_total = sum(
+            Decimal(str(item.amount or 0)) 
+            for item in invoice.items.all()
+        )
+        
+        if invoice.total_amount != items_total:
+            invoice.total_amount = items_total
+            invoice.save(update_fields=['total_amount'])
+            fixed_count += 1
+    
+    return Response({
+        "success": True,
+        "message": f"Fixed {fixed_count} invoices with incorrect totals"
     })

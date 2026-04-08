@@ -61,4 +61,5 @@ urlpatterns = [
     path('credit-notes/<uuid:pk>/', returns_views.credit_note_detail, name='credit_note_detail'),
     path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
-]
+    # Fix endpoints
+    path('sales-invoices/recalculate-totals/', views.recalculate_invoice_totals, name='recalculate_invoice_totals'),

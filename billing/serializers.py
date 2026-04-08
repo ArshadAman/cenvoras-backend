@@ -723,14 +723,38 @@ class CustomerSerializer(serializers.ModelSerializer):
 class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
-    
+
     class Meta:
         model = Payment
         fields = [
-            'id', 'customer', 'customer_name', 'invoice', 'date', 'amount', 
+            'id', 'customer', 'customer_name', 'invoice', 'date', 'amount',
             'mode', 'reference', 'notes', 'created_by', 'created_at'
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
+
+    def validate(self, attrs):
+        customer = attrs.get('customer') or getattr(self.instance, 'customer', None)
+        invoice = attrs.get('invoice', getattr(self.instance, 'invoice', None))
+        amount = Decimal(str(attrs.get('amount', getattr(self.instance, 'amount', 0) or 0)))
+
+        if amount <= 0:
+            raise serializers.ValidationError({'amount': 'Amount must be greater than 0.'})
+
+        if invoice:
+            if customer and invoice.customer_id != customer.id:
+                raise serializers.ValidationError({'invoice': 'Selected invoice does not belong to the selected customer.'})
+
+            outstanding = Decimal(str(invoice.total_amount or 0)) - Decimal(str(invoice.amount_paid or 0))
+            # On update, current payment is already included in invoice.amount_paid if linked to same invoice.
+            if self.instance and self.instance.invoice_id == invoice.id:
+                outstanding += Decimal(str(self.instance.amount or 0))
+
+            if amount > outstanding:
+                raise serializers.ValidationError({
+                    'amount': f'Amount exceeds invoice outstanding (max {outstanding:.2f}).'
+                })
+
+        return attrs
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user

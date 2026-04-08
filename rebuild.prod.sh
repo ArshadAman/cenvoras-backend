@@ -23,7 +23,7 @@ free_http_ports() {
 
   # Remove any docker container (outside this compose stack) holding 80/443.
   local ids
-  ids=$(docker ps --format '{{.ID}} {{.Ports}}' | awk '/0\.0\.0\.0:80->|\[::\]:80->|0\.0\.0\.0:443->|\[::\]:443->/ {print $1}')
+  ids=$(docker ps --format '{{.ID}} {{.Ports}}' | awk '/0\.0\.0\.0:80->|:::80->|0\.0\.0\.0:443->|:::443->|\[::\]:80->|\[::\]:443->/ {print $1}')
   if [ -n "$ids" ]; then
     echo " ---- Removing containers bound to 80/443: $ids ----- "
     # shellcheck disable=SC2086

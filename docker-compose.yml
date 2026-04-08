@@ -3,7 +3,7 @@ services:
     build: .
     command: ./entrypoint.sh
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     environment:
@@ -11,6 +11,13 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     restart: unless-stopped
+    mem_limit: 450m
+    cpus: "0.50"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     depends_on:
       db:
         condition: service_healthy
@@ -45,6 +52,13 @@ services:
     volumes:
       - redisdata:/data
     restart: unless-stopped
+    mem_limit: 220m
+    cpus: "0.20"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 15s
@@ -53,7 +67,7 @@ services:
 
   celery_worker:
     build: .
-    command: celery -A cenvoras worker -l info --pool=gevent --concurrency=100
+    command: celery -A cenvoras worker -l info --pool=gevent --concurrency=4 --prefetch-multiplier=1 --max-tasks-per-child=200
     env_file:
       - .env
     environment:
@@ -61,6 +75,13 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     restart: unless-stopped
+    mem_limit: 450m
+    cpus: "0.60"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     depends_on:
       db:
         condition: service_healthy
@@ -81,6 +102,13 @@ services:
     volumes:
       - celerybeat_data:/app/celerybeat-data
     restart: unless-stopped
+    mem_limit: 180m
+    cpus: "0.20"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     depends_on:
       redis:
         condition: service_healthy
@@ -100,6 +128,14 @@ services:
       - DOZZLE_FILTER=status=running
       - DOZZLE_NO_ANALYTICS=true
     restart: unless-stopped
+    profiles: ["ops"]
+    mem_limit: 100m
+    cpus: "0.10"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
 
   db:
     image: postgres:14
@@ -108,11 +144,21 @@ services:
       - -c
       - wal_level=replica
       - -c
-      - max_wal_size=2GB
+      - max_wal_size=1GB
       - -c
-      - min_wal_size=512MB
+      - min_wal_size=256MB
       - -c
       - checkpoint_timeout=10min
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=80
       - -c
       - synchronous_commit=on
       - -c
@@ -126,6 +172,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data/
     restart: unless-stopped
+    mem_limit: 900m
+    cpus: "0.80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "5"
     stop_grace_period: 1m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -148,6 +201,13 @@ services:
       web:
         condition: service_healthy
     restart: unless-stopped
+    mem_limit: 150m
+    cpus: "0.20"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 volumes:
   pgdata:

@@ -467,7 +467,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if 'customer' in data and 'customer_name' not in data:
             data['customer_name'] = data['customer']
         
+        status_value = data.get('status', getattr(self.instance, 'status', 'final'))
         customer_name = data.get('customer_name')
+        if self.instance and (not customer_name or not str(customer_name).strip()):
+            customer_name = self.instance.customer_name or ''
+        customer_name = customer_name or ''
         customer_email = data.get('customer_email', '')
         customer_phone = data.get('customer_phone', '')
         customer_address = data.get('customer_address', '')
@@ -475,7 +479,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
         
-        if not customer_name or not str(customer_name).strip():
+        if not customer_name.strip() and status_value != 'draft':
             error_msg = 'Customer name is required.'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
             raise serializers.ValidationError({'customer_name': error_msg})
@@ -531,6 +535,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         
         # Remove customer fields that aren't in Meta.fields
         temp_data = data.copy()
+        temp_data['customer_name'] = customer_name
         temp_data.pop('customer_email', None)
         temp_data.pop('customer_phone', None) 
         temp_data.pop('customer_address', None)
@@ -550,8 +555,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Creating sales invoice with data:", validated_data)
         items_data = validated_data.pop('items')
         meta_data = validated_data.pop('meta', None)
-        validated_data.pop('total_amount', None)
+        provided_total_amount = validated_data.pop('total_amount', None)
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
+
+        recalculated_total = sum(
+            (self._calculate_line_amount(item) for item in items_data),
+            Decimal('0.00')
+        ) if items_data else Decimal(str(provided_total_amount or '0.00'))
+        validated_data['total_amount'] = recalculated_total
         
         # Add the customer object that we stored earlier
         customer_obj = getattr(self, '_customer_obj', None)

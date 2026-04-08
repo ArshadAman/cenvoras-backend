@@ -5,19 +5,36 @@ from django.conf import settings
 # Create your models here.
 
 class Product(models.Model):
+    UNIT_CHOICES = [
+        ("pcs", "pcs"),
+        ("kg", "kg"),
+        ("g", "g"),
+        ("mg", "mg"),
+        ("l", "l"),
+        ("ml", "ml"),
+        ("cm", "cm"),
+        ("m", "m"),
+        ("mm", "mm"),
+        ("box", "box"),
+        ("pack", "pack"),
+        ("dozen", "dozen"),
+        ("other", "other"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    unit = models.CharField(max_length=20, default="pcs")  # e.g., pcs, kg, box
+    unit = models.CharField(max_length=20, choices=UNIT_CHOICES, default="pcs")
     
     # Unit Conversion (Phase 4)
     secondary_unit = models.CharField(max_length=20, blank=True, null=True, help_text="e.g., Box")
     conversion_factor = models.PositiveIntegerField(default=1, help_text="1 Secondary Unit = X Primary Units")
     
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, default=None)
     tax = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # GST %
+    warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
     stock = models.PositiveIntegerField(default=0, help_text="Global stock count (Cached)")
     low_stock_alert = models.PositiveIntegerField(default=0)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -64,6 +81,7 @@ class ProductBatch(models.Model):
     mrp = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Maximum Retail Price for this batch")
     cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Purchase cost for this batch")
     sale_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Selling price for this batch")
+    notes = models.TextField(blank=True, null=True, help_text="Custom remarks for this batch")
     
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -71,6 +89,17 @@ class ProductBatch(models.Model):
     class Meta:
         unique_together = ['product', 'batch_number']
         ordering = ['expiry_date']  # Default to FEFO (First Expiry First Out)
+
+    def save(self, *args, **kwargs):
+        # Feature 24: Separator Batch — sanitize batch names
+        import re
+        if self.batch_number:
+            self.batch_number = self.batch_number.strip()
+            # Normalize multiple separators (---, ///, ___) to single dash
+            self.batch_number = re.sub(r'[-_/\\]{2,}', '-', self.batch_number)
+            # Remove leading/trailing separators
+            self.batch_number = self.batch_number.strip('-_/')
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.product.name} - {self.batch_number} (Exp: {self.expiry_date})"
@@ -129,4 +158,10 @@ def product_recalculate_stock(self):
     self.stock = total
     self.save(update_fields=['stock'])
 
+
 Product.recalculate_stock = product_recalculate_stock
+
+# Import Sidecar Models to ensure they are registered
+# Import Sidecar Models to ensure they are registered
+from .models_sidecar import ProductMeta, ProductBatchMeta, BillOfMaterial, StockJournal, StockJournalItem
+from .models_pricing import PriceList, PriceListItem, Scheme

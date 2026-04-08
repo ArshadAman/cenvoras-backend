@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -8,12 +9,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-^b68wd86pdzoj4goxo_o--!6w4tygg0sgzl)r7mb4m_^j-n0x0'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-local-dev-fallback')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS = ['*']
+raw_allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
+if raw_allowed_hosts.strip():
+    ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
 
 
 # Application definition
@@ -39,6 +44,12 @@ INSTALLED_APPS = [
     'subscription',
     'analytics',
     'ai_assistant',
+    'integration',
+    'reports',
+    'audit_log',
+    'cloudinary',
+    'cloudinary_storage',
+    'dbbackup',
 ]
 
 MIDDLEWARE = [
@@ -50,7 +61,15 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'audit_log.middleware.AuditMiddleware',
 ]
+
+# OWASP Security Hardening
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+CSRF_COOKIE_HTTPONLY = True
+SESSION_COOKIE_HTTPONLY = True
 
 ROOT_URLCONF = 'cenvoras.urls'
 
@@ -76,8 +95,6 @@ WSGI_APPLICATION = 'cenvoras.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-import os
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -86,8 +103,32 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        'ATOMIC_REQUESTS': True,
+        'CONN_MAX_AGE': int(os.environ.get('CONN_MAX_AGE', 120)),  # Preserve and reuse TCP connections for 2 minutes
+        'CONN_HEALTH_CHECKS': True,
+        'OPTIONS': {
+            'connect_timeout': int(os.environ.get('POSTGRES_CONNECT_TIMEOUT', 10)),
+            'sslmode': os.environ.get('POSTGRES_SSLMODE', 'prefer'),
+        },
     }
 }
+
+# Redis Caching
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+        }
+    }
+}
+
+# Celery Configuration
+CELERY_BROKER_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
+CELERY_RESULT_BACKEND = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
 
 
 
@@ -146,19 +187,76 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
-    ),
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.OrderingFilter',
         'rest_framework.filters.SearchFilter',
     ],
+    'DEFAULT_PAGINATION_CLASS': 'cenvoras.pagination.StandardResultsSetPagination',
+    'PAGE_SIZE': 15,
 }
 
 # CORS configuration (allow all for development, restrict in production)
-CORS_ALLOW_ALL_ORIGINS = True
-CSRF_TRUSTED_ORIGINS = ["https://devapi.cenvora.app"]
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('1', 'true', 'yes', 'on')
+raw_cors_allowed = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in raw_cors_allowed.split(',') if origin.strip()]
+
+raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in raw_csrf_trusted.split(',') if origin.strip()]
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', 31536000))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'
+
+# =============================================================================
+# INTEGRATION SETTINGS
+# =============================================================================
+
+# Transactional Email Service
+# Set these in .env / environment
+TRANSACTIONAL_EMAIL_API_KEY = os.environ.get('TRANSACTIONAL_EMAIL_API_KEY', '') 
+TRANSACTIONAL_EMAIL_SENDER_EMAIL = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
+TRANSACTIONAL_EMAIL_SENDER_NAME = os.environ.get('TRANSACTIONAL_EMAIL_SENDER_NAME', 'Cenvora')
+TRANSACTIONAL_EMAIL_API_URL = os.environ.get('TRANSACTIONAL_EMAIL_API_URL', '')
+TRANSACTIONAL_EMAIL_SEND_ENDPOINT = os.environ.get('TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
+TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS = int(os.environ.get('TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS', 20))
+
+# WhatsApp Business API — Coming Soon
+# Set these when the WhatsApp integration is launched
+WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN', '')
+WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
+
+# Gemini AI (load from environment variables)
+GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
+
+# =============================================================================
+# BACKUP & STORAGE SETTINGS (Cloudinary)
+# =============================================================================
+
+# Cloudinary requires these environment variables (or CLOUDINARY_URL)
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
+}
+
+# django-dbbackup storage configuration
+# DBBACKUP_STORAGE = 'cloudinary_storage.storage.RawMediaCloudinaryStorage'
+DBBACKUP_CLEANUP_KEEP = 7
+DBBACKUP_EXTENSION = 'backup'  # Cloudinary blocks .bin, 'backup' is safer for Raw uploads
+
+# Resilient backup scheduler configuration
+BACKUP_CLOUDINARY_FOLDER = os.environ.get('BACKUP_CLOUDINARY_FOLDER', 'cenvoras/db_backups')
+BACKUP_SCHEDULE_MINUTE = int(os.environ.get('BACKUP_SCHEDULE_MINUTE', 15))
+BACKUP_MAX_ATTEMPTS = int(os.environ.get('BACKUP_MAX_ATTEMPTS', 3))
+BACKUP_CIRCUIT_OPEN_SECONDS = int(os.environ.get('BACKUP_CIRCUIT_OPEN_SECONDS', 21600))
+BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'cenvoras@gmail.com')

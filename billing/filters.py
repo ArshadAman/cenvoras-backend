@@ -13,4 +13,4 @@ class SalesInvoiceFilter(django_filters.FilterSet):
 
     class Meta:
         model = SalesInvoice
-        fields = ['invoice_number', 'customer', 'invoice_date']
+        fields = ['invoice_number', 'customer', 'invoice_date', 'status']

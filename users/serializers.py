@@ -72,6 +72,62 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         instance.mark_profile_completed()
         return instance
 
+class UserProfileSerializer(serializers.ModelSerializer):
+    """Full user profile for display"""
+    is_trial_active = serializers.SerializerMethodField()
+    profile_completed = serializers.SerializerMethodField()
+    can_generate_gst_invoice = serializers.SerializerMethodField()
+    parent_business_name = serializers.CharField(source='parent.business_name', read_only=True)
+    plan_name = serializers.SerializerMethodField()
+    plan_code = serializers.SerializerMethodField()
+    max_managers = serializers.SerializerMethodField()
+
+    def get_is_trial_active(self, obj):
+        return obj.is_trial_active
+
+    def get_profile_completed(self, obj):
+        return obj.profile_completed
+
+    def get_can_generate_gst_invoice(self, obj):
+        return obj.can_generate_gst_invoice
+        
+    def get_plan_name(self, obj):
+        tenant = getattr(obj, 'active_tenant', obj)
+        try:
+            return tenant.subscription.plan.name
+        except Exception:
+            return "Starter Plan"
+
+    def get_plan_code(self, obj):
+        tenant = getattr(obj, 'active_tenant', obj)
+        try:
+            return tenant.subscription.plan.code
+        except Exception:
+            return "starter"
+        
+    def get_max_managers(self, obj):
+        tenant = getattr(obj, 'active_tenant', obj)
+        try:
+            return tenant.subscription.plan.max_managers
+        except Exception:
+            return 0
+            
+    class Meta:
+        model = User
+        fields = (
+            'id', 'username', 'email', 'phone', 'first_name', 'last_name',
+            'business_name', 'business_address', 'gstin', 'subscription_status',
+            'subscription_tier', 'permissions',
+            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
+            'is_trial_active', 'date_joined', 'last_login_at', 'role',
+            'parent_business_name', 'plan_name', 'plan_code', 'max_managers'
+        )
+        read_only_fields = (
+            'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
+            'profile_completed', 'can_generate_gst_invoice', 'is_trial_active',
+            'date_joined', 'last_login_at', 'role'
+        )
+
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     """Comprehensive profile update serializer"""
     current_password = serializers.CharField(write_only=True, required=False, help_text="Required only when changing email or password")
@@ -80,11 +136,11 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = (
+        fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
             'business_address', 'gstin', 'email', 'current_password',
             'new_password', 'confirm_new_password'
-        )
+        ]
         extra_kwargs = {
             'phone': {'required': False},
             'business_name': {'required': False},
@@ -161,30 +217,10 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         if 'email' in validated_data:
             instance.username = instance.email
             instance.save(update_fields=['username'])
-        
-        # Check if profile should be marked as completed
-        instance.mark_profile_completed()
-        
+            
         return instance
+        
 
-class UserProfileSerializer(serializers.ModelSerializer):
-    """Full user profile for display"""
-    can_generate_gst_invoice = serializers.ReadOnlyField()
-    is_trial_active = serializers.ReadOnlyField()
-    
-    class Meta:
-        model = User
-        fields = (
-            'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'business_address', 'gstin', 'subscription_status',
-            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
-            'is_trial_active', 'date_joined', 'last_login_at'
-        )
-        read_only_fields = (
-            'id', 'username', 'subscription_status', 'trial_ends_at', 
-            'profile_completed', 'can_generate_gst_invoice', 'is_trial_active',
-            'date_joined', 'last_login_at'
-        )
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -193,4 +229,51 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # Add custom claims if needed
         token['username'] = user.username
         token['email'] = user.email
+        token['role'] = user.role
         return token
+
+class TeamMemberSerializer(serializers.ModelSerializer):
+    """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
+    password = serializers.CharField(write_only=True, min_length=8, required=False)
+    
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined')
+        read_only_fields = ('id', 'date_joined')
+        
+    def validate_email(self, value):
+        qs = User.objects.filter(email=value)
+        if self.instance:
+            qs = qs.exclude(id=self.instance.id)
+        if qs.exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        admin_user = self.context['request'].user
+        
+        # Enforce that the creator is an Admin
+        if admin_user.role != 'admin':
+            raise serializers.ValidationError("Only Admins can spawn team members.")
+            
+        validated_data['username'] = validated_data['email']
+        password = validated_data.pop('password')
+        
+        # Set parent to the tenant owner
+        parent = admin_user.active_tenant
+        
+        member = User.objects.create_user(
+            parent=parent,
+            **validated_data
+        )
+        member.set_password(password)
+        member.save()
+        return member
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        instance = super().update(instance, validated_data)
+        if password:
+            instance.set_password(password)
+            instance.save()
+        return instance

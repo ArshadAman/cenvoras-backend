@@ -4,11 +4,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, generics, filters
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import PurchaseBill, SalesInvoice
+from .models import PurchaseBill, SalesInvoice, PurchaseBillItem
 from .serializers import PurchaseBillSerializer, SalesInvoiceSerializer
+from inventory.serializers import ProductSerializer
 from .filters import PurchaseBillFilter, SalesInvoiceFilter
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from decimal import Decimal
+from django.db.models import Sum
+from django.utils import timezone
 
 
 @swagger_auto_schema(
@@ -48,11 +52,25 @@ from drf_yasg import openapi
 @permission_classes([IsAuthenticated])
 def purchase_bill_list_create(request):
     if request.method == 'GET':
-        bills = PurchaseBill.objects.filter(created_by=request.user).order_by('-bill_date')
+        bills = PurchaseBill.objects.filter(created_by=request.user.active_tenant).order_by('-bill_date').prefetch_related('items__product')
         
         # Pagination
-        page = int(request.GET.get('page', 1))
-        limit = int(request.GET.get('limit', 10))
+        try:
+            page = int(request.GET.get('page', 1))
+            limit = int(request.GET.get('limit', 10))
+        except (TypeError, ValueError):
+            return Response({
+                "success": False,
+                "message": "Validation error.",
+                "errors": {"pagination": ["page and limit must be valid integers."]}
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if page < 1 or limit < 1:
+            return Response({
+                "success": False,
+                "message": "Validation error.",
+                "errors": {"pagination": ["page and limit must be greater than 0."]}
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         total_count = bills.count()
         start = (page - 1) * limit
@@ -77,7 +95,7 @@ def purchase_bill_list_create(request):
     elif request.method == 'POST':
         serializer = PurchaseBillSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save(created_by=request.user)
+            serializer.save(created_by=request.user.active_tenant)
             return Response({
                 "success": True,
                 "message": "Purchase bill created successfully.",
@@ -119,11 +137,36 @@ def purchase_bill_list_create(request):
 @permission_classes([IsAuthenticated])
 def purchase_bill_detail(request, pk):
     try:
-        bill = PurchaseBill.objects.get(pk=pk, created_by=request.user)
+        bill = PurchaseBill.objects.get(pk=pk, created_by=request.user.active_tenant)
     except PurchaseBill.DoesNotExist:
         return Response({"success": False, "message": "Not found."}, status=404)
     serializer = PurchaseBillSerializer(bill)
     return Response({"success": True, "data": serializer.data})
+
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('vendor_name', openapi.IN_QUERY, description="Vendor Name exactly as stored", type=openapi.TYPE_STRING, required=True),
+    ],
+    responses={200: "List of products"}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def vendor_products(request):
+    vendor_name = request.GET.get('vendor_name', '').strip()
+    if not vendor_name:
+        return Response({"success": False, "message": "vendor_name is required."}, status=400)
+    
+    # Get distinct product IDs from PurchaseBillItems for this vendor
+    product_ids = PurchaseBillItem.objects.filter(
+        purchase_bill__vendor_name=vendor_name,
+        purchase_bill__created_by=request.user.active_tenant
+    ).values_list('product_id', flat=True).distinct()
+    
+    from inventory.models import Product
+    products = Product.objects.filter(id__in=product_ids)
+    serializer = ProductSerializer(products, many=True)
+    return Response(serializer.data)
 
 
 @swagger_auto_schema(
@@ -202,7 +245,16 @@ def purchase_bill_detail(request, pk):
 @permission_classes([IsAuthenticated])
 def sales_invoice_list_create(request):
     if request.method == 'GET':
-        invoices = SalesInvoice.objects.filter(created_by=request.user).order_by('-invoice_date')
+        invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant).select_related('customer').prefetch_related('items__product').order_by('-invoice_date')
+        
+        customer_id = request.GET.get('customer')
+        if customer_id:
+            invoices = invoices.filter(customer_id=customer_id)
+            
+        status_filter = request.GET.get('status')
+        if status_filter and status_filter != 'all':
+            invoices = invoices.filter(status=status_filter)
+            
         serializer = SalesInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     elif request.method == 'POST':
@@ -210,11 +262,22 @@ def sales_invoice_list_create(request):
         print("DEBUG: Request data:", request.data)
         print("DEBUG: Request user:", request.user)
         
+        # Check for invoice number collision
+        invoice_number = request.data.get('invoice_number')
+        if invoice_number and SalesInvoice.objects.filter(
+            invoice_number=invoice_number, 
+            created_by=request.user.active_tenant
+        ).exists():
+            return Response({
+                'error': 'Invoice number already exists',
+                'details': f"Invoice with number {invoice_number} already exists."
+            }, status=status.HTTP_409_CONFLICT)
+        
         serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             print("DEBUG: Serializer is valid, creating sales invoice")
             try:
-                instance = serializer.save(created_by=request.user)
+                instance = serializer.save(created_by=request.user.active_tenant)
                 print("DEBUG: Sales invoice created successfully:", instance.id)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             except Exception as e:
@@ -270,7 +333,7 @@ def sales_invoice_list_create(request):
 @permission_classes([IsAuthenticated])
 def sales_invoice_detail(request, pk):
     try:
-        invoice = SalesInvoice.objects.get(pk=pk, created_by=request.user)
+        invoice = SalesInvoice.objects.get(pk=pk, created_by=request.user.active_tenant)
     except SalesInvoice.DoesNotExist:
         return Response({"success": False, "message": "Not found."}, status=404)
     serializer = SalesInvoiceSerializer(invoice)
@@ -307,7 +370,7 @@ def sales_invoice_detail(request, pk):
 @permission_classes([IsAuthenticated])
 def purchase_bill_update_delete(request, pk):
     try:
-        bill = PurchaseBill.objects.get(pk=pk, created_by=request.user)
+        bill = PurchaseBill.objects.get(pk=pk, created_by=request.user.active_tenant)
     except PurchaseBill.DoesNotExist:
         return Response({
             "success": False,
@@ -329,6 +392,11 @@ def purchase_bill_update_delete(request, pk):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
+        if bill.payment_status != 'pending':
+            return Response({
+                "success": False,
+                "message": "Only pending purchase bills can be deleted."
+            }, status=status.HTTP_400_BAD_REQUEST)
         bill.delete()
         return Response({
             "success": True,
@@ -366,7 +434,7 @@ def purchase_bill_update_delete(request, pk):
 @permission_classes([IsAuthenticated])
 def sales_invoice_update_delete(request, pk):
     try:
-        invoice = SalesInvoice.objects.get(pk=pk, created_by=request.user)
+        invoice = SalesInvoice.objects.get(pk=pk, created_by=request.user.active_tenant)
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -382,5 +450,104 @@ def sales_invoice_update_delete(request, pk):
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
+        if invoice.payment_status != 'pending':
+            return Response({
+                'error': 'Only pending sales invoices can be deleted.'
+            }, status=status.HTTP_400_BAD_REQUEST)
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+from django.db.models import Sum, Count
+from django.utils import timezone
+import re
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_next_invoice_number(request):
+    prefix = request.GET.get('prefix', 'INV-')
+    tenant_id = str(request.user.active_tenant.id)[:4].upper()
+    full_prefix = f"{prefix}{tenant_id}-"
+    
+    # Find max invoice number with this prefix
+    invoices = SalesInvoice.objects.filter(
+        created_by=request.user.active_tenant,
+        invoice_number__startswith=full_prefix
+    )
+    
+    max_num = 0
+    for inv in invoices:
+        suffix = inv.invoice_number.replace(full_prefix, '')
+        try:
+            num = int(suffix)
+            if num > max_num:
+                max_num = num
+        except ValueError:
+            pass
+            
+    next_num = max_num + 1
+    next_invoice = f"{full_prefix}{next_num:03d}"
+    return Response({
+        "success": True,
+        "uuid_prefix": tenant_id,
+        "next_number": next_invoice,
+        "suffix": f"{next_num:03d}"
+    })
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def sales_summary_analytics(request):
+    start_date = request.GET.get('start_date')
+    end_date = request.GET.get('end_date')
+    
+    qs = SalesInvoice.objects.filter(created_by=request.user.active_tenant)
+    if start_date:
+        qs = qs.filter(invoice_date__gte=start_date)
+    if end_date:
+        qs = qs.filter(invoice_date__lte=end_date)
+        
+    total_revenue = qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
+    total_invoices = qs.count()
+    
+    now = timezone.now()
+    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    this_month_qs = SalesInvoice.objects.filter(
+        created_by=request.user.active_tenant,
+        invoice_date__gte=this_month_start.date()
+    )
+    this_month_revenue = this_month_qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
+    this_month_invoices = this_month_qs.count()
+    
+    return Response({
+        "success": True,
+        "total_revenue": total_revenue,
+        "total_invoices": total_invoices,
+        "this_month_revenue": this_month_revenue,
+        "this_month_invoices": this_month_invoices,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def recalculate_invoice_totals(request):
+    """
+    Recalculate invoice totals from items for all invoices (for fixing data inconsistencies).
+    """
+    invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant)
+    fixed_count = 0
+    
+    for invoice in invoices:
+        items_total = sum(
+            Decimal(str(item.amount or 0)) 
+            for item in invoice.items.all()
+        )
+        
+        if invoice.total_amount != items_total:
+            invoice.total_amount = items_total
+            invoice.save(update_fields=['total_amount'])
+            fixed_count += 1
+    
+    return Response({
+        "success": True,
+        "message": f"Fixed {fixed_count} invoices with incorrect totals"
+    })

@@ -2,6 +2,7 @@ import uuid
 from django.db import models
 from django.conf import settings
 
+
 class AccountType(models.TextChoices):
     ASSET = 'asset', 'Asset'
     LIABILITY = 'liability', 'Liability'
@@ -40,11 +41,43 @@ class GeneralLedgerEntry(models.Model):
     # Link to source documents
     sales_invoice = models.ForeignKey('billing.SalesInvoice', on_delete=models.CASCADE, null=True, blank=True)
     purchase_bill = models.ForeignKey('billing.PurchaseBill', on_delete=models.CASCADE, null=True, blank=True)
+    customer = models.ForeignKey('billing.Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         ordering = ['-date', '-created_at']
     
+    
     def __str__(self):
         return f"{self.account.name} - Dr:{self.debit} Cr:{self.credit}"
+
+class BankStatement(models.Model):
+    bank_name = models.CharField(max_length=100)
+    account_number = models.CharField(max_length=50, blank=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    file_name = models.CharField(max_length=255)
+
+    def __str__(self):
+        return f"{self.bank_name} - {self.uploaded_at.date()}"
+
+class BankStatementLine(models.Model):
+    statement = models.ForeignKey(BankStatement, related_name='lines', on_delete=models.CASCADE)
+    date = models.DateField()
+    description = models.CharField(max_length=500)
+    reference_no = models.CharField(max_length=100, blank=True)
+    debit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    credit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    balance = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    
+    # Reconciliation Status
+    is_reconciled = models.BooleanField(default=False)
+    matched_entry = models.ForeignKey(GeneralLedgerEntry, null=True, blank=True, on_delete=models.SET_NULL, related_name='bank_matches')
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['date']
+
+    def __str__(self):
+        return f"{self.date} - {self.description} ({self.credit_amount - self.debit_amount})"

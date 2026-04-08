@@ -17,6 +17,7 @@ from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
 from django.core.mail import send_mail
 from django.conf import settings
+from .tasks import send_async_email
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
@@ -450,12 +451,14 @@ def password_reset_request_view(request):
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
         reset_link = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
-        send_mail(
+        
+        # Dispatch email asynchronously via Celery
+        send_async_email.delay(
             subject="Password Reset Request",
             message=f"Click the link to reset your password: {reset_link}",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
+            recipient_list=[email]
         )
+        
         return Response({'message': 'Password reset link sent.'})
     except User.DoesNotExist:
         # Do not reveal if email exists for security
@@ -504,4 +507,50 @@ def password_reset_confirm_view(request, uidb64, token):
             return Response({'error': 'Invalid or expired token.'}, status=status.HTTP_400_BAD_REQUEST)
     except (User.DoesNotExist, ValueError, TypeError):
         return Response({'error': 'Invalid request.'}, status=status.HTTP_400_BAD_REQUEST)
+
+from rest_framework import viewsets
+from .serializers import TeamMemberSerializer
+
+class TeamViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Admins to view, create, and modify their Team Managers.
+    Enforces subscription limits: Free=0, Mid=2, Pro=5.
+    """
+    serializer_class = TeamMemberSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        User = get_user_model()
+        if getattr(self, 'swagger_fake_view', False): return User.objects.none()
+        
+        user = self.request.user
+        tenant = user.active_tenant
+        
+        # Users can only see team members belonging to their tenant
+        # Managers shouldn't be able to edit other managers, but Admins can.
+        if user.role != 'admin':
+            return User.objects.none() # Or filter(id=user.id) if they should see themselves
+            
+        return User.objects.filter(parent=tenant).exclude(id=tenant.id).order_by('-date_joined')
+        
+    def perform_create(self, serializer):
+        User = get_user_model()
+        tenant = self.request.user.active_tenant
+        
+        try:
+            plan = tenant.subscription.plan
+            max_members = plan.max_managers
+            tier = plan.name
+        except AttributeError:
+            # Fallback if no subscription model exists somehow
+            tier = "Starter Plan"
+            max_members = 0
+        
+        current_members = get_user_model().objects.filter(parent=tenant).count()
+        if current_members >= max_members:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(f"Your {tier} limits you to {max_members} team members. Upgrade for more.")
+            
+        serializer.save()
+
 

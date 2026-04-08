@@ -353,16 +353,16 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'non_field_errors': [error_msg]})
 
 class SalesInvoiceSerializer(serializers.ModelSerializer):
-    items = SalesInvoiceItemSerializer(many=True)
+    items = SalesInvoiceItemSerializer(many=True, required=False)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_name = serializers.CharField(required=False, allow_blank=True)  # Name to display, optional for draft
     status = serializers.CharField(required=False, default='final')
     customer_email = serializers.EmailField(write_only=True, required=False)
     customer_phone = serializers.CharField(write_only=True, required=False)
     customer_address = serializers.CharField(write_only=True, required=False)
-    invoice_number = serializers.CharField(max_length=100)
-    invoice_date = serializers.DateField()
-    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    invoice_date = serializers.DateField(required=False, allow_null=True)
+    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     meta = TransactionMetaSerializer(required=False)
 
     class Meta:
@@ -430,8 +430,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
         
-        if data.get('status') != 'draft' and (not customer_name or not str(customer_name).strip()):
-            error_msg = 'Customer name is required for final invoices.'
+        if not customer_name or not str(customer_name).strip():
+            error_msg = 'Customer name is required.'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
             raise serializers.ValidationError({'customer_name': error_msg})
         

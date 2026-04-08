@@ -389,6 +389,19 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
                   'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta']
 
+    @staticmethod
+    def _calculate_line_amount(item_data):
+        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
+        price = Decimal(str(item_data.get('price', 0) or 0))
+        discount = Decimal(str(item_data.get('discount', 0) or 0))
+        tax = Decimal(str(item_data.get('tax', 0) or 0))
+
+        base_amount = quantity * price
+        discount_amount = (base_amount * discount) / Decimal('100')
+        taxable_amount = base_amount - discount_amount
+        tax_amount = (taxable_amount * tax) / Decimal('100')
+        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+
     def validate(self, data):
         """
         Check for Credit Limit violations.
@@ -411,6 +424,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                      pass
 
         total_amount = data.get('total_amount', getattr(self.instance, 'total_amount', 0))
+        items = data.get('items')
+        if items:
+            total_amount = sum(
+                (self._calculate_line_amount(item) for item in items),
+                Decimal('0.00')
+            )
 
         if self.instance and self.instance.payment_status in ['partial_paid', 'paid']:
             immutable_fields = ['invoice_number', 'invoice_date', 'customer_name', 'place_of_supply']
@@ -530,6 +549,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         print("DEBUG SalesInvoiceSerializer: Creating sales invoice with data:", validated_data)
         items_data = validated_data.pop('items')
+        meta_data = validated_data.pop('meta', None)
+        validated_data.pop('total_amount', None)
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
         
         # Add the customer object that we stored earlier
@@ -547,14 +568,21 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             print("DEBUG SalesInvoiceSerializer: Sales invoice created:", sales_invoice.id)
             
             for i, item_data in enumerate(items_data):
+                item_data['amount'] = self._calculate_line_amount(item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Creating item {i+1}:", item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
             
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
+
+            recalculated_total = sum((item.amount for item in sales_invoice.items.all()), Decimal('0'))
+            sales_invoice.total_amount = recalculated_total
+            if sales_invoice.amount_paid > sales_invoice.total_amount:
+                sales_invoice.amount_paid = sales_invoice.total_amount
+            sales_invoice.refresh_payment_status(save=False)
+            sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
             
             # Create Transaction Meta
-            meta_data = validated_data.pop('meta', None)
             if meta_data:
                 TransactionMeta.objects.create(invoice=sales_invoice, **meta_data)
             else:
@@ -580,6 +608,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
+        validated_data.pop('total_amount', None)
         
         # Update the sales invoice fields
         for attr, value in validated_data.items():
@@ -590,6 +619,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if items_data:
             instance.items.all().delete()
             for item_data in items_data:
+                item_data['amount'] = self._calculate_line_amount(item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
 
             recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))

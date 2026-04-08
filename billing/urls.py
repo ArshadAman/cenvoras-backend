@@ -11,6 +11,7 @@ from . import report_views
 from . import views_sidecar
 from . import gst_views
 from . import returns_views
+from . import views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -63,3 +64,4 @@ urlpatterns = [
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', views.recalculate_invoice_totals, name='recalculate_invoice_totals'),
+]

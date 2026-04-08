@@ -37,6 +37,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['name', 'description', 'hsn_sac_code']
 
     def get_queryset(self):
         return Product.objects.filter(created_by=self.request.user.active_tenant).order_by('name')

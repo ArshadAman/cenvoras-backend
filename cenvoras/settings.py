@@ -198,7 +198,10 @@ REST_FRAMEWORK = {
 
 # CORS configuration (allow all for development, restrict in production)
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('1', 'true', 'yes', 'on')
-raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://devapi.cenvora.app')
+raw_cors_allowed = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://dev.cenvora.app,https://devapi.cenvora.app')
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in raw_cors_allowed.split(',') if origin.strip()]
+
+raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://dev.cenvora.app,https://devapi.cenvora.app')
 CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in raw_csrf_trusted.split(',') if origin.strip()]
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

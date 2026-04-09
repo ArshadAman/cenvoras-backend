@@ -155,6 +155,8 @@ class SalesInvoice(models.Model):
     
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)
     journal = models.CharField(max_length=50, default="Sales")
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where items are sold")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)

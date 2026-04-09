@@ -1,13 +1,9 @@
 import csv
-from io import TextIOWrapper
+from io import StringIO
 from celery import shared_task
 from django.db import transaction
 from inventory.serializers import ProductSerializer
-from inventory.models import Product
-from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
-from django.http import HttpRequest
-import json
 
 User = get_user_model()
 
@@ -16,13 +12,10 @@ class FakeRequest:
         self.user = user
 
 @shared_task
-def process_bulk_upload_csv(file_path: str, user_id: int):
+def process_bulk_upload_csv(csv_content: str, user_id: str):
     user = User.objects.get(id=user_id)
     fake_request = FakeRequest(user)
-    
-    file_obj = default_storage.open(file_path, 'rb')
-    text_stream = TextIOWrapper(file_obj, encoding='utf-8-sig')
-    reader = csv.DictReader(text_stream)
+    reader = csv.DictReader(StringIO(csv_content))
 
     def normalize_key(key):
         return (key or '').strip().lower().replace(' ', '_').replace('-', '_')
@@ -72,13 +65,9 @@ def process_bulk_upload_csv(file_path: str, user_id: int):
 
             serializer = ProductSerializer(data=payload, context={'request': fake_request})
             if serializer.is_valid():
-                # For safety, pass both. Some serializers expect the model relationship
                 serializer.save(created_by=user.active_tenant)
                 created_count += 1
             else:
                 errors.append({'row': index, 'errors': serializer.errors})
-
-    # Optional: Once finished, clean up the temp file
-    default_storage.delete(file_path)
 
     return {"created_count": created_count, "failed_count": len(errors), "errors": errors}

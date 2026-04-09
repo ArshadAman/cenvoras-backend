@@ -1,5 +1,6 @@
 import csv
 import logging
+import re
 from io import StringIO
 from celery import shared_task
 from django.db import transaction
@@ -8,6 +9,32 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+
+def _extract_numeric(value):
+    """Extract numeric part from loose values like '18%', 'GST 18', '1,234.50'."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return str(value)
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+
+    text = text.replace(',', '')
+    text = text.replace('%', '')
+    text = text.replace('gst', '')
+    text = text.replace('tax', '')
+    text = text.strip()
+
+    # Fast path for clean numeric strings.
+    if re.fullmatch(r'-?\d+(?:\.\d+)?', text):
+        return text
+
+    # Fallback: find first numeric token in noisy strings.
+    match = re.search(r'-?\d+(?:\.\d+)?', text)
+    return match.group(0) if match else None
 
 class FakeRequest:
     def __init__(self, user):
@@ -87,20 +114,18 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
                     value = unit_aliases.get(normalized_unit, normalized_unit)
 
                 if field in integer_fields:
-                    if isinstance(value, str):
-                        value = value.replace(',', '').strip()
+                    numeric_value = _extract_numeric(value)
                     try:
-                        value = int(float(value))
+                        value = int(float(numeric_value))
                     except (TypeError, ValueError):
                         errors.append({'row': index, 'errors': {field: ['Invalid integer value.']}})
                         payload = None
                         break
 
                 if field in decimal_fields:
-                    if isinstance(value, str):
-                        value = value.replace(',', '').strip()
+                    numeric_value = _extract_numeric(value)
                     try:
-                        value = float(value)
+                        value = float(numeric_value)
                     except (TypeError, ValueError):
                         errors.append({'row': index, 'errors': {field: ['Invalid number value.']}})
                         payload = None

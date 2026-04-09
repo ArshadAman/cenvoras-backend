@@ -14,6 +14,7 @@ class User(AbstractUser):
     # Core signup fields
     phone = models.CharField(max_length=15, unique=True, null=True, blank=True, help_text="Phone number for login recovery and communication")
     business_name = models.CharField(max_length=100, blank=True, null=True, help_text="Business/Shop name (appears on invoices)")
+    invoice_prefix = models.CharField(max_length=20, default='INV-', help_text="Default invoice prefix for this user")
     
     # Optional fields (can be added later)
     gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional)")

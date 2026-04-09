@@ -116,7 +116,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'business_address', 'gstin', 'subscription_status',
+            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
@@ -138,14 +138,19 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'business_address', 'gstin', 'email', 'current_password',
+            'invoice_prefix', 'business_address', 'gstin', 'email', 'current_password',
             'new_password', 'confirm_new_password'
         ]
         extra_kwargs = {
             'phone': {'required': False},
             'business_name': {'required': False},
+            'invoice_prefix': {'required': False},
             'email': {'required': False},
         }
+
+    def validate_invoice_prefix(self, value):
+        normalized = str(value or '').strip().upper()
+        return normalized or 'INV-'
     
     def validate(self, attrs):
         user = self.instance

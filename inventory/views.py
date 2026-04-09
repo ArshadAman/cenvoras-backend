@@ -1,5 +1,4 @@
 import csv
-from io import TextIOWrapper
 
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -32,6 +31,19 @@ def _product_template_fields():
         # Expose user-facing pricing key while keeping DB column intact.
         fields.append('cost_price' if field.name == 'price' else field.name)
     return fields
+
+
+def _decode_csv_bytes(raw_bytes):
+    """Decode CSV bytes from common spreadsheet exports."""
+    # Try strict/common encodings first; latin-1 is the final permissive fallback.
+    for encoding in ('utf-8-sig', 'utf-16', 'utf-16le', 'utf-16be', 'cp1252', 'latin-1'):
+        try:
+            text = raw_bytes.decode(encoding)
+            # Strip null chars often seen when utf-16 is decoded with non-utf-16 parsers.
+            return text.replace('\x00', '')
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError('csv', raw_bytes, 0, 1, 'unable to decode with supported encodings')
 
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
@@ -237,9 +249,13 @@ def bulk_upload_products(request):
     from inventory.tasks import process_bulk_upload_csv
 
     try:
-        csv_content = uploaded_file.read().decode('utf-8-sig')
+        csv_bytes = uploaded_file.read()
+        csv_content = _decode_csv_bytes(csv_bytes)
     except UnicodeDecodeError:
-        return Response({'error': 'Unable to decode CSV. Please upload a UTF-8 encoded CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {'error': 'Unable to decode CSV. Supported encodings: UTF-8, UTF-16, Windows-1252, Latin-1.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     except Exception:
         return Response({'error': 'Unable to read CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
 

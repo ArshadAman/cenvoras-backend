@@ -454,6 +454,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
                   'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta']
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        customer = getattr(instance, 'customer', None)
+        data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
+        data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
+        data['customer_address'] = getattr(customer, 'address', None) if customer else data.get('customer_address')
+        return data
+
     @staticmethod
     def _calculate_line_amount(item_data):
         quantity = Decimal(str(item_data.get('quantity', 0) or 0))
@@ -564,7 +572,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         customer_obj = getattr(self.instance, 'customer', None) if self.instance else None
         
-        # Only create/find Customer object if email is provided
+        # Create/find Customer object by email when available, else by name.
         if customer_email and customer_email.strip():
             print("DEBUG SalesInvoiceSerializer: Email provided, will create/find Customer object")
             try:
@@ -597,7 +605,26 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     print("DEBUG SalesInvoiceSerializer: Error creating customer -", error_msg)
                     raise serializers.ValidationError({'customer_email': error_msg})
         else:
-            print("DEBUG SalesInvoiceSerializer: No email provided, will not create Customer object")
+            print("DEBUG SalesInvoiceSerializer: No email provided, matching customer by name")
+            if customer_name and customer_name.strip():
+                customer_obj = Customer.objects.filter(name__iexact=customer_name.strip(), created_by=user).first()
+                if customer_obj:
+                    updated = False
+                    if customer_phone and customer_phone != customer_obj.phone:
+                        customer_obj.phone = customer_phone
+                        updated = True
+                    if customer_address and customer_address != customer_obj.address:
+                        customer_obj.address = customer_address
+                        updated = True
+                    if updated:
+                        customer_obj.save(update_fields=['phone', 'address'])
+                else:
+                    customer_obj = Customer.objects.create(
+                        name=customer_name.strip(),
+                        phone=customer_phone or None,
+                        address=customer_address or None,
+                        created_by=user,
+                    )
             
         # Store customer object separately - don't pass to parent validation
         self._customer_obj = customer_obj  # Store for use in create method

@@ -182,7 +182,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
             'warehouse', 'journal',
-            'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
+            'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
 
@@ -277,14 +277,16 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
+            round_off = validated_data.get('round_off', instance.round_off)
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))
             instance.total_amount = recalculated_total
+            instance.round_off = round_off
 
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount
 
             instance.refresh_payment_status(save=False)
-            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
         
         return instance
 
@@ -445,6 +447,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     invoice_date = serializers.DateField(required=False, allow_null=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
     meta = TransactionMetaSerializer(required=False)
 
     class Meta:
@@ -452,7 +455,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta']
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -684,12 +687,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
-            recalculated_total = sum((item.amount for item in sales_invoice.items.all()), Decimal('0'))
+            round_off = validated_data.get('round_off', Decimal('0.00'))
+            recalculated_total = sum((item.amount for item in sales_invoice.items.all()), Decimal('0')) + Decimal(str(round_off))
             sales_invoice.total_amount = recalculated_total
+            sales_invoice.round_off = round_off
             if sales_invoice.amount_paid > sales_invoice.total_amount:
                 sales_invoice.amount_paid = sales_invoice.total_amount
             sales_invoice.refresh_payment_status(save=False)
-            sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
+            sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
             
             # Create Transaction Meta
             if meta_data:
@@ -732,14 +737,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
 
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
+            round_off = validated_data.get('round_off', instance.round_off)
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))
             instance.total_amount = recalculated_total
+            instance.round_off = round_off
 
         if instance.amount_paid > instance.total_amount:
             instance.amount_paid = instance.total_amount
 
         instance.refresh_payment_status(save=False)
-        instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
+        instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
         
         if meta_data:
             meta, created = TransactionMeta.objects.get_or_create(invoice=instance)

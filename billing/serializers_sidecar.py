@@ -16,7 +16,21 @@ class PartyMetaSerializer(serializers.ModelSerializer):
 class InvoiceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = InvoiceSettings
-        fields = ['print_offset_x', 'print_offset_y', 'template_name', 'terms_conditions', 'header_text', 'footer_text']
+        fields = [
+            'print_offset_x',
+            'print_offset_y',
+            'template_name',
+            'terms_conditions',
+            'header_text',
+            'footer_text',
+            'show_item_description',
+            'show_item_hsn',
+            'show_item_batch',
+            'require_item_batch',
+            'show_item_free_quantity',
+            'show_item_discount',
+            'show_item_tax',
+        ]
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)

@@ -102,6 +102,15 @@ class InvoiceSettings(models.Model):
     terms_conditions = models.TextField(blank=True)
     header_text = models.TextField(blank=True)
     footer_text = models.TextField(blank=True)
+
+    # Sales item table preferences (form + print)
+    show_item_description = models.BooleanField(default=True)
+    show_item_hsn = models.BooleanField(default=True)
+    show_item_batch = models.BooleanField(default=True)
+    require_item_batch = models.BooleanField(default=False)
+    show_item_free_quantity = models.BooleanField(default=True)
+    show_item_discount = models.BooleanField(default=True)
+    show_item_tax = models.BooleanField(default=True)
     
     def __str__(self):
         return f"Invoice Settings for {self.user}"

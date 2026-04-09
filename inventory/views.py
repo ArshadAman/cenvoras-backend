@@ -246,84 +246,28 @@ def bulk_upload_products(request):
     expected_fields = _product_template_fields()
     optional_nullable_fields = {'hsn_sac_code', 'description', 'secondary_unit', 'sale_price'}
 
+    from django.core.files.storage import default_storage
+    from inventory.tasks import process_bulk_upload_csv
+    import uuid
+
     try:
-        text_stream = TextIOWrapper(uploaded_file.file, encoding='utf-8-sig')
-        reader = csv.DictReader(text_stream)
-    except Exception:
-        return Response({'error': 'Unable to parse CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if not reader.fieldnames:
-        return Response({'error': 'CSV must include a header row.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    created_count = 0
-    errors = []
-
-    processed_rows = 0
-
-    with transaction.atomic():
-        for index, row in enumerate(reader, start=2):
-            normalized_row = {normalize_key(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
-            if not any(v not in (None, '') for v in normalized_row.values()):
-                continue
-
-            processed_rows += 1
-
-            payload = {}
-            for field in expected_fields:
-                lookup_key = 'cost_price' if field == 'cost_price' else field
-                value = normalized_row.get(lookup_key)
-                if value in (None, ''):
-                    for alias in header_aliases.get(lookup_key, []):
-                        alias_value = normalized_row.get(alias)
-                        if alias_value not in (None, ''):
-                            value = alias_value
-                            break
-
-                if value in (None, ''):
-                    if field in optional_nullable_fields:
-                        payload[field] = None
-                    continue
-
-                if field == 'unit' and isinstance(value, str):
-                    value = value.lower()
-
-                payload[field] = value
-
-            serializer = ProductSerializer(data=payload, context={'request': request})
-            if serializer.is_valid():
-                serializer.save(created_by=request.user.active_tenant)
-                created_count += 1
-            else:
-                errors.append({'row': index, 'errors': serializer.errors})
-
-    if errors:
-        return Response(
-            {
-                'created_count': created_count,
-                'failed_count': len(errors),
-                'processed_rows': processed_rows,
-                'errors': errors,
-                'expected_columns': expected_fields,
-            },
-            status=status.HTTP_207_MULTI_STATUS,
-        )
-
-    if created_count == 0:
-        return Response(
-            {
-                'error': 'No products were created from the CSV file.',
-                'processed_rows': processed_rows,
-                'expected_columns': expected_fields,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        # Save file to storage
+        file_name = f"bulk-uploads/temp_{uuid.uuid4()}.csv"
+        file_path = default_storage.save(file_name, uploaded_file)
+        
+        # Trigger Celery Task
+        process_bulk_upload_csv.delay(file_path, request.user.id)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(
         {
-            'message': 'Bulk upload completed successfully.',
-            'created_count': created_count,
+            'message': 'Bulk upload task started. Your products will be imported asynchronously in the background. Please refresh the page in a few moments.',
+            # Keep these 0 immediately so frontend doesn't crash if it expects integers
+            'created_count': 0,
+            'failed_count': 0,
         },
-        status=status.HTTP_201_CREATED,
+        status=status.HTTP_202_ACCEPTED,
     )
 
 
@@ -654,3 +598,21 @@ def expiry_dashboard_summary(request):
         'items': items,
     })
 
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework import permissions, status
+from rest_framework.response import Response
+from inventory.models import Product
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def bulk_delete_products(request):
+    ids = request.data.get('ids', [])
+    if not ids or not isinstance(ids, list):
+        return Response({'error': 'A list of product IDs is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+    deleted_count, _ = Product.objects.filter(
+        id__in=ids,
+        created_by=request.user.active_tenant
+    ).delete()
+    
+    return Response({'message': f'Successfully deleted {deleted_count} products.', 'deleted_count': deleted_count}, status=status.HTTP_200_OK)

@@ -309,6 +309,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         return {
             "id": str(obj.product.id),
             "name": obj.product.name,
+            "description": obj.product.description,
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
         }

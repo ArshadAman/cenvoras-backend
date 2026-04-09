@@ -5,7 +5,7 @@ services:
   nginx:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/letsencrypt/live/api.cenvora.app:/etc/letsencrypt/live/api.cenvora.app:ro
-      - /etc/nginx/self-signed:/etc/nginx/self-signed:ro
+      - /etc/letsencrypt/live/api.cenvora.app/fullchain.pem:/etc/nginx/cert.pem:ro
+      - /etc/letsencrypt/live/api.cenvora.app/privkey.pem:/etc/nginx/privkey.pem:ro
       - ./staticfiles:/app/static:ro
       - ./media:/app/media:ro

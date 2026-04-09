@@ -5,6 +5,7 @@ from . import views_sidecar
 urlpatterns = [
     path('products/', views.ProductListCreateView.as_view(), name='product-list-create'),
     path('products/<uuid:pk>/', views.ProductDetailView.as_view(), name='product-detail'),
+    path('products/bulk-delete/', views.bulk_delete_products, name='product-bulk-delete'),
     path('products/template/csv/', views.download_product_csv_template, name='product-csv-template'),
     path('products/bulk-upload/csv/', views.bulk_upload_products, name='product-bulk-upload-csv'),
     path('warehouses/', views.WarehouseListCreateView.as_view(), name='warehouse-list-create'),

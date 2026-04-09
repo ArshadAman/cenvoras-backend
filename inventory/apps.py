@@ -7,3 +7,4 @@ class InventoryConfig(AppConfig):
 
     def ready(self):
         import inventory.signals
+        import inventory.tasks

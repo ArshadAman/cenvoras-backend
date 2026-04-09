@@ -230,33 +230,24 @@ def bulk_upload_products(request):
     if not uploaded_file.name.lower().endswith('.csv'):
         return Response({'error': 'Only CSV files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    def normalize_key(key):
-        return (key or '').strip().lower().replace(' ', '_').replace('-', '_')
+    # Hard limit for bulk upload: 10MB
+    if uploaded_file.size and uploaded_file.size > (10 * 1024 * 1024):
+        return Response({'error': 'CSV file too large. Maximum allowed size is 10MB.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    header_aliases = {
-        'cost_price': ['cost_price', 'price', 'purchase_price', 'cost'],
-        'sale_price': ['sale_price', 'sales_price', 'selling_price', 'saleprice', 'salesprice'],
-        'hsn_sac_code': ['hsn_sac_code', 'hsn_code', 'hsn'],
-        'low_stock_alert': ['low_stock_alert', 'min_stock_level', 'reorder_level'],
-        'stock': ['stock', 'opening_stock', 'current_stock'],
-        'secondary_unit': ['secondary_unit', 'secondaryunit'],
-        'conversion_factor': ['conversion_factor', 'conversionfactor'],
-    }
-
-    expected_fields = _product_template_fields()
-    optional_nullable_fields = {'hsn_sac_code', 'description', 'secondary_unit', 'sale_price'}
-
-    from django.core.files.storage import default_storage
     from inventory.tasks import process_bulk_upload_csv
-    import uuid
 
     try:
-        # Save file to storage
-        file_name = f"bulk-uploads/temp_{uuid.uuid4()}.csv"
-        file_path = default_storage.save(file_name, uploaded_file)
-        
-        # Trigger Celery Task
-        process_bulk_upload_csv.delay(file_path, request.user.id)
+        csv_content = uploaded_file.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return Response({'error': 'Unable to decode CSV. Please upload a UTF-8 encoded CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception:
+        return Response({'error': 'Unable to read CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not csv_content.strip():
+        return Response({'error': 'CSV file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        process_bulk_upload_csv.delay(csv_content, str(request.user.id))
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

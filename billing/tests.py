@@ -165,3 +165,117 @@ class PurchaseBillValidationTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(res.data.get("success", True))
         self.assertIn("errors", res.data)
+
+
+class PaymentStatusTests(TestCase):
+    """Test that payment status updates correctly when payments are recorded"""
+    
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from billing.models import Customer
+        User = get_user_model()
+        
+        self.user = User.objects.create_user(
+            username="payment_test_user",
+            email="payment@test.com",
+            password="testpass"
+        )
+        
+        self.customer = Customer.objects.create(
+            name="Test Customer",
+            created_by=self.user
+        )
+        
+        self.invoice = SalesInvoice.objects.create(
+            created_by=self.user,
+            customer_name="Test Customer",
+            invoice_number="TEST-PAY-001",
+            invoice_date="2024-01-01",
+            total_amount=100.00,
+            customer=self.customer
+        )
+    
+    def test_invoice_status_pending_on_creation(self):
+        """Invoice should be pending when created with no payments"""
+        self.assertEqual(self.invoice.payment_status, "pending")
+        self.assertEqual(self.invoice.amount_paid, 0)
+    
+    def test_invoice_status_updates_to_partial_paid_on_partial_payment(self):
+        """Invoice status should change from pending to partial_paid when partial payment is recorded"""
+        from billing.models import Payment
+        
+        payment = Payment.objects.create(
+            customer=self.customer,
+            invoice=self.invoice,
+            date="2024-01-01",
+            amount=50.00,
+            created_by=self.user
+        )
+        
+        self.invoice.refresh_from_db()
+        
+        # Status should be updated to partial_paid
+        self.assertEqual(self.invoice.payment_status, "partial_paid")
+        # Amount paid should be updated
+        self.assertEqual(float(self.invoice.amount_paid), 50.00)
+    
+    def test_invoice_status_updates_to_paid_on_full_payment(self):
+        """Invoice status should change to paid when full payment is recorded"""
+        from billing.models import Payment
+        
+        payment = Payment.objects.create(
+            customer=self.customer,
+            invoice=self.invoice,
+            date="2024-01-01",
+            amount=100.00,
+            created_by=self.user
+        )
+        
+        self.invoice.refresh_from_db()
+        
+        # Status should be updated to paid
+        self.assertEqual(self.invoice.payment_status, "paid")
+        # Amount paid should equal total
+        self.assertEqual(float(self.invoice.amount_paid), 100.00)
+    
+    def test_customer_balance_decreases_on_payment(self):
+        """Customer current_balance (udhar) should decrease when payment is recorded"""
+        from billing.models import Payment
+        
+        initial_balance = 100.00
+        # Set initial balance
+        self.customer.current_balance = initial_balance
+        self.customer.save()
+        
+        payment = Payment.objects.create(
+            customer=self.customer,
+            invoice=self.invoice,
+            date="2024-01-01",
+            amount=50.00,
+            created_by=self.user
+        )
+        
+        self.customer.refresh_from_db()
+        
+        # Balance should decrease by payment amount
+        self.assertEqual(float(self.customer.current_balance), initial_balance - 50.00)
+    
+    def test_payment_without_invoice_is_rejected(self):
+        """Payment without invoice should be rejected"""
+        from rest_framework.test import APIClient
+        
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        
+        # Try to create payment without invoice
+        response = client.post('/billing/payments/', {
+            'customer': str(self.customer.id),
+            'invoice': '',  # No invoice
+            'date': '2024-01-01',
+            'amount': 50.00,
+            'mode': 'cash'
+        })
+        
+        # Should be rejected
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('invoice', response.data)

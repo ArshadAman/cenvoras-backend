@@ -171,9 +171,17 @@ class SalesInvoice(models.Model):
             status_value = BillPaymentStatus.PARTIAL_PAID
         else:
             status_value = BillPaymentStatus.PAID
+        
+        old_status = self.payment_status
         self.payment_status = status_value
+        
         if save:
             self.save(update_fields=['payment_status'])
+            import sys
+            print(f"DEBUG: SalesInvoice {self.pk} refresh_payment_status - "
+                  f"amount_paid={self.amount_paid}, total={self.total_amount}, "
+                  f"{old_status} → {status_value}", file=sys.stderr)
+        
         return status_value
 
 class SalesInvoiceItem(models.Model):

@@ -167,22 +167,17 @@ def revert_balance_on_sale_delete(sender, instance, **kwargs):
 @receiver(post_save, sender=Payment)
 def update_balance_on_payment(sender, instance, created, **kwargs):
     if created and instance.customer:
-        Customer.objects.filter(pk=instance.customer.pk).update(
-            current_balance=F('current_balance') - instance.amount
-        )
-        print(f"DEBUG: Payment {instance.pk} - Decreased customer balance by {instance.amount}")
-
         if instance.invoice_id:
-            print(f"DEBUG: Payment {instance.pk} - Linking to invoice {instance.invoice_id}")
+            print(f"DEBUG: Payment {instance.pk} - Updating linked invoice {instance.invoice_id}")
             SalesInvoice.objects.filter(pk=instance.invoice_id).update(
                 amount_paid=F('amount_paid') + instance.amount
             )
             invoice = SalesInvoice.objects.get(pk=instance.invoice_id)
             old_status = invoice.payment_status
             invoice.refresh_payment_status(save=True)
-            print(f"DEBUG: Invoice {instance.invoice_id} status: {old_status} → {invoice.payment_status}")
+            print(f"DEBUG: Invoice {instance.invoice_id} status: {old_status} -> {invoice.payment_status}")
         else:
-            print(f"DEBUG: Payment {instance.pk} - NO INVOICE LINKED (status won't update)")
+            print(f"DEBUG: Payment {instance.pk} - No invoice linked (status unchanged)")
         
         # Create ledger entries
         try:
@@ -200,20 +195,17 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=Payment)
 def revert_balance_on_payment_delete(sender, instance, **kwargs):
     if instance.customer:
-        Customer.objects.filter(pk=instance.customer.pk).update(
-            current_balance=F('current_balance') + instance.amount
-        )
-        print(f"DEBUG: Payment deletion - Reverted customer balance by {instance.amount}")
-
         if instance.invoice_id:
-            print(f"DEBUG: Payment deletion - Reverting invoice {instance.invoice_id}")
+            print(f"DEBUG: Payment deletion - Reverting linked invoice {instance.invoice_id}")
             SalesInvoice.objects.filter(pk=instance.invoice_id).update(
                 amount_paid=Greatest(F('amount_paid') - instance.amount, 0)
             )
             invoice = SalesInvoice.objects.get(pk=instance.invoice_id)
             old_status = invoice.payment_status
             invoice.refresh_payment_status(save=True)
-            print(f"DEBUG: Invoice {instance.invoice_id} status: {old_status} → {invoice.payment_status}")
+            print(f"DEBUG: Invoice {instance.invoice_id} status: {old_status} -> {invoice.payment_status}")
+        else:
+            print(f"DEBUG: Payment deletion {instance.pk} - No invoice linked (status unchanged)")
 
 @receiver(post_save, sender=SalesInvoice)
 def check_credit_limit_pre_save(sender, instance, created, **kwargs):

@@ -454,7 +454,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
-                  'invoice_number', 'invoice_date', 'due_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
+                  'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
                   'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta']
 
     def to_representation(self, instance):

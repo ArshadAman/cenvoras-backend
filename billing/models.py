@@ -141,6 +141,10 @@ class SalesInvoice(models.Model):
     invoice_number = models.CharField(max_length=100)
     invoice_date = models.DateField()
     due_date = models.DateField(null=True, blank=True)
+    po_number = models.CharField(max_length=100, blank=True, null=True)
+    po_date = models.DateField(null=True, blank=True)
+    challan_number = models.CharField(max_length=100, blank=True, null=True)
+    challan_date = models.DateField(null=True, blank=True)
     delivery_address = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=[('draft', 'Draft'), ('final', 'Final')], default='final')
     

@@ -18,9 +18,76 @@ def trigger_database_backup(modeladmin, request, queryset):
 	)
 
 
+@admin.action(description="Grant VIP (lifetime free) access")
+def grant_vip_access(modeladmin, request, queryset):
+	updated = queryset.update(is_lifetime_free=True)
+	messages.success(request, f"Granted VIP access to {updated} user(s).")
+
+
+@admin.action(description="Revoke VIP (lifetime free) access")
+def revoke_vip_access(modeladmin, request, queryset):
+	updated = queryset.update(is_lifetime_free=False)
+	messages.success(request, f"Revoked VIP access for {updated} user(s).")
+
+
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
-	actions = [trigger_database_backup]
+	actions = [trigger_database_backup, grant_vip_access, revoke_vip_access]
+	list_display = (
+		"username",
+		"email",
+		"business_name",
+		"is_lifetime_free",
+		"subscription_status",
+		"is_staff",
+		"is_active",
+	)
+	list_filter = (
+		"is_lifetime_free",
+		"subscription_status",
+		"is_staff",
+		"is_active",
+	)
+	search_fields = ("username", "email", "business_name", "phone")
+
+	fieldsets = DjangoUserAdmin.fieldsets + (
+		(
+			"Subscription & Access",
+			{
+				"fields": (
+					"is_lifetime_free",
+					"subscription_status",
+					"trial_ends_at",
+					"subscription_tier",
+				),
+			},
+		),
+		(
+			"Business Profile",
+			{
+				"fields": (
+					"business_name",
+					"phone",
+					"gstin",
+					"business_address",
+					"state",
+					"invoice_prefix",
+				),
+			},
+		),
+		(
+			"Team & Permissions",
+			{
+				"fields": (
+					"role",
+					"parent",
+					"permissions",
+					"profile_completed",
+					"last_login_at",
+				),
+			},
+		),
+	)
 
 
 @admin.register(ActionLog)

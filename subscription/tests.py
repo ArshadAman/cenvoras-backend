@@ -7,10 +7,11 @@ from .middleware import SubscriptionAccessMiddleware
 
 
 class _UserStub:
-    def __init__(self, username='user', *, is_superuser=False):
+    def __init__(self, username='user', *, is_superuser=False, is_lifetime_free=False):
         self.username = username
         self.is_authenticated = True
         self.is_superuser = is_superuser
+        self.is_lifetime_free = is_lifetime_free
 
 
 class TestSubscriptionAccessMiddleware(SimpleTestCase):
@@ -19,6 +20,7 @@ class TestSubscriptionAccessMiddleware(SimpleTestCase):
         self.middleware = SubscriptionAccessMiddleware(lambda request: JsonResponse({'ok': True}, status=200))
         self.free_user = _UserStub(username='free-user')
         self.pro_user = _UserStub(username='pro-user')
+        self.vip_user = _UserStub(username='vip-user', is_lifetime_free=True)
 
     def _request(self, path, user):
         request = self.factory.get(path)
@@ -71,3 +73,15 @@ class TestSubscriptionAccessMiddleware(SimpleTestCase):
         response = self._request('/api/analytics/ml-predictions/', self.pro_user)
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self._json(response).get('code'), 'feature_locked')
+
+    @patch('subscription.middleware.get_effective_plan_code', return_value='free')
+    @patch('subscription.middleware.can_use_feature', return_value=False)
+    def test_vip_user_bypasses_plan_lock(self, _can_use_feature, _get_plan):
+        response = self._request('/api/inventory/products/', self.vip_user)
+        self.assertEqual(response.status_code, 200)
+
+    @patch('subscription.middleware.get_effective_plan_code', return_value='free')
+    @patch('subscription.middleware.can_use_feature', return_value=False)
+    def test_vip_user_bypasses_feature_lock(self, _can_use_feature, _get_plan):
+        response = self._request('/api/analytics/ml-predictions/', self.vip_user)
+        self.assertEqual(response.status_code, 200)

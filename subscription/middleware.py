@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 
-from .services import can_use_feature, get_effective_plan_code
+from .services import can_use_feature, get_effective_plan_code, is_vip_user
 
 
 class SubscriptionAccessMiddleware:
@@ -77,6 +77,9 @@ class SubscriptionAccessMiddleware:
             return self.get_response(request)
 
         if getattr(user, 'is_superuser', False):
+            return self.get_response(request)
+
+        if is_vip_user(user):
             return self.get_response(request)
 
         plan_code = get_effective_plan_code(user)

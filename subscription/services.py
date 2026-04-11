@@ -101,12 +101,17 @@ def can_use_feature(user: User, feature_code: str) -> bool:
         return True
 
     if plan_code == 'pro':
-        blocked = {
-            'sales_forecast',
-            'restock_predictions',
-            'priority_support',
+        allowed = {
+            'customer_management',
+            'basic_invoicing',
+            'inventory_core',
+            'advanced_analytics',
+            'dashboard_analytics',
+            'integrations',
+            'advanced_reports',
+            'team_management',
         }
-        return feature_code not in blocked
+        return feature_code in allowed
 
     free_allowed = {
         'customer_management',

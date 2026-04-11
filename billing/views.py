@@ -12,6 +12,7 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from decimal import Decimal
 from django.db.models import Sum
+from django.db import DatabaseError, ProgrammingError
 from django.utils import timezone
 
 
@@ -245,18 +246,26 @@ def vendor_products(request):
 @permission_classes([IsAuthenticated])
 def sales_invoice_list_create(request):
     if request.method == 'GET':
-        invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant).select_related('customer').prefetch_related('items__product').order_by('-invoice_date')
-        
-        customer_id = request.GET.get('customer')
-        if customer_id:
-            invoices = invoices.filter(customer_id=customer_id)
-            
-        status_filter = request.GET.get('status')
-        if status_filter and status_filter != 'all':
-            invoices = invoices.filter(status=status_filter)
-            
-        serializer = SalesInvoiceSerializer(invoices, many=True)
-        return Response(serializer.data)
+        try:
+            invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant).select_related('customer').prefetch_related('items__product').order_by('-invoice_date')
+
+            customer_id = request.GET.get('customer')
+            if customer_id:
+                invoices = invoices.filter(customer_id=customer_id)
+
+            status_filter = request.GET.get('status')
+            if status_filter and status_filter != 'all':
+                invoices = invoices.filter(status=status_filter)
+
+            serializer = SalesInvoiceSerializer(invoices, many=True)
+            return Response(serializer.data)
+        except (ProgrammingError, DatabaseError) as exc:
+            # Prevent raw 500s when schema is behind code (e.g., container not migrated yet).
+            return Response({
+                'error': 'Sales bills unavailable due to database schema mismatch.',
+                'details': str(exc),
+                'action': 'Run migrations in the backend container and retry.'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     elif request.method == 'POST':
         print("DEBUG: Sales invoice creation request received")
         print("DEBUG: Request data:", request.data)

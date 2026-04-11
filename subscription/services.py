@@ -43,6 +43,11 @@ def get_tenant(user: User) -> User:
     return getattr(user, 'active_tenant', user)
 
 
+def is_vip_user(user: User) -> bool:
+    tenant = get_tenant(user)
+    return bool(getattr(tenant, 'is_lifetime_free', False))
+
+
 def get_tenant_subscription(user: User):
     tenant = get_tenant(user)
     return getattr(tenant, 'subscription', None)
@@ -56,6 +61,9 @@ def get_tenant_plan(user: User):
 
 
 def get_effective_plan_code(user: User) -> str:
+    if is_vip_user(user):
+        return 'business'
+
     plan = get_tenant_plan(user)
     if plan:
         return normalize_plan_code(plan.code)
@@ -64,6 +72,9 @@ def get_effective_plan_code(user: User) -> str:
 
 
 def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
+    if is_vip_user(user):
+        return -1
+
     plan = get_tenant_plan(user)
     if not plan:
         return default
@@ -94,6 +105,9 @@ def get_current_usage(user: User) -> dict[str, int]:
 
 
 def can_use_feature(user: User, feature_code: str) -> bool:
+    if is_vip_user(user):
+        return True
+
     plan_code = get_effective_plan_code(user)
     feature_code = (feature_code or '').strip().lower()
 
@@ -124,6 +138,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
     plan = get_tenant_plan(user)
     plan_code = get_effective_plan_code(user)
     tenant = get_tenant(user)
+    vip = is_vip_user(user)
     usage = get_current_usage(user)
 
     limits = {
@@ -143,7 +158,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
         'tenant_id': str(tenant.id),
         'plan': {
             'code': plan_code,
-            'name': getattr(plan, 'name', None) if plan else plan_code.title(),
+            'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),
             'status': getattr(get_tenant_subscription(user), 'status', None),
         },
         'limits': limits,

@@ -6,44 +6,78 @@ def create_default_plans_and_migrate(apps, schema_editor):
     Plan = apps.get_model('subscription', 'Plan')
     TenantSubscription = apps.get_model('subscription', 'TenantSubscription')
     User = apps.get_model('users', 'User')
+
+    plan_features = {
+        'free': ['customer_management', 'basic_invoicing'],
+        'pro': ['customer_management', 'basic_invoicing', 'inventory_core', 'advanced_reports', 'team_management', 'multi_warehouse'],
+        'business': ['customer_management', 'basic_invoicing', 'inventory_core', 'advanced_reports', 'team_management', 'multi_warehouse', 'advanced_analytics', 'integrations', 'sales_forecast', 'restock_predictions', 'priority_support', 'item_wise_pnl', 'stock_ledger', 'shortage_management'],
+    }
+
+    Feature = apps.get_model('subscription', 'Feature')
+
+    feature_objects = {}
+    for code in set(code for codes in plan_features.values() for code in codes):
+        feature_objects[code], _ = Feature.objects.get_or_create(
+            code=code,
+            defaults={'name': code.replace('_', ' ').title(), 'description': ''}
+        )
     
     # 1. Seed Default Plans
-    starter, _ = Plan.objects.get_or_create(
-        code='starter',
+    free, _ = Plan.objects.get_or_create(
+        code='free',
         defaults={
-            'name': 'Starter Plan',
+            'name': 'Free',
             'monthly_price': 0.00,
             'max_managers': 0,
             'max_invoices_per_month': 50
         }
     )
     
-    growth, _ = Plan.objects.get_or_create(
-        code='growth',
+    pro, _ = Plan.objects.get_or_create(
+        code='pro',
         defaults={
-            'name': 'Growth Plan',
+            'name': 'Pro',
             'monthly_price': 999.00,
             'max_managers': 2,
             'max_invoices_per_month': -1
         }
     )
     
-    enterprise, _ = Plan.objects.get_or_create(
-        code='enterprise',
+    business, _ = Plan.objects.get_or_create(
+        code='business',
         defaults={
-            'name': 'Enterprise Plan',
+            'name': 'Business',
             'monthly_price': 2499.00,
             'max_managers': 5,
             'max_invoices_per_month': -1
         }
     )
+
+    # Backfill legacy plan codes so old data remains compatible.
+    for legacy_code, canonical in [('starter', free), ('growth', pro), ('enterprise', business)]:
+        Plan.objects.filter(code=legacy_code).update(
+            code=canonical.code,
+            name=canonical.name,
+            max_managers=canonical.max_managers,
+            max_invoices_per_month=canonical.max_invoices_per_month,
+        )
+
+    plan_map = {
+        'free': free,
+        'pro': pro,
+        'business': business,
+    }
+
+    for plan_code, feature_codes in plan_features.items():
+        plan = plan_map[plan_code]
+        plan.features.set([feature_objects[code] for code in feature_codes])
     
     # 2. Migrate existing Users
     # Mapping legacy "subscription_tier" to the new "Plan" models
     tier_mapping = {
-        'FREE': starter,
-        'MID': growth,
-        'PRO': enterprise
+        'FREE': free,
+        'MID': pro,
+        'PRO': business
     }
     
     for user in User.objects.filter(parent__isnull=True): # Only create subs for Admins/Tenants

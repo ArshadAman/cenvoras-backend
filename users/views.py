@@ -20,6 +20,7 @@ from django.conf import settings
 from .tasks import send_async_email
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from subscription.services import get_effective_limit, get_limit_exceeded_reason
 
 class RegisterRateThrottle(AnonRateThrottle):
     rate = '5/min'  # Limit registration attempts
@@ -538,20 +539,16 @@ class TeamViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         User = get_user_model()
         tenant = self.request.user.active_tenant
-        
-        try:
-            plan = tenant.subscription.plan
-            max_members = plan.max_managers
-            tier = plan.name
-        except AttributeError:
-            # Fallback if no subscription model exists somehow
-            tier = "Starter Plan"
-            max_members = 0
-        
-        current_members = get_user_model().objects.filter(parent=tenant).count()
+
+        max_members = get_effective_limit(tenant, 'max_team_members', 0)
+        current_members = get_user_model().objects.filter(parent=tenant).exclude(id=tenant.id).count()
+        reason = get_limit_exceeded_reason(tenant, 'team')
+        if reason:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(reason)
         if current_members >= max_members:
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(f"Your {tier} limits you to {max_members} team members. Upgrade for more.")
+            raise PermissionDenied(f"Your current plan limits you to {max_members} team members. Upgrade for more.")
             
         serializer.save()
 

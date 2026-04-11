@@ -27,6 +27,8 @@ class Plan(models.Model):
     
     # Hard Limits built-in for fast access
     max_managers = models.IntegerField(default=0, help_text="Number of staff accounts allowed")
+    max_customers = models.IntegerField(default=-1, help_text="-1 for unlimited customers")
+    max_team_members = models.IntegerField(default=0, help_text="Number of team members allowed")
     max_invoices_per_month = models.IntegerField(default=-1, help_text="-1 for unlimited")
     
     features = models.ManyToManyField(Feature, blank=True, related_name='plans')
@@ -35,6 +37,22 @@ class Plan(models.Model):
     
     def __str__(self):
         return f"{self.name} (₹{self.monthly_price}/mo)"
+
+    @property
+    def effective_team_limit(self):
+        return self.max_team_members if self.max_team_members is not None else self.max_managers
+
+    @property
+    def is_free(self):
+        return self.code in {'free', 'starter'}
+
+    @property
+    def is_pro(self):
+        return self.code in {'pro', 'growth'}
+
+    @property
+    def is_business(self):
+        return self.code in {'business', 'enterprise'}
 
 class SubscriptionStatus(models.TextChoices):
     TRIAL = 'trial', 'Trial'
@@ -75,3 +93,7 @@ class TenantSubscription(models.Model):
                 return timezone.now() < self.current_period_end
             return True
         return False
+
+    @property
+    def effective_plan_code(self):
+        return self.plan.code if self.plan else 'free'

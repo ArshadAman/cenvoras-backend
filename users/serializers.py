@@ -3,6 +3,7 @@ from .models import User
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 from datetime import timedelta
+from subscription.services import get_tenant_plan, get_effective_plan_code, get_effective_limit
 
 class QuickSignupSerializer(serializers.ModelSerializer):
     """Minimal friction signup - only essential fields"""
@@ -92,26 +93,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return obj.can_generate_gst_invoice
         
     def get_plan_name(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.name
-        except Exception:
-            return "Starter Plan"
+        plan = get_tenant_plan(obj)
+        return plan.name if plan else "Free"
 
     def get_plan_code(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.code
-        except Exception:
-            return "starter"
+        return get_effective_plan_code(obj)
         
     def get_max_managers(self, obj):
-        tenant = getattr(obj, 'active_tenant', obj)
-        try:
-            return tenant.subscription.plan.max_managers
-        except Exception:
-            return 0
-            
+        return get_effective_limit(obj, 'max_team_members', 0)
+
     class Meta:
         model = User
         fields = (

@@ -443,7 +443,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     status = serializers.CharField(required=False, default='final')
     customer_email = serializers.EmailField(write_only=True, required=False)
     customer_phone = serializers.CharField(write_only=True, required=False)
-    customer_address = serializers.CharField(write_only=True, required=False)
+    customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     invoice_date = serializers.DateField(required=False, allow_null=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
@@ -462,7 +462,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer = getattr(instance, 'customer', None)
         data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
-        data['customer_address'] = getattr(customer, 'address', None) if customer else data.get('customer_address')
+        data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))
         return data
 
     @staticmethod
@@ -628,6 +628,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         address=customer_address or None,
                         created_by=user,
                     )
+
+        if not customer_address:
+            if self.instance and getattr(self.instance, 'customer_address', None):
+                customer_address = self.instance.customer_address or ''
+            elif customer_obj:
+                customer_address = customer_obj.address or ''
             
         # Store customer object separately - don't pass to parent validation
         self._customer_obj = customer_obj  # Store for use in create method
@@ -635,11 +641,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Remove customer fields that aren't in Meta.fields
         temp_data = data.copy()
         temp_data['customer_name'] = customer_name
+        temp_data['customer_address'] = customer_address
         if 'place_of_supply' in temp_data:
             temp_data['place_of_supply'] = normalize_indian_state_choice(temp_data.get('place_of_supply'))
         temp_data.pop('customer_email', None)
         temp_data.pop('customer_phone', None) 
-        temp_data.pop('customer_address', None)
         # Don't set customer field since it's not in Meta.fields anymore
         
         print("DEBUG SalesInvoiceSerializer: Customer processing completed, calling super()")

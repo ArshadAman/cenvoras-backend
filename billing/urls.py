@@ -47,6 +47,11 @@ urlpatterns = [
     path('reports/item-pl/', report_views.item_wise_pl_report, name='item_wise_pl_report'),
 
     # Sidecar Features (Sales Orders, Challans, Settings)
+    path('quotations/', views_sidecar.quotation_list_create, name='quotation_list_create'),
+    path('quotations/next-number/', views_sidecar.quotation_next_number, name='quotation_next_number'),
+    path('quotations/<uuid:pk>/', views_sidecar.quotation_detail, name='quotation_detail'),
+    path('quotations/<uuid:pk>/convert-to-sales-order/', views_sidecar.quotation_convert_to_sales_order, name='quotation_convert_to_sales_order'),
+
     path('sales-orders/', views_sidecar.sales_order_list_create, name='sales_order_list_create'),
     path('sales-orders/<uuid:pk>/', views_sidecar.sales_order_detail, name='sales_order_detail'),
     path('sales-orders/<uuid:pk>/convert_to_invoice/', views_sidecar.convert_order_to_invoice, name='convert_order_to_invoice'),

@@ -288,7 +288,9 @@ def update_profile(request):
         'first_name': user.first_name,
         'last_name': user.last_name,
         'business_address': user.business_address,
-        'gstin': user.gstin
+        'gstin': user.gstin,
+        'gem_id': user.gem_id,
+        'dl_number': user.dl_number,
     }
     
     serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method == 'PATCH'))
@@ -306,7 +308,9 @@ def update_profile(request):
             'first_name': updated_user.first_name,
             'last_name': updated_user.last_name,
             'business_address': updated_user.business_address,
-            'gstin': updated_user.gstin
+            'gstin': updated_user.gstin,
+            'gem_id': updated_user.gem_id,
+            'dl_number': updated_user.dl_number,
         }
         
         for field, old_value in original_data.items():

@@ -60,11 +60,14 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'first_name', 'last_name', 'business_name', 'business_address', 
-            'gstin', 'phone'
+            'gstin', 'gem_id', 'dl_number', 'phone'
         )
         extra_kwargs = {
             'business_name': {'required': True},
             'business_address': {'required': False},
+            'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def update(self, instance, validated_data):
@@ -106,7 +109,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'subscription_status',
+            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
@@ -128,7 +131,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'business_address', 'gstin', 'email', 'current_password',
+            'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 'email', 'current_password',
             'new_password', 'confirm_new_password'
         ]
         extra_kwargs = {
@@ -136,6 +139,9 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'business_name': {'required': False},
             'invoice_prefix': {'required': False},
             'email': {'required': False},
+            'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_invoice_prefix(self, value):

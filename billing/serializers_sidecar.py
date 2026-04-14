@@ -1,4 +1,6 @@
+from datetime import date
 from decimal import Decimal
+from uuid import UUID
 
 from rest_framework import serializers
 from .models_sidecar import (
@@ -210,7 +212,15 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         mutable = dict(data)
         product_value = mutable.get('product')
         if isinstance(product_value, str):
-            # Allow product names from the existing sales form payload.
+            # First accept UUID-style product IDs from the shared sales form.
+            try:
+                UUID(product_value)
+                if Product.objects.filter(id=product_value).exists():
+                    return super().to_internal_value(mutable)
+            except (ValueError, TypeError):
+                pass
+
+            # Fallback: allow product names from the existing sales form payload.
             product_obj = Product.objects.filter(name__iexact=product_value).first()
             if not product_obj:
                 raise serializers.ValidationError({'product': f'Unknown product: {product_value}'})
@@ -232,6 +242,8 @@ class QuotationSerializer(serializers.ModelSerializer):
     # Compatibility aliases to keep the existing UI payload working.
     invoice_number = serializers.CharField(write_only=True, required=False, allow_blank=True)
     invoice_date = serializers.DateField(write_only=True, required=False, allow_null=True)
+    challan_number = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    challan_date = serializers.DateField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = Quotation
@@ -248,6 +260,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             'quotation_date',
             'invoice_number',
             'invoice_date',
+            'challan_number',
+            'challan_date',
             'due_date',
             'po_number',
             'po_date',
@@ -264,6 +278,17 @@ class QuotationSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = ['created_by', 'created_at']
+
+    def to_internal_value(self, data):
+        # Shared forms can send extra invoice-only keys; ignore unknown fields.
+        if hasattr(data, 'copy'):
+            mutable = data.copy()
+            allowed = set(self.fields.keys())
+            for key in list(mutable.keys()):
+                if key not in allowed:
+                    mutable.pop(key, None)
+            data = mutable
+        return super().to_internal_value(data)
 
     def get_customer_details(self, obj):
         if not obj.customer:
@@ -290,12 +315,16 @@ class QuotationSerializer(serializers.ModelSerializer):
         else:
             attrs.pop('invoice_date', None)
 
-        # Keep API strict but compatible with the sales-form payload.
+        # Ignore sales-invoice-only fields sent by the shared form.
+        attrs.pop('challan_number', None)
+        attrs.pop('challan_date', None)
+
+        # Provide safe defaults so shared form edge-cases do not hard-fail create.
         if self.instance is None:
             if not attrs.get('quotation_number'):
-                raise serializers.ValidationError({'quotation_number': 'Quotation number is required.'})
+                attrs['quotation_number'] = f"QT-{date.today().strftime('%Y%m%d')}-AUTO"
             if not attrs.get('quotation_date'):
-                raise serializers.ValidationError({'quotation_date': 'Quotation date is required.'})
+                attrs['quotation_date'] = date.today()
 
         return attrs
 

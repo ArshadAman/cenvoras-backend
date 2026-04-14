@@ -13,7 +13,10 @@ from drf_yasg import openapi
 from decimal import Decimal
 from django.db.models import Sum
 from django.db import DatabaseError, ProgrammingError, transaction
+from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
+import json
 import csv
 import io
 
@@ -467,6 +470,215 @@ def sales_invoice_update_delete(request, pk):
             }, status=status.HTTP_400_BAD_REQUEST)
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_sales_invoices_csv(request):
+    invoices = SalesInvoice.objects.filter(
+        created_by=request.user.active_tenant
+    ).select_related('customer', 'warehouse').prefetch_related('items__product', 'items__batch')
+
+    search = request.GET.get('search', '').strip()
+    if search:
+        invoices = invoices.filter(
+            Q(invoice_number__icontains=search)
+            | Q(customer_name__icontains=search)
+            | Q(customer__name__icontains=search)
+        )
+
+    status_filter = request.GET.get('status', '').strip()
+    if status_filter and status_filter != 'all':
+        invoices = invoices.filter(status=status_filter)
+
+    customer_filter = request.GET.get('customer', '').strip()
+    if customer_filter:
+        invoices = invoices.filter(
+            Q(customer_name__icontains=customer_filter)
+            | Q(customer__name__icontains=customer_filter)
+        )
+
+    date_start = request.GET.get('date_start', '').strip() or request.GET.get('invoice_date_after', '').strip()
+    date_end = request.GET.get('date_end', '').strip() or request.GET.get('invoice_date_before', '').strip()
+    if date_start:
+        invoices = invoices.filter(invoice_date__gte=date_start)
+    if date_end:
+        invoices = invoices.filter(invoice_date__lte=date_end)
+
+    amount_min = request.GET.get('amount_min', '').strip()
+    amount_max = request.GET.get('amount_max', '').strip()
+    if amount_min:
+        invoices = invoices.filter(total_amount__gte=amount_min)
+    if amount_max:
+        invoices = invoices.filter(total_amount__lte=amount_max)
+
+    has_overdue = request.GET.get('has_overdue', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    if has_overdue:
+        today = timezone.localdate()
+        invoices = invoices.filter(
+            Q(due_date__lt=today) | (Q(due_date__isnull=True) & Q(invoice_date__lt=today))
+        )
+
+    selected_ids_param = request.GET.get('selected_ids', '').strip()
+    if selected_ids_param:
+        selected_ids = [value.strip() for value in selected_ids_param.split(',') if value.strip()]
+        if selected_ids:
+            invoices = invoices.filter(id__in=selected_ids)
+
+    ordering = request.GET.get('ordering', '-invoice_date').strip()
+    allowed_ordering = {
+        'invoice_date', '-invoice_date',
+        'created_at', '-created_at',
+        'total_amount', '-total_amount',
+        'invoice_number', '-invoice_number',
+        'customer_name', '-customer_name',
+    }
+    if ordering not in allowed_ordering:
+        ordering = '-invoice_date'
+    invoices = invoices.order_by(ordering, '-created_at')
+
+    invoice_data = SalesInvoiceSerializer(invoices, many=True).data
+
+    headers = [
+        'invoice_id',
+        'invoice_number',
+        'invoice_date',
+        'due_date',
+        'po_number',
+        'po_date',
+        'challan_number',
+        'challan_date',
+        'customer_id',
+        'customer_name',
+        'customer_email',
+        'customer_phone',
+        'customer_address',
+        'customer_state',
+        'customer_gstin',
+        'customer_details_json',
+        'delivery_address',
+        'place_of_supply',
+        'gst_treatment',
+        'journal',
+        'warehouse_id',
+        'warehouse_name',
+        'status',
+        'total_amount',
+        'amount_paid',
+        'payment_status',
+        'round_off',
+        'created_by_id',
+        'created_at',
+        'meta_json',
+        'items_count',
+        'item_id',
+        'product_id',
+        'product_name',
+        'product_description',
+        'product_hsn_sac_code',
+        'product_unit',
+        'item_hsn_sac_code',
+        'quantity',
+        'free_quantity',
+        'item_unit',
+        'price',
+        'discount',
+        'tax',
+        'amount',
+        'batch_id',
+        'batch_number',
+        'batch_expiry_date',
+        'batch_manufacturing_date',
+        'batch_mrp',
+        'batch_cost_price',
+        'batch_sale_price',
+        'batch_notes',
+    ]
+
+    def stringify(value):
+        if value is None:
+            return ''
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, default=str, ensure_ascii=False)
+        return value
+
+    rows = []
+    for invoice, serialized_invoice in zip(invoices, invoice_data):
+        customer_details = serialized_invoice.get('customer_details') or {}
+        items = list(invoice.items.all())
+        serialized_items = serialized_invoice.get('items') or []
+        if not items:
+            items = [None]
+            serialized_items = [None]
+
+        for item, serialized_item in zip(items, serialized_items):
+            product_detail = (serialized_item or {}).get('product_detail') if serialized_item else {}
+            batch = getattr(item, 'batch', None) if item else None
+            row = {
+                'invoice_id': str(invoice.id),
+                'invoice_number': invoice.invoice_number,
+                'invoice_date': invoice.invoice_date,
+                'due_date': invoice.due_date,
+                'po_number': invoice.po_number,
+                'po_date': invoice.po_date,
+                'challan_number': invoice.challan_number,
+                'challan_date': invoice.challan_date,
+                'customer_id': str(getattr(invoice.customer, 'id', '') or ''),
+                'customer_name': invoice.customer_name or customer_details.get('name') or getattr(invoice.customer, 'name', ''),
+                'customer_email': serialized_invoice.get('customer_email') or customer_details.get('email') or getattr(invoice.customer, 'email', ''),
+                'customer_phone': serialized_invoice.get('customer_phone') or customer_details.get('phone') or getattr(invoice.customer, 'phone', ''),
+                'customer_address': serialized_invoice.get('customer_address') or customer_details.get('address') or getattr(invoice.customer, 'address', ''),
+                'customer_state': customer_details.get('state') or getattr(invoice.customer, 'state', ''),
+                'customer_gstin': customer_details.get('gstin') or getattr(invoice.customer, 'gstin', ''),
+                'customer_details_json': customer_details,
+                'delivery_address': invoice.delivery_address,
+                'place_of_supply': invoice.place_of_supply,
+                'gst_treatment': invoice.gst_treatment,
+                'journal': invoice.journal,
+                'warehouse_id': str(getattr(invoice.warehouse, 'id', '') or ''),
+                'warehouse_name': getattr(invoice.warehouse, 'name', ''),
+                'status': invoice.status,
+                'total_amount': invoice.total_amount,
+                'amount_paid': invoice.amount_paid,
+                'payment_status': invoice.payment_status,
+                'round_off': invoice.round_off,
+                'created_by_id': str(getattr(invoice.created_by, 'id', '') or ''),
+                'created_at': invoice.created_at,
+                'meta_json': serialized_invoice.get('meta'),
+                'items_count': len(items) if item is not None else 0,
+                'item_id': str(getattr(item, 'id', '') or '') if item else '',
+                'product_id': str(getattr(getattr(item, 'product', None), 'id', '') or '') if item else '',
+                'product_name': product_detail.get('name') if product_detail else '',
+                'product_description': product_detail.get('description') if product_detail else '',
+                'product_hsn_sac_code': product_detail.get('hsn_sac_code') if product_detail else '',
+                'product_unit': product_detail.get('unit') if product_detail else '',
+                'item_hsn_sac_code': getattr(item, 'hsn_sac_code', '') if item else '',
+                'quantity': getattr(item, 'quantity', '') if item else '',
+                'free_quantity': getattr(item, 'free_quantity', '') if item else '',
+                'item_unit': getattr(item, 'unit', '') if item else '',
+                'price': getattr(item, 'price', '') if item else '',
+                'discount': getattr(item, 'discount', '') if item else '',
+                'tax': getattr(item, 'tax', '') if item else '',
+                'amount': getattr(item, 'amount', '') if item else '',
+                'batch_id': str(getattr(batch, 'id', '') or '') if batch else '',
+                'batch_number': getattr(batch, 'batch_number', '') if batch else '',
+                'batch_expiry_date': getattr(batch, 'expiry_date', '') if batch else '',
+                'batch_manufacturing_date': getattr(batch, 'manufacturing_date', '') if batch else '',
+                'batch_mrp': getattr(batch, 'mrp', '') if batch else '',
+                'batch_cost_price': getattr(batch, 'cost_price', '') if batch else '',
+                'batch_sale_price': getattr(batch, 'sale_price', '') if batch else '',
+                'batch_notes': getattr(batch, 'notes', '') if batch else '',
+            }
+            rows.append({key: stringify(value) for key, value in row.items()})
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+
+    response = HttpResponse(buffer.getvalue(), content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="sales-invoices-{timezone.localdate()}.csv"'
+    return response
 
 from django.db.models import Sum, Count
 from django.utils import timezone

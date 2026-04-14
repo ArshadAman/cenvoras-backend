@@ -109,7 +109,11 @@ class WarehouseListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Warehouse.objects.filter(created_by=self.request.user.active_tenant)
+        return (
+            Warehouse.objects
+            .filter(created_by=self.request.user.active_tenant)
+            .order_by('name', 'id')
+        )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)

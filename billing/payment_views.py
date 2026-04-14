@@ -21,7 +21,8 @@ def payment_list_create(request):
     }
     """
     if request.method == 'GET':
-        payments = Payment.objects.filter(created_by=request.user).order_by('-date', '-created_at')
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        payments = Payment.objects.filter(created_by=tenant).order_by('-date', '-created_at')
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)
 
@@ -38,8 +39,9 @@ def payment_detail(request, pk):
     """
     Retrieve, update or delete a payment instance.
     """
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        payment = Payment.objects.get(pk=pk, created_by=request.user)
+        payment = Payment.objects.get(pk=pk, created_by=tenant)
     except Payment.DoesNotExist:
         return Response(status=status.HTTP_404_NOT_FOUND)
 

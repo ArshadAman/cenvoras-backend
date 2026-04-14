@@ -19,6 +19,7 @@ class SmartDashboard:
     
     def __init__(self, user):
         self.user = user
+        self.tenant = getattr(user, 'active_tenant', user)
         self.today = date.today()
         self.yesterday = self.today - timedelta(days=1)
     
@@ -43,7 +44,7 @@ class SmartDashboard:
     def _get_sales_today(self):
         """Total sales amount for today"""
         result = SalesInvoice.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             invoice_date=self.today
         ).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
@@ -51,7 +52,7 @@ class SmartDashboard:
     def _get_sales_yesterday(self):
         """Total sales amount for yesterday"""
         result = SalesInvoice.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             invoice_date=self.yesterday
         ).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
@@ -67,7 +68,7 @@ class SmartDashboard:
     def _get_cash_collections(self):
         """Cash payments received today"""
         result = Payment.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             date=self.today,
             mode='cash'
         ).aggregate(total=Sum('amount'))
@@ -76,9 +77,9 @@ class SmartDashboard:
     def _get_bank_collections(self):
         """Bank/UPI payments received today"""
         result = Payment.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             date=self.today,
-            mode__in=['upi', 'bank_transfer', 'cheque']
+            mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
         ).aggregate(total=Sum('amount'))
         return float(result['total'] or 0)
     
@@ -86,7 +87,7 @@ class SmartDashboard:
         """Estimated net profit = Sales - Cost of Goods Sold"""
         # Get today's sales items
         sales_items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=self.user,
+            sales_invoice__created_by=self.tenant,
             sales_invoice__invoice_date=self.today
         ).select_related('product', 'batch')
         
@@ -96,6 +97,7 @@ class SmartDashboard:
         for item in sales_items:
             qty = Decimal(str(item.quantity))
             sale_price = Decimal(str(item.price))
+            line_revenue = Decimal(str(item.amount)) if item.amount is not None else (qty * sale_price)
             
             # Get cost price from batch or product
             if item.batch:
@@ -103,7 +105,7 @@ class SmartDashboard:
             else:
                 cost_price = Decimal(str(item.product.price or 0))
             
-            total_revenue += qty * sale_price
+            total_revenue += line_revenue
             total_cost += qty * cost_price
         
         return float(total_revenue - total_cost)
@@ -112,7 +114,7 @@ class SmartDashboard:
         """Total unpaid invoices created today (Udhaar given)"""
         # Get today's invoices
         today_invoices = SalesInvoice.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             invoice_date=self.today
         )
         
@@ -129,7 +131,7 @@ class SmartDashboard:
         """Payments received today for old invoices"""
         # Total payments today
         total_payments = Payment.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             date=self.today
         ).aggregate(total=Sum('amount'))['total'] or 0
         return float(total_payments)
@@ -138,7 +140,7 @@ class SmartDashboard:
         """Total money owed to the business"""
         # Sum of all customer outstanding balance
         result = Customer.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             current_balance__gt=0
         ).aggregate(total=Sum('current_balance'))
         return float(result['total'] or 0)

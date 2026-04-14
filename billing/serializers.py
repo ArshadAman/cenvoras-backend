@@ -5,6 +5,7 @@ from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, Deliver
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 from cenvoras.constants import IndianStates
+from django.db.models import F, Sum
 import uuid
 from decimal import Decimal
 
@@ -746,11 +747,33 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
+        old_customer_id = instance.customer_id
         
         # Update the sales invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
+        # Keep linked payments in sync when invoice customer changes.
+        if old_customer_id != instance.customer_id and instance.customer_id:
+            linked_payments = Payment.objects.filter(invoice=instance)
+            total_paid = linked_payments.aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+            if old_customer_id and total_paid > 0:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') + total_paid
+                )
+            if total_paid > 0:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') - total_paid
+                )
+
+            linked_payments.update(customer=instance.customer)
+            try:
+                from ledger.models import GeneralLedgerEntry
+                GeneralLedgerEntry.objects.filter(sales_invoice=instance).update(customer=instance.customer)
+            except Exception:
+                pass
 
         # Delete existing items and create new ones when provided
         if items_data:
@@ -928,5 +951,6 @@ class PaymentSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        validated_data['created_by'] = self.context['request'].user
+        user = self.context['request'].user
+        validated_data['created_by'] = getattr(user, 'active_tenant', user)
         return super().create(validated_data)

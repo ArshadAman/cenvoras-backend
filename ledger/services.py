@@ -131,7 +131,9 @@ class AccountingService:
                 description=item_description,
                 reference=f"{sales_invoice.invoice_number}-{item.id}",
                 sales_invoice=sales_invoice,
-                customer=sales_invoice.customer,
+                # Revenue belongs to the sales account, not customer settlement.
+                # Keep customer null so customer-ledger credit appears only on payment receipt.
+                customer=None,
                 created_by=user
             )
         

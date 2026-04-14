@@ -338,16 +338,18 @@ def dashboard_summary(request):
     from collections import defaultdict
     from decimal import Decimal
     
+    tenant = getattr(request.user, 'active_tenant', request.user)
+
     # Sales
-    sales_qs = SalesInvoice.objects.filter(created_by=request.user)
+    sales_qs = SalesInvoice.objects.filter(created_by=tenant)
     total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
     # Purchases
-    purchase_qs = PurchaseBill.objects.filter(created_by=request.user)
+    purchase_qs = PurchaseBill.objects.filter(created_by=tenant)
     total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
     # Inventory
-    products = Product.objects.filter(created_by=request.user)
+    products = Product.objects.filter(created_by=tenant)
     total_inventory_value = products.aggregate(
         value=Sum(F('stock') * F('price'))
     )['value'] or 0
@@ -355,7 +357,7 @@ def dashboard_summary(request):
 
     # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
     # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
-    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=request.user)
+    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=tenant)
     gst_collected = Decimal('0.00')
     for item in sales_items:
         qty = Decimal(item.quantity)
@@ -369,7 +371,7 @@ def dashboard_summary(request):
         tax_amount = (taxable_value * tax_rate) / Decimal('100')
         gst_collected += tax_amount
 
-    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=request.user)
+    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
     gst_paid = Decimal('0.00')
     for item in purchase_items:
         qty = Decimal(item.quantity)
@@ -667,7 +669,6 @@ def stock_summary_report(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@cache_page(60 * 15)  # Cache for 15 minutes in Redis
 def smart_dashboard(request):
     """
     Smart Dashboard API - Returns intelligent business metrics

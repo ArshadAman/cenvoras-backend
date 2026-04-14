@@ -223,7 +223,11 @@ class QuotationSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(required=False, allow_blank=True)
     customer_email = serializers.EmailField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_gstin = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_details = serializers.SerializerMethodField(read_only=True)
+
+    quotation_number = serializers.CharField(required=False, allow_blank=True)
+    quotation_date = serializers.DateField(required=False, allow_null=True)
 
     # Compatibility aliases to keep the existing UI payload working.
     invoice_number = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -238,6 +242,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             'customer_details',
             'customer_email',
             'customer_phone',
+            'customer_gstin',
             'customer_address',
             'quotation_number',
             'quotation_date',
@@ -285,6 +290,13 @@ class QuotationSerializer(serializers.ModelSerializer):
         else:
             attrs.pop('invoice_date', None)
 
+        # Keep API strict but compatible with the sales-form payload.
+        if self.instance is None:
+            if not attrs.get('quotation_number'):
+                raise serializers.ValidationError({'quotation_number': 'Quotation number is required.'})
+            if not attrs.get('quotation_date'):
+                raise serializers.ValidationError({'quotation_date': 'Quotation date is required.'})
+
         return attrs
 
     def _resolve_customer(self, validated_data):
@@ -294,6 +306,7 @@ class QuotationSerializer(serializers.ModelSerializer):
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None)
         customer_phone = validated_data.pop('customer_phone', None)
+        customer_gstin = validated_data.pop('customer_gstin', None)
 
         if not customer_name:
             return None
@@ -310,6 +323,9 @@ class QuotationSerializer(serializers.ModelSerializer):
             if validated_data.get('customer_address') and not customer.address:
                 customer.address = validated_data.get('customer_address')
                 updated = True
+            if customer_gstin and not customer.gstin:
+                customer.gstin = customer_gstin
+                updated = True
             if updated:
                 customer.save()
             return customer
@@ -319,6 +335,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             email=customer_email or None,
             phone=customer_phone or None,
             address=validated_data.get('customer_address') or None,
+            gstin=customer_gstin or None,
             created_by=user,
         )
 

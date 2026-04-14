@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     purchase_bill_detail, purchase_bill_update_delete,
     sales_invoice_detail, sales_invoice_list_create, sales_invoice_update_delete, purchase_bill_list_create,
-    vendor_products, get_next_invoice_number, sales_summary_analytics
+    vendor_products, get_next_invoice_number, sales_summary_analytics, upload_sales_invoices_csv
 )
 from . import customer_views
 from . import vendor_views
@@ -23,6 +23,7 @@ urlpatterns = [
     path('sales-invoices/analytics/', sales_summary_analytics, name='sales_summary_analytics'),
     path('sales-invoices/<uuid:pk>/', sales_invoice_detail, name='sales_invoice_detail'),
     path('sales-invoices/<uuid:pk>/edit/', sales_invoice_update_delete, name='sales_invoice_update_delete'),
+    path('upload-sales-invoices-csv/', upload_sales_invoices_csv, name='upload_sales_invoices_csv'),
     path('customers/', customer_views.customer_list_create, name='customer_list_create'),
     path('customers/<uuid:pk>/', customer_views.customer_detail, name='customer_detail'),
     path('customers/<uuid:pk>/edit/', customer_views.customer_update_delete, name='customer_update_delete'),

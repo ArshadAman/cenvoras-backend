@@ -482,6 +482,7 @@ def warranty_report(request):
     from dateutil.relativedelta import relativedelta
 
     today = timezone.now().date()
+    search = request.query_params.get('search', '').strip().lower()
 
     # Find all sales invoice items where the product has a warranty > 0
     items = SalesInvoiceItem.objects.filter(
@@ -519,7 +520,7 @@ def warranty_report(request):
             else:
                 status = "active"
 
-        results.append({
+        record = {
             'invoice_id': str(item.sales_invoice.id),
             'invoice_number': item.sales_invoice.invoice_number,
             'invoice_date': start_date,
@@ -533,7 +534,15 @@ def warranty_report(request):
             'days_left': days_left,
             'countdown': countdown,
             'status': status,
-        })
+        }
+
+        if search:
+            invoice_number = str(record['invoice_number']).lower()
+            customer_name = str(record['customer_name']).lower()
+            if search not in invoice_number and search not in customer_name:
+                continue
+
+        results.append(record)
 
     # Stats
     active_count = sum(1 for r in results if r['status'] == 'active')

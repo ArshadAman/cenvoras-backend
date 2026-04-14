@@ -12,8 +12,10 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from decimal import Decimal
 from django.db.models import Sum
-from django.db import DatabaseError, ProgrammingError
+from django.db import DatabaseError, ProgrammingError, transaction
 from django.utils import timezone
+import csv
+import io
 
 
 @swagger_auto_schema(
@@ -560,3 +562,125 @@ def recalculate_invoice_totals(request):
         "success": True,
         "message": f"Fixed {fixed_count} invoices with incorrect totals"
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_sales_invoices_csv(request):
+    uploaded_file = request.FILES.get('file')
+    if not uploaded_file:
+        return Response({'error': 'CSV file is required using form key "file".'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not uploaded_file.name.lower().endswith('.csv'):
+        return Response({'error': 'Only CSV files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        raw_content = uploaded_file.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return Response({'error': 'Unable to decode CSV. Please upload a UTF-8 encoded file.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    reader = csv.DictReader(io.StringIO(raw_content))
+    required_headers = {'bill_number', 'sale_date', 'customer_name', 'product_name', 'quantity', 'price'}
+    if not reader.fieldnames or not required_headers.issubset(set(h.strip() for h in reader.fieldnames if h)):
+        return Response({
+            'error': 'Invalid CSV template.',
+            'details': 'Required columns: bill_number, sale_date, customer_name, product_name, quantity, price.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    created_count = 0
+
+    from inventory.models import Product
+    from decimal import Decimal
+    from .models import Customer, SalesInvoice, SalesInvoiceItem
+
+    with transaction.atomic():
+        for row in reader:
+            if not any((value or '').strip() for value in row.values()):
+                continue
+
+            bill_number = (row.get('bill_number') or '').strip()
+            sale_date = (row.get('sale_date') or '').strip()
+            customer_name = (row.get('customer_name') or '').strip()
+            customer_address = (row.get('customer_address') or '').strip()
+            customer_gstin = (row.get('customer_gstin') or '').strip()
+            due_date = (row.get('due_date') or '').strip() or None
+            product_name = (row.get('product_name') or '').strip()
+            quantity = int(float(row.get('quantity') or 0))
+            unit = (row.get('unit') or 'pcs').strip() or 'pcs'
+            price = Decimal(str(row.get('price') or '0'))
+            discount = Decimal(str(row.get('discount') or '0'))
+            tax = Decimal(str(row.get('tax') or '0'))
+            hsn_code = (row.get('hsn_code') or '').strip()
+
+            if not (bill_number and sale_date and customer_name and product_name and quantity > 0):
+                raise ValueError('Each row must include bill_number, sale_date, customer_name, product_name, and a quantity greater than 0.')
+
+            customer, _ = Customer.objects.get_or_create(
+                created_by=tenant,
+                name=customer_name,
+                defaults={
+                    'address': customer_address or None,
+                    'gstin': customer_gstin or None,
+                }
+            )
+            if customer_address and customer.address != customer_address:
+                customer.address = customer_address
+            if customer_gstin and customer.gstin != customer_gstin:
+                customer.gstin = customer_gstin
+            customer.save()
+
+            product, _ = Product.objects.get_or_create(
+                created_by=tenant,
+                name=product_name,
+                defaults={
+                    'unit': unit,
+                    'hsn_sac_code': hsn_code or None,
+                    'price': price,
+                    'tax': tax,
+                }
+            )
+
+            if SalesInvoice.objects.filter(created_by=tenant, invoice_number=bill_number).exists():
+                continue
+
+            invoice = SalesInvoice.objects.create(
+                created_by=tenant,
+                customer=customer,
+                customer_name=customer_name,
+                customer_address=customer_address or customer.address,
+                invoice_number=bill_number,
+                invoice_date=sale_date,
+                due_date=due_date,
+                total_amount=Decimal('0'),
+                journal='Sales',
+                status='final',
+            )
+
+            base_amount = Decimal(str(quantity)) * price
+            discount_amount = (base_amount * discount) / Decimal('100')
+            taxable_amount = base_amount - discount_amount
+            tax_amount = (taxable_amount * tax) / Decimal('100')
+            amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+
+            SalesInvoiceItem.objects.create(
+                sales_invoice=invoice,
+                product=product,
+                quantity=quantity,
+                price=price,
+                discount=discount,
+                tax=tax,
+                amount=amount,
+                unit=unit,
+                hsn_sac_code=hsn_code or None,
+            )
+
+            invoice.total_amount = amount
+            invoice.save(update_fields=['total_amount'])
+            created_count += 1
+
+    return Response({
+        'success': True,
+        'created_count': created_count,
+        'message': f'Successfully imported {created_count} sales invoices.'
+    }, status=status.HTTP_201_CREATED)

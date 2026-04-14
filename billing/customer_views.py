@@ -84,13 +84,15 @@ from cenvoras.pagination import StandardResultsSetPagination
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def customer_list_create(request):
+    tenant = getattr(request.user, 'active_tenant', request.user)
+
     if request.method == 'GET':
         # Get query parameters
         search = request.query_params.get('search', '')
         ordering = request.query_params.get('ordering', '-created_at')
         
         # Filter customers for the authenticated user
-        customers = Customer.objects.filter(created_by=request.user)
+        customers = Customer.objects.filter(created_by=tenant)
         
         # Apply search filter
         if search:
@@ -148,8 +150,9 @@ def customer_list_create(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def customer_detail(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=request.user)
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
     except Customer.DoesNotExist:
         return Response({
             "success": False,
@@ -198,8 +201,9 @@ def customer_detail(request, pk):
 @api_view(['PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def customer_update_delete(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=request.user)
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
     except Customer.DoesNotExist:
         return Response({
             "success": False,

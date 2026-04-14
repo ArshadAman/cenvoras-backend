@@ -587,7 +587,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             error_msg = 'Authentication required.'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
             raise serializers.ValidationError({'customer_name': error_msg})
-        user = request.user
+        user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
         customer_obj = getattr(self.instance, 'customer', None) if self.instance else None
@@ -748,10 +748,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
         old_customer_id = instance.customer_id
+        resolved_customer = getattr(self, '_customer_obj', None)
         
         # Update the sales invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        if resolved_customer is not None:
+            instance.customer = resolved_customer
         instance.save()
 
         # Keep linked payments in sync when invoice customer changes.

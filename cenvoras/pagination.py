@@ -6,11 +6,11 @@ class StandardResultsSetPagination(PageNumberPagination):
     """
     Global pagination class for Cenvoras.
     Returns 15 items per page by default.
-    Clients can override with ?page_size=N (up to 50).
+    Clients can override with ?page_size=N (up to 1000).
     """
     page_size = 15
     page_size_query_param = 'page_size'
-    max_page_size = 50
+    max_page_size = 1000
 
     def get_paginated_response(self, data):
         return Response({

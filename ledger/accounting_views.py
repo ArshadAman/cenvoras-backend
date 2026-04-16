@@ -9,7 +9,7 @@ from .models import Account, GeneralLedgerEntry, AccountType
 from .serializers import AccountSerializer, AccountBalanceSerializer
 from .services import AccountingService
 import logging
-from django.db.models import Sum, Avg, Max, Count
+from django.db.models import Sum, Avg, Max, Count, F
 from django.utils import timezone
 from datetime import timedelta
 import decimal

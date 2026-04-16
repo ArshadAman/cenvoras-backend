@@ -192,7 +192,9 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
                 amount=instance.amount,
                 description=instance.notes or f"Payment received - {instance.reference or ''}",
                 date=instance.date,
-                user=instance.created_by
+                user=instance.created_by,
+                invoice=instance.invoice,
+                payment_id=instance.id,
             )
         except Exception as e:
             print(f"ERROR creating ledger entries for payment: {e}")

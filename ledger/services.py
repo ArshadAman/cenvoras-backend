@@ -25,6 +25,7 @@ class AccountingService:
             # Liabilities
             ('2001', 'Accounts Payable', AccountType.LIABILITY),
             ('2100', 'Accrued Expenses', AccountType.LIABILITY),
+            ('2101', 'Customer Advances', AccountType.LIABILITY),
             
             # Equity
             ('3001', 'Owner\'s Equity', AccountType.EQUITY),
@@ -218,7 +219,7 @@ class AccountingService:
     
     @classmethod
     @transaction.atomic
-    def create_payment_received_entries(cls, customer, amount, description, date, user):
+    def create_payment_received_entries(cls, customer, amount, description, date, user, invoice=None, payment_id=None):
         """
         Create entries when payment is received from customer
         
@@ -226,6 +227,9 @@ class AccountingService:
             Cr. Accounts Receivable [Amount]    (Asset decreases)
         """
         accounts = cls.get_or_create_default_accounts(user)
+        reference = f"Payment Received {payment_id}" if payment_id else "Payment Received"
+        payment_description = description or f"Payment received from {customer.name if customer else 'Customer'}"
+        target_account = accounts['accounts_receivable'] if invoice else accounts['customer_advances']
         
         # Debit: Cash (increase cash)
         GeneralLedgerEntry.objects.create(
@@ -233,20 +237,20 @@ class AccountingService:
             account=accounts['cash'],
             debit=amount,
             credit=0,
-            description=f"Payment received from {customer.name if customer else 'Customer'}",
-            reference="Payment Received",
+            description=payment_description,
+            reference=reference,
             customer=customer,
             created_by=user
         )
         
-        # Credit: Accounts Receivable (reduce what customer owes)
+        # Credit: Accounts Receivable for invoice-linked receipts, otherwise track as customer advance.
         GeneralLedgerEntry.objects.create(
             date=date,
-            account=accounts['accounts_receivable'],
+            account=target_account,
             debit=0,
             credit=amount,
-            description=f"Payment received from {customer.name if customer else 'Customer'}",
-            reference="Payment Received",
+            description=payment_description,
+            reference=reference,
             customer=customer,
             created_by=user
         )

@@ -19,13 +19,11 @@ from decimal import Decimal
 def sales_order_list_create(request):
     if request.method == 'GET':
         search = request.GET.get('search', '')
-        orders = SalesOrder.objects.filter(created_by=request.user)
+        orders = SalesOrder.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product')
         
         if search:
             orders = orders.filter(
-                order_number__icontains=search
-            ) | orders.filter(
-                customer__name__icontains=search
+                Q(order_number__icontains=search) | Q(customer__name__icontains=search)
             )
             
         orders = orders.order_by('-date')
@@ -50,7 +48,7 @@ def sales_order_list_create(request):
 @permission_classes([IsAuthenticated])
 def sales_order_detail(request, pk):
     try:
-        order = SalesOrder.objects.get(pk=pk, created_by=request.user)
+        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
     except SalesOrder.DoesNotExist:
         return Response({"success": False, "message": "Order not found"}, status=404)
         
@@ -73,7 +71,7 @@ def sales_order_detail(request, pk):
 @permission_classes([IsAuthenticated])
 def convert_order_to_invoice(request, pk):
     try:
-        order = SalesOrder.objects.get(pk=pk, created_by=request.user)
+        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
     except SalesOrder.DoesNotExist:
         return Response({"message": "Order not found"}, status=404)
 
@@ -134,13 +132,11 @@ def convert_order_to_invoice(request, pk):
 def delivery_challan_list_create(request):
     if request.method == 'GET':
         search = request.GET.get('search', '')
-        challans = DeliveryChallan.objects.filter(created_by=request.user)
+        challans = DeliveryChallan.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product')
         
         if search:
             challans = challans.filter(
-                challan_number__icontains=search
-            ) | challans.filter(
-                customer__name__icontains=search
+                Q(challan_number__icontains=search) | Q(customer__name__icontains=search)
             )
             
         challans = challans.order_by('-date')
@@ -165,7 +161,7 @@ def delivery_challan_list_create(request):
 @permission_classes([IsAuthenticated])
 def delivery_challan_detail(request, pk):
     try:
-        challan = DeliveryChallan.objects.get(pk=pk, created_by=request.user)
+        challan = DeliveryChallan.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
     except DeliveryChallan.DoesNotExist:
         return Response(status=404)
         
@@ -247,7 +243,7 @@ def quotation_list_create(request):
 def quotation_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        quotation = Quotation.objects.get(pk=pk, created_by=tenant)
+        quotation = Quotation.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except Quotation.DoesNotExist:
         return Response({'message': 'Quotation not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -304,7 +300,7 @@ def quotation_next_number(request):
 def quotation_convert_to_sales_order(request, pk):
     tenant = request.user.active_tenant
     try:
-        quotation = Quotation.objects.prefetch_related('items').get(pk=pk, created_by=tenant)
+        quotation = Quotation.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except Quotation.DoesNotExist:
         return Response({'message': 'Quotation not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -315,7 +311,7 @@ def quotation_convert_to_sales_order(request, pk):
         )
 
     approved_item_ids = request.data.get('approved_item_ids', [])
-    selected_qs = quotation.items.filter(approval_status='approved', converted_to_order=False)
+    selected_qs = quotation.items.select_related('product').filter(approval_status='approved', converted_to_order=False)
     if approved_item_ids:
         selected_qs = selected_qs.filter(id__in=approved_item_ids)
 

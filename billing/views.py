@@ -46,7 +46,7 @@ def purchase_bill_list_create(request):
 def purchase_bill_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        bill = PurchaseBill.objects.get(pk=pk, created_by=tenant)
+        bill = PurchaseBill.objects.select_related('warehouse').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except PurchaseBill.DoesNotExist:
         return Response({'success': False, 'message': 'Purchase bill not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -164,7 +164,7 @@ def sales_invoice_list_create(request):
 def sales_invoice_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        invoice = SalesInvoice.objects.get(pk=pk, created_by=tenant)
+        invoice = SalesInvoice.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 

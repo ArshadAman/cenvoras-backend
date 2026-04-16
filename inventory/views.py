@@ -52,7 +52,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     search_fields = ['name', 'description', 'hsn_sac_code']
 
     def get_queryset(self):
-        return Product.objects.filter(created_by=self.request.user.active_tenant).order_by('name')
+        return Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant).order_by('name')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)
@@ -136,7 +136,7 @@ def stock_point_list(request):
     List stock points (inventory levels per batch per warehouse)
     Optional filters: ?product=UUID & ?warehouse=UUID
     """
-    queryset = StockPoint.objects.all()
+    queryset = StockPoint.objects.select_related('batch__product', 'warehouse').all()
     
     # Filter by user's warehouses
     user_warehouses = Warehouse.objects.filter(created_by=request.user.active_tenant)
@@ -168,7 +168,13 @@ class StockTransferListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockTransfer.objects.filter(created_by=self.request.user.active_tenant).order_by('-transfer_date')
+        return (
+            StockTransfer.objects
+            .filter(created_by=self.request.user.active_tenant)
+            .select_related('source_warehouse', 'destination_warehouse')
+            .prefetch_related('items__product', 'items__batch')
+            .order_by('-transfer_date')
+        )
 
 class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StockTransferSerializer

@@ -933,10 +933,6 @@ class PaymentSerializer(serializers.ModelSerializer):
         if amount <= 0:
             raise serializers.ValidationError({'amount': 'Amount must be greater than 0.'})
 
-        # Invoice is required to properly update payment status
-        if not invoice:
-            raise serializers.ValidationError({'invoice': 'Invoice is required to record payment and update its status.'})
-
         if invoice:
             if customer and invoice.customer_id != customer.id:
                 raise serializers.ValidationError({'invoice': 'Selected invoice does not belong to the selected customer.'})
@@ -950,6 +946,8 @@ class PaymentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'amount': f'Amount exceeds invoice outstanding (max {outstanding:.2f}).'
                 })
+        elif not customer:
+            raise serializers.ValidationError({'customer': 'Customer is required.'})
 
         return attrs
 

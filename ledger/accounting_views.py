@@ -580,7 +580,7 @@ def create_sales_invoice_ledger_entries(request):
 @permission_classes([IsAuthenticated])
 def get_ledger_stats(request):
     """Get ledger statistics for the dashboard"""
-    user = request.user
+    user = getattr(request.user, 'active_tenant', request.user)
     
     # Date range filters
     date_from_str = request.query_params.get('date_from')
@@ -603,13 +603,39 @@ def get_ledger_stats(request):
     net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
     
     # Customer specific logic
-    from billing.models import Customer
+    from billing.models import Customer, SalesInvoice, BillPaymentStatus
     customers_query = Customer.objects.filter(created_by=user)
     if customer_id:
         customers_query = customers_query.filter(id=customer_id)
         
     total_customers = customers_query.count()
     outstanding_balance = customers_query.aggregate(total=Sum('current_balance'))['total'] or 0
+
+    # Overdue invoice stats
+    overdue_query = SalesInvoice.objects.filter(
+        created_by=user,
+        due_date__lt=timezone.now().date(),
+        payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID]
+    )
+    if customer_id:
+        overdue_query = overdue_query.filter(customer_id=customer_id)
+
+    overdue_stats = overdue_query.aggregate(
+        overdue_count=Count('id'),
+        overdue_total=Sum(F('total_amount') - F('amount_paid'))
+    )
+
+    # Reconciliation stats: compare customer balance with invoice-level outstanding
+    invoice_outstanding = SalesInvoice.objects.filter(created_by=user)
+    if customer_id:
+        invoice_outstanding = invoice_outstanding.filter(customer_id=customer_id)
+
+    invoice_outstanding_total = invoice_outstanding.aggregate(
+        total=Sum(F('total_amount') - F('amount_paid'))
+    )['total'] or 0
+
+    unapplied_credits = max(float(invoice_outstanding_total) - float(outstanding_balance), 0.0)
+    unmapped_outstanding = max(float(outstanding_balance) - float(invoice_outstanding_total), 0.0)
     
     # Recent transactions (last 30 days)
     thirty_days_ago = timezone.now().date() - timedelta(days=30)
@@ -629,7 +655,13 @@ def get_ledger_stats(request):
         'recent_transactions': recent_count,
         'average_payment': float(payment_stats['avg'] or 0),
         'largest_payment': float(payment_stats['max'] or 0),
-        'outstanding_balance': float(outstanding_balance)
+        'outstanding_balance': float(outstanding_balance),
+        'overdue_invoices_count': overdue_stats['overdue_count'] or 0,
+        'overdue_amount': float(overdue_stats['overdue_total'] or 0),
+        'invoice_outstanding_total': float(invoice_outstanding_total or 0),
+        'unapplied_credits': unapplied_credits,
+        'unmapped_outstanding': unmapped_outstanding,
+        'reconciliation_gap': float(outstanding_balance) - float(invoice_outstanding_total or 0),
     })
 
 

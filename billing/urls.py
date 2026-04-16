@@ -44,6 +44,7 @@ urlpatterns = [
     
     # Reports
     path('reports/overdue-bills/', report_views.overdue_bills_report, name='overdue_bills_report'),
+    path('reports/customer-balance-reconciliation/', report_views.customer_balance_reconciliation, name='customer_balance_reconciliation'),
     path('reports/item-pl/', report_views.item_wise_pl_report, name='item_wise_pl_report'),
 
     # Sidecar Features (Sales Orders, Challans, Settings)

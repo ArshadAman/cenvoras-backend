@@ -1,48 +1,131 @@
-from rest_framework import generics, permissions, status
+from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
-from .models import SalesInvoice, SalesInvoiceItem, Customer
-from .serializers import SalesInvoiceSerializer
+from .models import SalesInvoice, SalesInvoiceItem, Customer, BillPaymentStatus
 from django.utils import timezone
-from django.db.models import Sum, F, DecimalField, Value
+from django.db.models import Sum, F, DecimalField, Value, ExpressionWrapper
 from django.db.models.functions import Coalesce
-import datetime
+from decimal import Decimal
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def overdue_bills_report(request):
-    """
-    Get a list of overdue bills (Due Date < Today AND Balance > 0).
-    For now, since we don't track per-invoice balance (only customer global balance),
-    we can return invoices that are past due date for customers who have a positive balance.
-    
-    Ideally, we should track 'amount_paid' on each invoice to know if *that specific* invoice is unpaid.
-    Gap: 'SalesInvoice' doesn't have 'paid_amount' or 'status' field yet.
-    
-    Compromise for Phase 2: 
-    Return all invoices where due_date < today.
-    """
+    """Get overdue invoices with true invoice-level outstanding amounts."""
     today = timezone.now().date()
-    # Filter invoices created by user, due date passed
-    overdue_invoices = SalesInvoice.objects.filter(
-        created_by=request.user, 
-        due_date__lt=today
-    ).order_by('due_date')
-    
-    # We should filter out those that are fully paid, but we don't track per-invoice payment yet.
-    # We only assume if Created > Balance, some might be paid.
-    # For a true report, we need to allocate payments to invoices (Knock-off).
-    # That is complex. For now, LIST ALL invoices past due date.
-    
-    serializer = SalesInvoiceSerializer(overdue_invoices, many=True)
-    
-    # Enrich data with 'days_overdue'
-    data = serializer.data
-    for item in data:
-        due_date = datetime.datetime.strptime(item['due_date'], "%Y-%m-%d").date()
-        item['days_overdue'] = (today - due_date).days
-        
-    return Response(data)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+
+    outstanding_expr = ExpressionWrapper(
+        Coalesce(F('total_amount'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))) -
+        Coalesce(F('amount_paid'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))),
+        output_field=DecimalField(max_digits=12, decimal_places=2)
+    )
+
+    overdue_invoices = (
+        SalesInvoice.objects.filter(
+            created_by=tenant,
+            due_date__lt=today,
+            payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID],
+        )
+        .annotate(outstanding_amount=outstanding_expr)
+        .filter(outstanding_amount__gt=0)
+        .select_related('customer')
+        .order_by('due_date')
+    )
+
+    data = []
+    for invoice in overdue_invoices:
+        due_date = invoice.due_date
+        data.append({
+            'id': str(invoice.id),
+            'invoice_number': invoice.invoice_number,
+            'invoice_date': invoice.invoice_date,
+            'due_date': due_date,
+            'days_overdue': (today - due_date).days if due_date else 0,
+            'customer_id': str(invoice.customer_id) if invoice.customer_id else None,
+            'customer_name': invoice.customer.name if invoice.customer else (invoice.customer_name or 'Unknown Customer'),
+            'total_amount': float(invoice.total_amount or 0),
+            'amount_paid': float(invoice.amount_paid or 0),
+            'outstanding_amount': float(invoice.outstanding_amount or 0),
+            'payment_status': invoice.payment_status,
+        })
+
+    return Response({
+        'count': len(data),
+        'total_overdue_amount': float(sum((Decimal(str(item['outstanding_amount'])) for item in data), Decimal('0'))),
+        'results': data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def customer_balance_reconciliation(request):
+    """
+    Compare customer current balance vs sum of invoice outstanding.
+    Positive `unapplied_credit` means payment/credit exists without invoice linkage.
+    Positive `unmapped_debit` means customer balance exceeds open invoices.
+    """
+    tenant = getattr(request.user, 'active_tenant', request.user)
+
+    customers = Customer.objects.filter(created_by=tenant).order_by('name')
+    invoices = SalesInvoice.objects.filter(created_by=tenant)
+
+    if request.query_params.get('customer'):
+        customer_id = request.query_params.get('customer')
+        customers = customers.filter(id=customer_id)
+        invoices = invoices.filter(customer_id=customer_id)
+
+    invoice_rows = invoices.values('customer_id').annotate(
+        outstanding=Sum(
+            ExpressionWrapper(
+                Coalesce(F('total_amount'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))) -
+                Coalesce(F('amount_paid'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))),
+                output_field=DecimalField(max_digits=12, decimal_places=2)
+            )
+        )
+    )
+
+    outstanding_by_customer = {
+        row['customer_id']: (row['outstanding'] or Decimal('0'))
+        for row in invoice_rows
+        if row['customer_id']
+    }
+
+    rows = []
+    total_unapplied_credit = Decimal('0')
+    total_unmapped_debit = Decimal('0')
+
+    for customer in customers:
+        current_balance = Decimal(str(customer.current_balance or 0))
+        invoice_outstanding = Decimal(str(outstanding_by_customer.get(customer.id, Decimal('0')) or 0))
+        difference = invoice_outstanding - current_balance
+
+        unapplied_credit = difference if difference > 0 else Decimal('0')
+        unmapped_debit = (-difference) if difference < 0 else Decimal('0')
+
+        total_unapplied_credit += unapplied_credit
+        total_unmapped_debit += unmapped_debit
+
+        rows.append({
+            'customer_id': str(customer.id),
+            'customer_name': customer.name,
+            'current_balance': float(current_balance),
+            'invoice_outstanding': float(invoice_outstanding),
+            'difference': float(difference),
+            'unapplied_credit': float(unapplied_credit),
+            'unmapped_debit': float(unmapped_debit),
+        })
+
+    rows.sort(key=lambda item: abs(item['difference']), reverse=True)
+
+    return Response({
+        'count': len(rows),
+        'summary': {
+            'total_unapplied_credit': float(total_unapplied_credit),
+            'total_unmapped_debit': float(total_unmapped_debit),
+            'net_reconciliation_gap': float(total_unmapped_debit - total_unapplied_credit),
+        },
+        'results': rows,
+    })
 
 
 # =============================================================================

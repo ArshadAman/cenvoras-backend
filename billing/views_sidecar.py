@@ -7,7 +7,6 @@ from .models_sidecar import SalesOrder, SalesOrderItem, DeliveryChallan, Invoice
 from .serializers_sidecar import SalesOrderSerializer, DeliveryChallanSerializer, InvoiceSettingsSerializer, QuotationSerializer
 from .models import SalesInvoice, SalesInvoiceItem
 from cenvoras.pagination import StandardResultsSetPagination
-import random
 from datetime import date
 from decimal import Decimal
 
@@ -78,11 +77,32 @@ def convert_order_to_invoice(request, pk):
     except SalesOrder.DoesNotExist:
         return Response({"message": "Order not found"}, status=404)
 
-    # Simple Conversion Logic
+    prefix = (getattr(request.user, 'invoice_prefix', 'INV-') or 'INV-').upper()
+    if not prefix.endswith('-'):
+        prefix = f"{prefix}-"
+
+    invoices = SalesInvoice.objects.filter(
+        created_by=request.user,
+        invoice_number__startswith=prefix,
+    )
+
+    max_num = 0
+    for inv in invoices:
+        suffix = inv.invoice_number.replace(prefix, '', 1)
+        try:
+            num = int(suffix)
+            if num > max_num:
+                max_num = num
+        except (TypeError, ValueError):
+            continue
+
+    next_num = max_num + 1
+    next_invoice_number = f"{prefix}{next_num:03d}"
+
     invoice = SalesInvoice.objects.create(
         customer=order.customer,
         customer_name=order.customer.name,
-        invoice_number=f"INV-{date.today().strftime('%Y%m%d')}-{random.randint(1000, 9999)}",
+        invoice_number=next_invoice_number,
         invoice_date=date.today(),
         created_by=request.user,
         total_amount=order.total_amount

@@ -162,9 +162,9 @@ class WebhookEvent(models.Model):
     class Meta:
         ordering = ['-received_at']
         indexes = [
-            models.Index(fields=['event_id']),
-            models.Index(fields=['order_id']),
-            models.Index(fields=['processed']),
+            models.Index(fields=['event_id'], name='subscription_webhook_event_id_idx'),
+            models.Index(fields=['order_id'], name='subscription_webhook_order_id_idx'),
+            models.Index(fields=['processed'], name='subscription_webhook_processed_idx'),
         ]
     
     def __str__(self):

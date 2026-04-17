@@ -89,6 +89,7 @@ def get_active_tenant_subscription(user: User):
         subscription.current_period_end = start_time + timedelta(days=30)
         subscription.pending_plan = None
         subscription.pending_plan_starts_at = None
+        subscription.cancel_at_period_end = False
         subscription.save(update_fields=[
             'plan',
             'status',
@@ -96,6 +97,7 @@ def get_active_tenant_subscription(user: User):
             'current_period_end',
             'pending_plan',
             'pending_plan_starts_at',
+            'cancel_at_period_end',
             'updated_at',
         ])
 
@@ -227,6 +229,9 @@ def get_entitlements(user: User) -> dict[str, Any]:
             'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
             'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
             'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
+            'cancel_at_period_end': getattr(subscription, 'cancel_at_period_end', False),
+            'next_plan_code': 'free' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+            'next_plan_name': 'Free' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'name', None),
         },
         'limits': limits,
         'usage': usage,

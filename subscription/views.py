@@ -1,5 +1,6 @@
 import uuid
 from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 import requests
 from django.conf import settings
@@ -15,6 +16,7 @@ from .models import (
 	SubscriptionStatus,
 	SubscriptionPayment,
 	SubscriptionPaymentStatus,
+	SubscriptionPaymentAction,
 )
 from .services import get_entitlements
 
@@ -79,6 +81,207 @@ def _sync_legacy_subscription_fields(tenant, plan_code):
 	tenant.save(update_fields=['subscription_status', 'subscription_tier'])
 
 
+def _plan_rank(plan_code: str) -> int:
+	code = (plan_code or '').lower()
+	if code == 'business':
+		return 2
+	if code == 'pro':
+		return 1
+	return 0
+
+
+def _quantize_money(value: Decimal) -> Decimal:
+	return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def _calculate_plan_change_quote(subscription, target_plan, now):
+	current_plan = subscription.plan if subscription else None
+	current_code = getattr(current_plan, 'code', 'free')
+	target_code = target_plan.code
+	active_until = None
+	if subscription and subscription.current_period_end and subscription.current_period_end > now:
+		active_until = subscription.current_period_end
+
+	current_rank = _plan_rank(current_code)
+	target_rank = _plan_rank(target_code)
+
+	if target_code == current_code and active_until:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.RENEW,
+			'apply_immediately': False,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Renew {target_plan.name} for 30 more days.",
+		}
+
+	if target_rank > current_rank and active_until and current_rank > 0:
+		total_seconds = max(int((subscription.current_period_end - subscription.current_period_start).total_seconds()), 1)
+		remaining_seconds = max(int((active_until - now).total_seconds()), 0)
+		remaining_ratio = Decimal(remaining_seconds) / Decimal(total_seconds)
+		delta = max(Decimal('0.00'), Decimal(target_plan.monthly_price) - Decimal(current_plan.monthly_price))
+		amount = _quantize_money(delta * remaining_ratio)
+		if amount < Decimal('1.00'):
+			amount = Decimal('1.00')
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.UPGRADE_NOW,
+			'apply_immediately': True,
+			'amount': amount,
+			'source_plan_code': current_code,
+			'summary': f"Upgrade now to {target_plan.name}. Remaining-cycle prorated charge applies.",
+		}
+
+	if target_rank > current_rank:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.ACTIVATE,
+			'apply_immediately': True,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Activate {target_plan.name} immediately for 30 days.",
+		}
+
+	if active_until:
+		if target_rank == 0:
+			return {
+				'payment_required': False,
+				'action': 'schedule_free',
+				'apply_immediately': False,
+				'amount': Decimal('0.00'),
+				'source_plan_code': current_code,
+				'effective_at': active_until,
+				'summary': 'Will move to Free plan after current cycle ends.',
+			}
+		return {
+			'payment_required': False,
+			'action': 'schedule_plan',
+			'apply_immediately': False,
+			'amount': Decimal('0.00'),
+			'source_plan_code': current_code,
+			'effective_at': active_until,
+			'summary': f"{target_plan.name} will start after current cycle ends.",
+		}
+
+	if target_rank == 0:
+		return {
+			'payment_required': False,
+			'action': 'already_free',
+			'apply_immediately': False,
+			'amount': Decimal('0.00'),
+			'source_plan_code': current_code,
+			'summary': 'You are already on Free plan.',
+		}
+
+	return {
+		'payment_required': True,
+		'action': SubscriptionPaymentAction.ACTIVATE,
+		'apply_immediately': True,
+		'amount': _quantize_money(target_plan.monthly_price),
+		'source_plan_code': current_code,
+		'summary': f"Activate {target_plan.name} immediately for 30 days.",
+	}
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def plan_change_quote(request):
+	tenant = getattr(request.user, 'active_tenant', request.user)
+
+	if request.user.id != tenant.id:
+		return Response({
+			'success': False,
+			'error': 'Only tenant admin can manage plan changes.'
+		}, status=status.HTTP_403_FORBIDDEN)
+
+	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
+	if target_code not in {'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+
+	target_plan = Plan.objects.filter(code=target_code, is_active=True).first() if target_code != 'free' else None
+	if target_code != 'free' and not target_plan:
+		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+	now = timezone.now()
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
+	if not target_plan:
+		free_plan = Plan(code='free', name='Free', monthly_price=Decimal('0.00'))
+		quote = _calculate_plan_change_quote(subscription, free_plan, now)
+	else:
+		quote = _calculate_plan_change_quote(subscription, target_plan, now)
+
+	return Response({
+		'success': True,
+		'data': {
+			'target_plan_code': target_code,
+			'target_plan_name': target_plan.name if target_plan else 'Free',
+			'payment_required': quote['payment_required'],
+			'action': quote['action'],
+			'apply_immediately': quote.get('apply_immediately', False),
+			'amount': str(quote['amount']),
+			'effective_at': quote.get('effective_at'),
+			'summary': quote.get('summary', ''),
+		}
+	})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def schedule_plan_change(request):
+	tenant = getattr(request.user, 'active_tenant', request.user)
+
+	if request.user.id != tenant.id:
+		return Response({
+			'success': False,
+			'error': 'Only tenant admin can manage plan changes.'
+		}, status=status.HTTP_403_FORBIDDEN)
+
+	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
+	if target_code not in {'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
+	now = timezone.now()
+	if not subscription or not subscription.current_period_end or subscription.current_period_end <= now:
+		return Response({'success': False, 'error': 'No active cycle available. Use payment to activate a plan now.'}, status=status.HTTP_400_BAD_REQUEST)
+
+	target_plan = Plan.objects.filter(code=target_code, is_active=True).first() if target_code != 'free' else None
+	active_until = subscription.current_period_end
+
+	if target_code == 'free':
+		subscription.cancel_at_period_end = True
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=['cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'])
+		return Response({
+			'success': True,
+			'data': {
+				'action': 'schedule_free',
+				'effective_at': active_until,
+				'message': 'Plan will move to Free after current cycle ends.',
+			}
+		})
+
+	if not target_plan:
+		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+	subscription.cancel_at_period_end = False
+	subscription.pending_plan = target_plan
+	subscription.pending_plan_starts_at = active_until
+	subscription.save(update_fields=['cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'])
+
+	return Response({
+		'success': True,
+		'data': {
+			'action': 'schedule_plan',
+			'target_plan_code': target_plan.code,
+			'target_plan_name': target_plan.name,
+			'effective_at': active_until,
+			'message': f'{target_plan.name} will start after current cycle ends.',
+		}
+	})
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_plan_payment_order(request):
@@ -101,6 +304,27 @@ def create_plan_payment_order(request):
 	if not plan:
 		return Response({'success': False, 'error': 'Plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+	now = timezone.now()
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
+	quote = _calculate_plan_change_quote(subscription, plan, now)
+
+	if not quote['payment_required']:
+		return Response({
+			'success': False,
+			'error': 'This plan change does not require payment. Use schedule plan change endpoint.',
+			'data': {
+				'action': quote['action'],
+				'effective_at': quote.get('effective_at'),
+			}
+		}, status=status.HTTP_400_BAD_REQUEST)
+
+	order_amount = quote['amount']
+	if order_amount <= Decimal('0.00'):
+		return Response({
+			'success': False,
+			'error': 'No payable amount for this change.',
+		}, status=status.HTTP_400_BAD_REQUEST)
+
 	if not settings.CASHFREE_CLIENT_ID or not settings.CASHFREE_CLIENT_SECRET:
 		return Response({
 			'success': False,
@@ -114,14 +338,14 @@ def create_plan_payment_order(request):
 	body = {
 		'order_id': order_id,
 		'order_currency': 'INR',
-		'order_amount': float(plan.monthly_price),
+		'order_amount': float(order_amount),
 		'customer_details': {
 			'customer_id': str(tenant.id),
 			'customer_name': tenant.business_name or tenant.username or 'Cenvora User',
 			'customer_email': tenant.email or 'support@cenvora.app',
 			'customer_phone': tenant.phone or '9999999999',
 		},
-		'order_note': f'Plan upgrade to {plan.name}',
+		'order_note': quote.get('summary') or f'Plan payment for {plan.name}',
 		'order_meta': {
 			'return_url': f"{getattr(settings, 'CASHFREE_RETURN_URL', 'https://cenvora.app/profile')}?order_id={order_id}",
 		},
@@ -157,9 +381,16 @@ def create_plan_payment_order(request):
 		order_id=order_id,
 		cf_order_id=response_data.get('cf_order_id'),
 		payment_session_id=response_data.get('payment_session_id'),
-		amount=plan.monthly_price,
+		amount=order_amount,
 		currency='INR',
 		status=SubscriptionPaymentStatus.PENDING,
+		action=quote['action'],
+		source_plan_code=quote.get('source_plan_code'),
+		billing_details={
+			'summary': quote.get('summary', ''),
+			'apply_immediately': quote.get('apply_immediately', False),
+			'quoted_amount': str(order_amount),
+		},
 		raw_response=response_data,
 	)
 
@@ -170,7 +401,9 @@ def create_plan_payment_order(request):
 			'cf_order_id': response_data.get('cf_order_id'),
 			'payment_session_id': response_data.get('payment_session_id'),
 			'plan_code': plan.code,
-			'amount': str(plan.monthly_price),
+			'amount': str(order_amount),
+			'action': quote['action'],
+			'summary': quote.get('summary', ''),
 			'currency': 'INR',
 		}
 	})
@@ -257,30 +490,39 @@ def confirm_plan_payment(request):
 	queued_starts_at = None
 
 	active_until = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else None
+	payment_action = payment.action or SubscriptionPaymentAction.ACTIVATE
 
-	if active_until:
-		if subscription.plan_id == payment.plan_id and not subscription.pending_plan_id:
-			# Same plan recharge before expiry: extend current period directly.
-			subscription.current_period_end = active_until + timedelta(days=30)
-			subscription.status = SubscriptionStatus.ACTIVE
-			subscription.cancel_at_period_end = False
-			subscription.save(update_fields=['current_period_end', 'status', 'cancel_at_period_end', 'updated_at'])
-			_sync_legacy_subscription_fields(tenant, subscription.plan.code)
-		elif subscription.plan_id != payment.plan_id:
-			# Different plan recharge before expiry: queue new plan after current period.
-			subscription.pending_plan = payment.plan
-			subscription.pending_plan_starts_at = active_until
-			subscription.status = SubscriptionStatus.ACTIVE
-			subscription.cancel_at_period_end = False
-			subscription.save(update_fields=['pending_plan', 'pending_plan_starts_at', 'status', 'cancel_at_period_end', 'updated_at'])
-			queued = True
-			queued_starts_at = active_until
-			_sync_legacy_subscription_fields(tenant, subscription.plan.code)
-		else:
-			# Pending renewal already exists for same plan; keep latest successful payment recorded.
-			subscription.status = SubscriptionStatus.ACTIVE
-			subscription.save(update_fields=['status', 'updated_at'])
-			_sync_legacy_subscription_fields(tenant, subscription.plan.code)
+	if payment_action == SubscriptionPaymentAction.UPGRADE_NOW and active_until:
+		# Instant upgrade: switch plan now, keep current cycle end.
+		subscription.plan = payment.plan
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=[
+			'plan', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
+		])
+		_sync_legacy_subscription_fields(tenant, payment.plan.code)
+	elif payment_action == SubscriptionPaymentAction.RENEW and active_until:
+		subscription.current_period_end = active_until + timedelta(days=30)
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=[
+			'current_period_end', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
+		])
+		_sync_legacy_subscription_fields(tenant, subscription.plan.code)
+	elif active_until and subscription.plan_id != payment.plan_id:
+		# Backward-compatible fallback: queue when a different-plan payment appears without explicit action.
+		subscription.pending_plan = payment.plan
+		subscription.pending_plan_starts_at = active_until
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.save(update_fields=['pending_plan', 'pending_plan_starts_at', 'status', 'cancel_at_period_end', 'updated_at'])
+		queued = True
+		queued_starts_at = active_until
+		_sync_legacy_subscription_fields(tenant, subscription.plan.code)
 	else:
 		# Expired or no active cycle: activate immediately for 30 days.
 		subscription.plan = payment.plan
@@ -301,6 +543,7 @@ def confirm_plan_payment(request):
 		'data': {
 			'order_id': order_id,
 			'plan_code': subscription.plan.code,
+			'action': payment_action,
 			'queued_plan_code': subscription.pending_plan.code if subscription.pending_plan else None,
 			'queued': queued,
 			'queued_starts_at': queued_starts_at,

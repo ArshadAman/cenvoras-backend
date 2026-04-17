@@ -66,6 +66,12 @@ class SubscriptionPaymentStatus(models.TextChoices):
     SUCCESS = 'success', 'Success'
     FAILED = 'failed', 'Failed'
 
+
+class SubscriptionPaymentAction(models.TextChoices):
+    ACTIVATE = 'activate', 'Activate'
+    RENEW = 'renew', 'Renew'
+    UPGRADE_NOW = 'upgrade_now', 'Upgrade Now'
+
 class TenantSubscription(models.Model):
     """
     Binds a User (Tenant) to a specific Plan and tracks its validity window.
@@ -120,6 +126,9 @@ class SubscriptionPayment(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=10, default='INR')
     status = models.CharField(max_length=20, choices=SubscriptionPaymentStatus.choices, default=SubscriptionPaymentStatus.PENDING)
+    action = models.CharField(max_length=20, choices=SubscriptionPaymentAction.choices, default=SubscriptionPaymentAction.ACTIVATE)
+    source_plan_code = models.CharField(max_length=50, blank=True, null=True)
+    billing_details = models.JSONField(default=dict, blank=True)
 
     raw_response = models.JSONField(default=dict, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)

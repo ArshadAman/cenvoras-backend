@@ -253,8 +253,18 @@ CASHFREE_CLIENT_SECRET = os.environ.get('CASHFREE_CLIENT_SECRET', '')
 CASHFREE_ENV = os.environ.get('CASHFREE_ENV', 'sandbox')  # sandbox | production
 CASHFREE_API_VERSION = os.environ.get('CASHFREE_API_VERSION', '2023-08-01')
 CASHFREE_RETURN_URL = os.environ.get('CASHFREE_RETURN_URL', 'https://cenvora.app/profile')
-CASHFREE_WEBHOOK_URL = os.environ.get('CASHFREE_WEBHOOK_URL', 'https://api.cenvora.app/subscription/webhooks/cashfree/')
-CASHFREE_WEBHOOK_SECRET = os.environ.get('CASHFREE_WEBHOOK_SECRET', '')  # Set in production
+CASHFREE_WEBHOOK_URL = os.environ.get('CASHFREE_WEBHOOK_URL', 'https://api.cenvora.app/api/subscription/webhooks/cashfree/')
+# Cashfree SDK webhook verification typically uses PG client secret.
+# Keep webhook secret override for flexibility, but fallback to client secret by default.
+CASHFREE_WEBHOOK_SECRET = os.environ.get('CASHFREE_WEBHOOK_SECRET', CASHFREE_CLIENT_SECRET)
+CASHFREE_WEBHOOK_MAX_SKEW_MS = int(os.environ.get('CASHFREE_WEBHOOK_MAX_SKEW_MS', 600000))
+CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS = int(os.environ.get('CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS', 1800))
+CASHFREE_REQUIRE_WEBHOOK_SIGNATURE = (
+    os.environ.get('CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', 'true').strip().lower() == 'true'
+)
+CASHFREE_ALLOW_UNSIGNED_WEBHOOKS = (
+    os.environ.get('CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', 'false').strip().lower() == 'true'
+)
 
 # =============================================================================
 # BACKUP & STORAGE SETTINGS (Cloudinary)

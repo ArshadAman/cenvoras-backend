@@ -3,10 +3,11 @@ Subscription Payment Processing Tasks — Async Celery tasks for webhook handlin
 payment confirmation, and transactional email notifications.
 """
 import logging
+import base64
 import hashlib
 import hmac
 from datetime import timedelta
-from decimal import Decimal
+import requests
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
@@ -20,35 +21,109 @@ from .models import (
     TenantSubscription,
     WebhookEvent,
 )
-from .services import get_tenant
-from .views import _sync_legacy_subscription_fields
 from integration.tasks import send_async_email_notification
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-def verify_cashfree_signature(payload_str: str, signature: str) -> bool:
+def _cashfree_base_url():
+    env = (getattr(settings, 'CASHFREE_ENV', 'sandbox') or 'sandbox').lower()
+    return 'https://api.cashfree.com/pg' if env == 'production' else 'https://sandbox.cashfree.com/pg'
+
+
+def _cashfree_headers():
+    return {
+        'Content-Type': 'application/json',
+        'x-api-version': getattr(settings, 'CASHFREE_API_VERSION', '2023-08-01'),
+        'x-client-id': getattr(settings, 'CASHFREE_CLIENT_ID', ''),
+        'x-client-secret': getattr(settings, 'CASHFREE_CLIENT_SECRET', ''),
+    }
+
+
+def _fetch_success_payment_attempt(order_id: str):
+    if not settings.CASHFREE_CLIENT_ID or not settings.CASHFREE_CLIENT_SECRET:
+        logger.error("Cashfree credentials are missing; cannot verify webhook payment status.")
+        return None
+
+    response = requests.get(
+        f"{_cashfree_base_url()}/orders/{order_id}/payments",
+        headers=_cashfree_headers(),
+        timeout=20,
+    )
+
+    if response.status_code >= 400:
+        logger.error("Cashfree verification API failed for order %s with status %s", order_id, response.status_code)
+        return None
+
+    try:
+        data = response.json()
+    except Exception:
+        logger.error("Cashfree verification API returned non-JSON response for order %s", order_id)
+        return None
+
+    attempts = data.get('data', []) if isinstance(data, dict) else data
+    if not isinstance(attempts, list):
+        return None
+
+    for attempt in attempts:
+        if attempt.get('payment_status') == 'SUCCESS':
+            return attempt
+
+    return None
+
+
+def _sync_legacy_subscription_fields(tenant, plan_code):
+    tier_map = {
+        'free': 'FREE',
+        'pro': 'MID',
+        'business': 'PRO',
+    }
+    tenant.subscription_status = 'active'
+    tenant.subscription_tier = tier_map.get(plan_code, 'FREE')
+    tenant.save(update_fields=['subscription_status', 'subscription_tier'])
+
+
+def verify_cashfree_signature(payload_str: str, signature: str, timestamp: str | None = None) -> bool:
     """
     Verify Cashfree webhook signature using HMAC-SHA256.
-    Signature is: Base64(HMAC-SHA256(payload, webhook_secret))
+    Supports both payload-only and timestamp.payload signing modes.
+    Secret resolution matches Cashfree SDK style: dedicated webhook secret,
+    falling back to Cashfree PG client secret when webhook secret is not set.
     """
     webhook_secret = getattr(settings, 'CASHFREE_WEBHOOK_SECRET', '')
+    require_signature = bool(getattr(settings, 'CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', True))
+    allow_unsigned = bool(getattr(settings, 'CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', False))
+
     if not webhook_secret:
-        logger.warning("CASHFREE_WEBHOOK_SECRET not configured. Skipping signature verification.")
-        return True  # Allow in dev; enforce in production
+        if allow_unsigned and not require_signature:
+            logger.warning("CASHFREE_WEBHOOK_SECRET not configured. Unsigned webhooks allowed by configuration.")
+            return True
+        logger.error("CASHFREE_WEBHOOK_SECRET not configured while signature verification is required.")
+        return False
     
     try:
-        import base64
-        # Compute HMAC-SHA256
-        computed_hmac = hmac.new(
+        signatures_to_check = []
+
+        # Mode 1: signature over raw payload
+        payload_hmac = hmac.new(
             webhook_secret.encode(),
             payload_str.encode(),
-            hashlib.sha256
+            hashlib.sha256,
         ).digest()
-        computed_signature = base64.b64encode(computed_hmac).decode()
-        
-        return hmac.compare_digest(computed_signature, signature)
+        signatures_to_check.append(base64.b64encode(payload_hmac).decode())
+
+        # Mode 2: signature over "timestamp.payload"
+        if timestamp:
+            signed_content = f"{timestamp}.{payload_str}"
+            ts_hmac = hmac.new(
+                webhook_secret.encode(),
+                signed_content.encode(),
+                hashlib.sha256,
+            ).digest()
+            signatures_to_check.append(base64.b64encode(ts_hmac).decode())
+
+        return any(hmac.compare_digest(candidate, signature) for candidate in signatures_to_check)
     except Exception as e:
         logger.error(f"Error verifying Cashfree signature: {e}")
         return False
@@ -78,12 +153,14 @@ def process_cashfree_webhook(self, event_id: str, event_type: str, order_id: str
         return {'status': 'skipped', 'reason': 'already_processed'}
     
     try:
+        event_payload = payload.get('data', payload) if isinstance(payload, dict) else {}
+
         if event_type == 'PAYMENT_SUCCESS':
-            result = _handle_payment_success(webhook_event, order_id, payload)
+            result = _handle_payment_success(webhook_event, order_id, event_payload)
         elif event_type == 'PAYMENT_FAILED':
-            result = _handle_payment_failed(webhook_event, order_id, payload)
+            result = _handle_payment_failed(webhook_event, order_id, event_payload)
         elif event_type == 'PAYMENT_PENDING':
-            result = _handle_payment_pending(webhook_event, order_id, payload)
+            result = _handle_payment_pending(webhook_event, order_id, event_payload)
         else:
             logger.warning(f"Unknown event type: {event_type}")
             result = {'status': 'ignored', 'reason': 'unknown_event_type'}
@@ -112,7 +189,51 @@ def _handle_payment_success(webhook_event, order_id: str, payload: dict):
     except SubscriptionPayment.DoesNotExist:
         logger.warning(f"Payment order {order_id} not found in webhook")
         return {'status': 'error', 'reason': 'payment_not_found'}
+
+    billing_details = payment.billing_details or {}
+    if billing_details.get('superseded'):
+        now = timezone.now()
+        payment.status = SubscriptionPaymentStatus.SUCCESS
+        payment.cf_payment_id = payload.get('payment_id') or payload.get('cf_payment_id')
+        payment.paid_at = now
+        payment.raw_response = {
+            'webhook_payload': payload,
+            'note': 'superseded_order_paid_no_subscription_change',
+        }
+        payment.save(update_fields=['status', 'cf_payment_id', 'paid_at', 'raw_response', 'updated_at'])
+
+        if payment.tenant.email:
+            send_async_email_notification.delay(
+                user_id=payment.tenant.id,
+                to_email=payment.tenant.email,
+                subject="Payment Received For Old Order - Cenvora",
+                body=f"""
+Hello {payment.tenant.first_name or payment.tenant.username},
+
+We received a payment for an older/superseded order ({order_id}).
+
+This payment was not applied to change your subscription because a newer payment intent exists.
+Please contact support@cenvora.app so we can help with refund/reconciliation.
+
+Best regards,
+Cenvora Team
+""",
+                related_model='SubscriptionPayment',
+                related_id=order_id,
+            )
+
+        return {'status': 'ignored', 'reason': 'superseded_order_paid'}
     
+    verified_success_attempt = _fetch_success_payment_attempt(order_id)
+    if not verified_success_attempt:
+        logger.warning("Webhook marked success but Cashfree verification found no SUCCESS payment for order %s", order_id)
+        payment.raw_response = {
+            'webhook_payload': payload,
+            'verification': 'no_success_attempt',
+        }
+        payment.save(update_fields=['raw_response', 'updated_at'])
+        return {'status': 'ignored', 'reason': 'unverified_success'}
+
     tenant = payment.tenant
     subscription, _created = TenantSubscription.objects.get_or_create(
         tenant=tenant,
@@ -127,9 +248,17 @@ def _handle_payment_success(webhook_event, order_id: str, payload: dict):
     
     now = timezone.now()
     payment.status = SubscriptionPaymentStatus.SUCCESS
-    payment.cf_payment_id = payload.get('payment_id') or payload.get('cf_payment_id')
+    payment.cf_payment_id = (
+        verified_success_attempt.get('cf_payment_id')
+        or verified_success_attempt.get('payment_id')
+        or payload.get('payment_id')
+        or payload.get('cf_payment_id')
+    )
     payment.paid_at = now
-    payment.raw_response = payload
+    payment.raw_response = {
+        'webhook_payload': payload,
+        'verified_success_attempt': verified_success_attempt,
+    }
     payment.save(update_fields=['status', 'cf_payment_id', 'paid_at', 'raw_response', 'updated_at'])
     
     # Apply payment action

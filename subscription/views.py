@@ -1,6 +1,7 @@
 import uuid
 import json
 import logging
+import hashlib
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -26,6 +27,41 @@ from .services import get_entitlements
 from .tasks import process_cashfree_webhook, verify_cashfree_signature
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_webhook_event_type(raw_event_type: str) -> str:
+	event_type = (raw_event_type or '').upper().strip()
+	if event_type.endswith('_WEBHOOK'):
+		event_type = event_type.replace('_WEBHOOK', '')
+	if event_type in {'PAYMENT_SUCCEEDED', 'PAYMENT_SUCCESSFUL'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'PAYMENT_FAILURE', 'PAYMENT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'PAYMENT_PENDING'}:
+		return 'PAYMENT_PENDING'
+	return event_type
+
+
+def _extract_order_id(payload: dict) -> str | None:
+	if not isinstance(payload, dict):
+		return None
+
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	order = data.get('order', {}) if isinstance(data.get('order', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+	order_id = (
+		data.get('orderId')
+		or data.get('order_id')
+		or order.get('order_id')
+		or order.get('orderId')
+		or payment.get('order_id')
+		or payment.get('orderId')
+		or payload.get('orderId')
+		or payload.get('order_id')
+	)
+
+	return str(order_id).strip() if order_id else None
 
 
 @api_view(['GET'])
@@ -338,6 +374,44 @@ def create_plan_payment_order(request):
 			'error': 'Cashfree credentials are not configured on server.'
 		}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+	reuse_window_seconds = max(int(getattr(settings, 'CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS', 1800)), 0)
+	reuse_cutoff = now - timedelta(seconds=reuse_window_seconds)
+
+	pending_candidates = SubscriptionPayment.objects.filter(
+		tenant=tenant,
+		plan=plan,
+		status=SubscriptionPaymentStatus.PENDING,
+		action=quote['action'],
+		source_plan_code=quote.get('source_plan_code'),
+	).order_by('-created_at')
+
+	for candidate in pending_candidates:
+		candidate_details = candidate.billing_details or {}
+		if candidate_details.get('superseded'):
+			continue
+
+		if candidate.created_at >= reuse_cutoff and candidate.payment_session_id:
+			return Response({
+				'success': True,
+				'data': {
+					'order_id': candidate.order_id,
+					'cf_order_id': candidate.cf_order_id,
+					'payment_session_id': candidate.payment_session_id,
+					'plan_code': plan.code,
+					'amount': str(candidate.amount),
+					'action': quote['action'],
+					'summary': quote.get('summary', ''),
+					'currency': candidate.currency,
+					'reused_order': True,
+				}
+			})
+
+		candidate_details['superseded'] = True
+		candidate_details['superseded_reason'] = 'newer_payment_intent_created'
+		candidate_details['superseded_at'] = now.isoformat()
+		candidate.billing_details = candidate_details
+		candidate.save(update_fields=['billing_details', 'updated_at'])
+
 	order_id = f"sub_{str(tenant.id).replace('-', '')[:8]}_{uuid.uuid4().hex[:18]}"
 	request_id = str(uuid.uuid4())
 	idempotency_key = str(uuid.uuid4())
@@ -397,6 +471,8 @@ def create_plan_payment_order(request):
 			'summary': quote.get('summary', ''),
 			'apply_immediately': quote.get('apply_immediately', False),
 			'quoted_amount': str(order_amount),
+			'intent_key': f"{quote['action']}:{quote.get('source_plan_code') or 'free'}->{plan.code}:{order_amount}",
+			'superseded': False,
 		},
 		raw_response=response_data,
 	)
@@ -412,6 +488,7 @@ def create_plan_payment_order(request):
 			'action': quote['action'],
 			'summary': quote.get('summary', ''),
 			'currency': 'INR',
+			'reused_order': False,
 		}
 	})
 
@@ -428,6 +505,18 @@ def confirm_plan_payment(request):
 	payment = SubscriptionPayment.objects.filter(order_id=order_id, tenant=tenant).select_related('plan').first()
 	if not payment:
 		return Response({'success': False, 'error': 'Payment order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+	billing_details = payment.billing_details or {}
+	if billing_details.get('superseded'):
+		return Response({
+			'success': False,
+			'error': 'This payment order is no longer active. Please use the latest payment request.',
+			'data': {
+				'order_id': order_id,
+				'status': payment.status,
+				'reason': 'superseded_order',
+			}
+		}, status=status.HTTP_409_CONFLICT)
 
 	headers = _cashfree_headers()
 	response = requests.get(
@@ -569,7 +658,9 @@ def cashfree_webhook(request):
 	Receives and verifies payment events, then queues async processing.
 	
 	Expected headers:
-	- x-cashfree-signature: HMAC-SHA256 signature of payload
+	- x-webhook-signature: HMAC-SHA256 signature of payload
+	- x-idempotency-key: unique event key
+	- x-webhook-timestamp: milliseconds epoch
 	
 	Expected payload:
 	{
@@ -591,23 +682,57 @@ def cashfree_webhook(request):
 		return Response({'error': 'Invalid payload'}, status=status.HTTP_400_BAD_REQUEST)
 	
 	# Extract webhook details
-	event_type = payload.get('event', '').upper()
-	event_id = payload.get('eventId')
-	order_id = payload.get('data', {}).get('orderId')
-	
+	event_type = _normalize_webhook_event_type(payload.get('event') or payload.get('type') or payload.get('event_type') or '')
+	header_idempotency_key = str(request.headers.get('x-idempotency-key', '')).strip()
+	payload_event_id = payload.get('eventId') or payload.get('event_id')
+	event_id = header_idempotency_key or (str(payload_event_id).strip() if payload_event_id else '')
 	if not event_id:
-		logger.warning("Webhook missing eventId")
-		return Response({'error': 'eventId is required'}, status=status.HTTP_400_BAD_REQUEST)
+		# Deterministic fallback keeps retries idempotent even without explicit key.
+		event_id = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
+
+	order_id = _extract_order_id(payload)
 	
 	if not order_id:
 		logger.warning(f"Webhook {event_id} missing orderId")
 		return Response({'error': 'orderId is required'}, status=status.HTTP_400_BAD_REQUEST)
 	
 	# Verify signature
-	signature = request.headers.get('x-cashfree-signature', '')
-	if not verify_cashfree_signature(payload_str, signature):
-		logger.error(f"Webhook {event_id} signature verification failed")
-		return Response({'error': 'Signature verification failed'}, status=status.HTTP_401_UNAUTHORIZED)
+	signature = request.headers.get('x-webhook-signature', '') or request.headers.get('x-cashfree-signature', '')
+	timestamp = str(request.headers.get('x-webhook-timestamp', '')).strip()
+	webhook_secret = getattr(settings, 'CASHFREE_WEBHOOK_SECRET', '')
+	require_signature_setting = bool(getattr(settings, 'CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', True))
+	allow_unsigned = bool(getattr(settings, 'CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', False))
+	require_signature = require_signature_setting or bool(webhook_secret) or not allow_unsigned
+
+	if require_signature and not signature:
+		logger.error(f"Webhook {event_id} missing signature header")
+		return Response({'error': 'Signature is required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+	if require_signature and not timestamp:
+		logger.error(f"Webhook {event_id} missing timestamp header")
+		return Response({'error': 'Webhook timestamp is required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+	max_skew_ms = int(getattr(settings, 'CASHFREE_WEBHOOK_MAX_SKEW_MS', 10 * 60 * 1000))
+	if require_signature:
+		try:
+			request_ts = int(timestamp)
+			now_ts = int(timezone.now().timestamp() * 1000)
+			if abs(now_ts - request_ts) > max_skew_ms:
+				logger.error(f"Webhook {event_id} timestamp outside allowed skew")
+				return Response({'error': 'Webhook timestamp expired'}, status=status.HTTP_401_UNAUTHORIZED)
+		except ValueError:
+			logger.error(f"Webhook {event_id} has invalid timestamp header")
+			return Response({'error': 'Invalid webhook timestamp'}, status=status.HTTP_400_BAD_REQUEST)
+
+	if require_signature:
+		if not verify_cashfree_signature(payload_str, signature, timestamp=timestamp or None):
+			logger.error(f"Webhook {event_id} signature verification failed")
+			return Response({'error': 'Signature verification failed'}, status=status.HTTP_401_UNAUTHORIZED)
+	else:
+		logger.warning(
+			"Accepting unsigned webhook event %s because CASHFREE_ALLOW_UNSIGNED_WEBHOOKS is enabled.",
+			event_id,
+		)
 	
 	# Check for duplicate (idempotency)
 	if WebhookEvent.objects.filter(event_id=event_id).exists():
@@ -620,7 +745,7 @@ def cashfree_webhook(request):
 			event_id=event_id,
 			event_type=event_type,
 			order_id=order_id,
-			payload=payload.get('data', {}),
+			payload=payload,
 		)
 		logger.info(f"Queued webhook {event_id} ({event_type}) for async processing")
 	except Exception as e:

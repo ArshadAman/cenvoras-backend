@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import requests
 from django.conf import settings
 from django.utils import timezone
-from django.views.decorators.http import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -198,12 +198,14 @@ def _calculate_plan_change_quote(subscription, target_plan, now):
 			}
 		return {
 			'payment_required': False,
-			'action': 'schedule_plan',
+			'action': 'unsupported_paid_schedule',
 			'apply_immediately': False,
 			'amount': Decimal('0.00'),
 			'source_plan_code': current_code,
-			'effective_at': active_until,
-			'summary': f"{target_plan.name} will start after current cycle ends.",
+			'summary': (
+				f"Paid plan changes to {target_plan.name} cannot be scheduled without payment. "
+				"Choose Free at expiry, then activate the target plan with payment."
+			),
 		}
 
 	if target_rank == 0:
@@ -308,21 +310,14 @@ def schedule_plan_change(request):
 	if not target_plan:
 		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-	subscription.cancel_at_period_end = False
-	subscription.pending_plan = target_plan
-	subscription.pending_plan_starts_at = active_until
-	subscription.save(update_fields=['cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'])
-
 	return Response({
-		'success': True,
+		'success': False,
+		'error': 'Only Free plan can be scheduled for next cycle without payment.',
 		'data': {
-			'action': 'schedule_plan',
-			'target_plan_code': target_plan.code,
-			'target_plan_name': target_plan.name,
-			'effective_at': active_until,
-			'message': f'{target_plan.name} will start after current cycle ends.',
+			'action': 'unsupported_paid_schedule',
+			'message': 'Activate Pro/Business with payment when current cycle ends.',
 		}
-	})
+	}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['POST'])

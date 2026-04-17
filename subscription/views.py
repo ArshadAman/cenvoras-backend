@@ -97,6 +97,18 @@ def _is_webhook_test_event(payload: dict, event_type: str, headers) -> bool:
 	return False
 
 
+def _ack_ignored(reason: str, event_id: str | None = None, details: str | None = None):
+	payload = {
+		'status': 'ignored',
+		'reason': reason,
+	}
+	if event_id:
+		payload['event_id'] = event_id
+	if details:
+		payload['details'] = details
+	return Response(payload, status=status.HTTP_200_OK)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def subscription_entitlements(request):
@@ -707,7 +719,7 @@ def cashfree_webhook(request):
 		payload = request.data or json.loads(payload_str)
 	except Exception as e:
 		logger.error(f"Error parsing webhook payload: {e}")
-		return Response({'error': 'Invalid payload'}, status=status.HTTP_400_BAD_REQUEST)
+		return _ack_ignored('invalid_payload')
 	
 	# Extract webhook details
 	event_type = _normalize_webhook_event_type(payload.get('event') or payload.get('type') or payload.get('event_type') or '')
@@ -723,10 +735,14 @@ def cashfree_webhook(request):
 		event_id = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
 
 	order_id = _extract_order_id(payload)
+	known_events = {'PAYMENT_SUCCESS', 'PAYMENT_FAILED', 'PAYMENT_PENDING'}
+	if event_type not in known_events:
+		logger.info(f"Ignoring unsupported webhook event type={event_type or 'UNKNOWN'} event_id={event_id}")
+		return _ack_ignored('unsupported_event', event_id=event_id, details=event_type or 'UNKNOWN')
 	
 	if not order_id:
 		logger.warning(f"Webhook {event_id} missing orderId")
-		return Response({'error': 'orderId is required'}, status=status.HTTP_400_BAD_REQUEST)
+		return _ack_ignored('missing_order_id', event_id=event_id)
 	
 	# Verify signature
 	signature = request.headers.get('x-webhook-signature', '') or request.headers.get('x-cashfree-signature', '')
@@ -738,11 +754,11 @@ def cashfree_webhook(request):
 
 	if require_signature and not signature:
 		logger.error(f"Webhook {event_id} missing signature header")
-		return Response({'error': 'Signature is required'}, status=status.HTTP_401_UNAUTHORIZED)
+		return _ack_ignored('missing_signature', event_id=event_id)
 
 	if require_signature and not timestamp:
 		logger.error(f"Webhook {event_id} missing timestamp header")
-		return Response({'error': 'Webhook timestamp is required'}, status=status.HTTP_401_UNAUTHORIZED)
+		return _ack_ignored('missing_timestamp', event_id=event_id)
 
 	max_skew_ms = int(getattr(settings, 'CASHFREE_WEBHOOK_MAX_SKEW_MS', 10 * 60 * 1000))
 	if require_signature:
@@ -751,15 +767,15 @@ def cashfree_webhook(request):
 			now_ts = int(timezone.now().timestamp() * 1000)
 			if abs(now_ts - request_ts) > max_skew_ms:
 				logger.error(f"Webhook {event_id} timestamp outside allowed skew")
-				return Response({'error': 'Webhook timestamp expired'}, status=status.HTTP_401_UNAUTHORIZED)
+				return _ack_ignored('timestamp_expired', event_id=event_id)
 		except ValueError:
 			logger.error(f"Webhook {event_id} has invalid timestamp header")
-			return Response({'error': 'Invalid webhook timestamp'}, status=status.HTTP_400_BAD_REQUEST)
+			return _ack_ignored('invalid_timestamp', event_id=event_id)
 
 	if require_signature:
 		if not verify_cashfree_signature(payload_str, signature, timestamp=timestamp or None):
 			logger.error(f"Webhook {event_id} signature verification failed")
-			return Response({'error': 'Signature verification failed'}, status=status.HTTP_401_UNAUTHORIZED)
+			return _ack_ignored('signature_verification_failed', event_id=event_id)
 	else:
 		logger.warning(
 			"Accepting unsigned webhook event %s because CASHFREE_ALLOW_UNSIGNED_WEBHOOKS is enabled.",

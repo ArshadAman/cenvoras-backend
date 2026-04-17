@@ -190,6 +190,10 @@ def _handle_payment_success(webhook_event, order_id: str, payload: dict):
         logger.warning(f"Payment order {order_id} not found in webhook")
         return {'status': 'error', 'reason': 'payment_not_found'}
 
+    if payment.status == SubscriptionPaymentStatus.SUCCESS:
+        logger.info("Skipping duplicate success webhook for already-processed order %s", order_id)
+        return {'status': 'skipped', 'reason': 'already_success'}
+
     billing_details = payment.billing_details or {}
     if billing_details.get('superseded'):
         now = timezone.now()

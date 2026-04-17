@@ -293,7 +293,8 @@ def update_profile(request):
         'dl_number': user.dl_number,
     }
     
-    serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method == 'PATCH'))
+    # Treat PUT as partial as well, since frontend sends only editable fields.
+    serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method in ['PATCH', 'PUT']))
     
     if serializer.is_valid():
         updated_user = serializer.save()
@@ -345,6 +346,7 @@ def update_profile(request):
     
     return Response({
         'success': False,
+        'message': 'Profile update validation failed',
         'errors': serializer.errors
     }, status=status.HTTP_400_BAD_REQUEST)
 

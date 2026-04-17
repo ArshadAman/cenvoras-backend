@@ -12,6 +12,7 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from integration.models import NotificationLog
 
 from .models import (
     SubscriptionPayment,
@@ -41,6 +42,86 @@ def _extract_failure_reason(payload: dict) -> str:
         or payment.get('payment_message')
         or 'Payment processing failed.'
     )
+
+
+def _expiry_notification_already_sent(user_id, marker: str) -> bool:
+    return NotificationLog.objects.filter(
+        user_id=user_id,
+        channel='email',
+        related_model='TenantSubscriptionExpiry',
+        related_id=marker,
+    ).exists()
+
+
+def _queue_professional_expiry_email(subscription: TenantSubscription, status_key: str) -> bool:
+    tenant = subscription.tenant
+    if not tenant.email:
+        return False
+    if getattr(tenant, 'is_lifetime_free', False):
+        return False
+
+    plan_code = (getattr(subscription.plan, 'code', '') or '').lower()
+    if plan_code in {'free', 'starter'}:
+        return False
+
+    period_end = subscription.current_period_end
+    if not period_end:
+        return False
+
+    period_end_key = timezone.localtime(period_end).strftime('%Y%m%d%H%M')
+    marker = f"{subscription.id}:{status_key}:{period_end_key}"
+    if _expiry_notification_already_sent(tenant.id, marker):
+        return False
+
+    recipient_name = tenant.first_name or tenant.business_name or tenant.username or 'Customer'
+    plan_name = getattr(subscription.plan, 'name', plan_code.title() or 'Current')
+    profile_url = 'https://cenvora.app/profile'
+    expires_at_text = timezone.localtime(period_end).strftime('%d %b %Y, %I:%M %p')
+
+    if status_key == 'expiring_24h':
+        subject = f"Action Needed: Your {plan_name} Plan Expires in 24 Hours | Cenvora"
+        body = f"""
+Hello {recipient_name},
+
+This is a reminder that your {plan_name} plan is scheduled to expire in approximately 24 hours.
+
+Expiry Time: {expires_at_text}
+
+To avoid any interruption, please renew or upgrade your plan before expiry.
+
+Manage your subscription here: {profile_url}
+
+Regards,
+Cenvora Billing Team
+support@cenvora.app
+"""
+    else:
+        subject = f"Your {plan_name} Plan Has Expired | Cenvora"
+        body = f"""
+Hello {recipient_name},
+
+Your {plan_name} plan has now expired.
+
+Expired At: {expires_at_text}
+
+You can renew or activate a paid plan anytime from your profile billing section.
+
+Manage your subscription here: {profile_url}
+
+Regards,
+Cenvora Billing Team
+support@cenvora.app
+"""
+
+    send_async_email_notification.delay(
+        user_id=tenant.id,
+        to_email=tenant.email,
+        subject=subject,
+        body=body,
+        related_model='TenantSubscriptionExpiry',
+        related_id=marker,
+    )
+    return True
 
 
 def _set_email_notified(payment: SubscriptionPayment, status_key: str) -> bool:
@@ -618,3 +699,42 @@ Cenvora Team
             logger.error(f"Error downgrading subscription {subscription.id}: {e}")
     
     return {'downgraded': downgraded}
+
+
+@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
+def notify_subscription_expiry_windows(self):
+    """
+    Send professional Cenvora emails for subscription expiry windows:
+    - 24 hours before expiry
+    - at/after expiry
+    Non-blocking via Celery and deduped through NotificationLog markers.
+    """
+    now = timezone.now()
+    reminder_sent = 0
+    expired_sent = 0
+
+    subscriptions = TenantSubscription.objects.select_related('tenant', 'plan').filter(
+        status=SubscriptionStatus.ACTIVE,
+        current_period_end__isnull=False,
+    )
+
+    for subscription in subscriptions:
+        period_end = subscription.current_period_end
+        if not period_end:
+            continue
+
+        # Send reminder when within the 24h window and not yet expired.
+        seconds_left = (period_end - now).total_seconds()
+        if 0 < seconds_left <= 24 * 60 * 60:
+            if _queue_professional_expiry_email(subscription, status_key='expiring_24h'):
+                reminder_sent += 1
+
+        # Send expired email once period has passed.
+        if now >= period_end:
+            if _queue_professional_expiry_email(subscription, status_key='expired_now'):
+                expired_sent += 1
+
+    return {
+        'expiring_24h_sent': reminder_sent,
+        'expired_now_sent': expired_sent,
+    }

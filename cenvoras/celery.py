@@ -43,4 +43,9 @@ app.conf.beat_schedule = {
         # Run daily within 2AM-3AM IST window.
         'schedule': crontab(minute=int(os.environ.get('BACKUP_SCHEDULE_MINUTE', '15')), hour=2),
     },
+    'subscription-expiry-notification-check': {
+        'task': 'subscription.tasks.notify_subscription_expiry_windows',
+        # Run every 15 minutes to catch 24h reminder and exact expiry windows reliably.
+        'schedule': crontab(minute='*/15'),
+    },
 }

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_webhook_event_type(raw_event_type: str) -> str:
-	event_type = (raw_event_type or '').upper().strip()
+	event_type = (raw_event_type or '').upper().strip().replace('-', '_').replace(' ', '_')
 	if event_type.endswith('_WEBHOOK'):
 		event_type = event_type.replace('_WEBHOOK', '')
 	if event_type in {'PAYMENT_SUCCEEDED', 'PAYMENT_SUCCESSFUL'}:
@@ -39,7 +39,30 @@ def _normalize_webhook_event_type(raw_event_type: str) -> str:
 		return 'PAYMENT_FAILED'
 	if event_type in {'PAYMENT_PENDING'}:
 		return 'PAYMENT_PENDING'
+	# New endpoint labels / variants commonly seen in provider dashboards.
+	if event_type in {'SUCCESS_PAYMENT', 'PAYMENT_SUCCESS'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'FAILED_PAYMENT', 'CHECKOUT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'ABANDONED_CHECKOUT', 'USER_DROPPED_PAYMENT'}:
+		return 'PAYMENT_PENDING'
 	return event_type
+
+
+def _extract_payment_status(payload: dict) -> str:
+	if not isinstance(payload, dict):
+		return ''
+
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+	status_value = (
+		payment.get('payment_status')
+		or data.get('payment_status')
+		or payload.get('payment_status')
+		or ''
+	)
+	return str(status_value).upper().strip().replace('-', '_').replace(' ', '_')
 
 
 def _extract_order_id(payload: dict) -> str | None:
@@ -723,6 +746,7 @@ def cashfree_webhook(request):
 	
 	# Extract webhook details
 	event_type = _normalize_webhook_event_type(payload.get('event') or payload.get('type') or payload.get('event_type') or '')
+	payment_status = _extract_payment_status(payload)
 	if _is_webhook_test_event(payload, event_type, request.headers):
 		logger.info("Received webhook endpoint test event. Returning 200 acknowledgment.")
 		return Response({'status': 'ok', 'message': 'webhook test acknowledged'}, status=status.HTTP_200_OK)
@@ -736,6 +760,22 @@ def cashfree_webhook(request):
 
 	order_id = _extract_order_id(payload)
 	known_events = {'PAYMENT_SUCCESS', 'PAYMENT_FAILED', 'PAYMENT_PENDING'}
+	if event_type in {'PAYMENT_VERIFICATION_UPDATE', 'PAYMENT_VERIFICATION'}:
+		if payment_status == 'SUCCESS':
+			event_type = 'PAYMENT_SUCCESS'
+		elif payment_status in {'FAILED', 'FAILURE'}:
+			event_type = 'PAYMENT_FAILED'
+		else:
+			event_type = 'PAYMENT_PENDING'
+
+	if event_type not in known_events and payment_status:
+		if payment_status == 'SUCCESS':
+			event_type = 'PAYMENT_SUCCESS'
+		elif payment_status in {'FAILED', 'FAILURE'}:
+			event_type = 'PAYMENT_FAILED'
+		elif payment_status in {'PENDING', 'NOT_ATTEMPTED', 'USER_DROPPED', 'CANCELLED'}:
+			event_type = 'PAYMENT_PENDING'
+
 	if event_type not in known_events:
 		logger.info(f"Ignoring unsupported webhook event type={event_type or 'UNKNOWN'} event_id={event_id}")
 		return _ack_ignored('unsupported_event', event_id=event_id, details=event_type or 'UNKNOWN')

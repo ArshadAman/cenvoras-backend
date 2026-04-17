@@ -24,7 +24,7 @@ from .models import (
 	WebhookEvent,
 )
 from .services import get_entitlements
-from .tasks import process_cashfree_webhook, verify_cashfree_signature
+from .tasks import process_cashfree_webhook, verify_cashfree_signature, send_payment_status_email
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +615,19 @@ def confirm_plan_payment(request):
 			payment.status = SubscriptionPaymentStatus.FAILED
 			payment.raw_response = {'attempts': payments_data}
 			payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+			send_payment_status_email.delay(
+				payment_id=payment.id,
+				status_key='failed',
+				reason='Payment attempt did not complete successfully.',
+			)
+		else:
+			payment.status = SubscriptionPaymentStatus.PENDING
+			payment.raw_response = {'attempts': payments_data}
+			payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+			send_payment_status_email.delay(
+				payment_id=payment.id,
+				status_key='pending',
+			)
 
 		return Response({
 			'success': False,
@@ -697,6 +710,12 @@ def confirm_plan_payment(request):
 		])
 		_sync_legacy_subscription_fields(tenant, payment.plan.code)
 
+	send_payment_status_email.delay(
+		payment_id=payment.id,
+		status_key='success',
+		action_summary=(payment_action or SubscriptionPaymentAction.ACTIVATE),
+	)
+
 	return Response({
 		'success': True,
 		'data': {
@@ -708,6 +727,40 @@ def confirm_plan_payment(request):
 			'queued_starts_at': queued_starts_at,
 			'subscription_status': subscription.status,
 			'current_period_end': subscription.current_period_end,
+		}
+	})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def latest_payment_status(request):
+	tenant = getattr(request.user, 'active_tenant', request.user)
+	payment = SubscriptionPayment.objects.filter(tenant=tenant).select_related('plan').order_by('-created_at').first()
+
+	if not payment:
+		return Response({'success': True, 'data': None})
+
+	raw = payment.raw_response or {}
+	failure_reason = ''
+	if isinstance(raw, dict):
+		failure_reason = (
+			raw.get('error_message')
+			or raw.get('reason')
+			or (raw.get('webhook_payload', {}) if isinstance(raw.get('webhook_payload', {}), dict) else {}).get('error_message')
+			or ''
+		)
+
+	return Response({
+		'success': True,
+		'data': {
+			'order_id': payment.order_id,
+			'plan_name': payment.plan.name,
+			'amount': str(payment.amount),
+			'status': payment.status,
+			'action': payment.action,
+			'failure_reason': failure_reason,
+			'created_at': payment.created_at,
+			'paid_at': payment.paid_at,
 		}
 	})
 

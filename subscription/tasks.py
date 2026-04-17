@@ -27,6 +27,51 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
+def _extract_failure_reason(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return 'Payment processing failed.'
+
+    data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+    payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+    return (
+        payload.get('error_message')
+        or data.get('error_message')
+        or payment.get('error_message')
+        or payment.get('payment_message')
+        or 'Payment processing failed.'
+    )
+
+
+def _set_email_notified(payment: SubscriptionPayment, status_key: str) -> bool:
+    """Return True when this status email can be sent now (first time), else False."""
+    details = payment.billing_details or {}
+    sent = details.get('status_email_sent', [])
+    if not isinstance(sent, list):
+        sent = []
+
+    if status_key in sent:
+        return False
+
+    sent.append(status_key)
+    details['status_email_sent'] = sent
+    payment.billing_details = details
+    payment.save(update_fields=['billing_details', 'updated_at'])
+    return True
+
+
+def _queue_status_email_once(payment: SubscriptionPayment, status_key: str, action_summary: str = '', reason: str = '') -> None:
+    if not payment.tenant.email:
+        return
+
+    send_payment_status_email.delay(
+        payment_id=payment.id,
+        status_key=status_key,
+        action_summary=action_summary,
+        reason=reason,
+    )
+
+
 def _cashfree_base_url():
     env = (getattr(settings, 'CASHFREE_ENV', 'sandbox') or 'sandbox').lower()
     return 'https://api.cashfree.com/pg' if env == 'production' else 'https://sandbox.cashfree.com/pg'
@@ -311,14 +356,8 @@ Cenvora Team
         _sync_legacy_subscription_fields(tenant, payment.plan.code)
         action_summary = f"Activated {payment.plan.name} plan"
     
-    # Send confirmation email asynchronously
-    send_payment_confirmation_email.delay(
-        user_id=tenant.id,
-        plan_name=payment.plan.name,
-        amount=str(payment.amount),
-        action=action_summary,
-        order_id=order_id,
-    )
+    # Send one-time success status email.
+    _queue_status_email_once(payment, status_key='success', action_summary=action_summary)
     
     return {
         'status': 'success',
@@ -339,12 +378,11 @@ def _handle_payment_failed(webhook_event, order_id: str, payload: dict):
     payment.status = SubscriptionPaymentStatus.FAILED
     payment.raw_response = payload
     payment.save(update_fields=['status', 'raw_response', 'updated_at'])
-    
-    # Send failure email
-    send_payment_failure_email.delay(
-        user_id=payment.tenant.id,
-        order_id=order_id,
-        reason=payload.get('error_message', 'Payment processing failed'),
+
+    _queue_status_email_once(
+        payment,
+        status_key='failed',
+        reason=_extract_failure_reason(payload),
     )
     
     return {
@@ -364,94 +402,110 @@ def _handle_payment_pending(webhook_event, order_id: str, payload: dict):
     payment.status = SubscriptionPaymentStatus.PENDING
     payment.raw_response = payload
     payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+
+    _queue_status_email_once(payment, status_key='pending')
     
     return {'status': 'pending', 'order_id': order_id}
 
 
 @shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
-def send_payment_confirmation_email(self, user_id: int, plan_name: str, amount: str, action: str, order_id: str):
+def send_payment_status_email(self, payment_id: int, status_key: str, action_summary: str = '', reason: str = ''):
     """
-    Send payment confirmation email from Cenvora.
+    Send a professional Cenvora email for payment status transitions.
+    status_key: pending | success | failed
     """
     try:
-        user = User.objects.get(id=user_id)
-    except User.DoesNotExist:
-        logger.error(f"User {user_id} not found for payment confirmation email")
-        return {'status': 'failed', 'reason': 'user_not_found'}
-    
-    subject = "Payment Confirmation - Cenvora"
-    body = f"""
-Hello {user.first_name or user.username},
+        payment = SubscriptionPayment.objects.select_related('tenant', 'plan').get(id=payment_id)
+    except SubscriptionPayment.DoesNotExist:
+        logger.error(f"Payment {payment_id} not found for status email")
+        return {'status': 'failed', 'reason': 'payment_not_found'}
 
-Thank you for your payment! Your subscription has been successfully processed.
+    user = payment.tenant
+    if not user.email:
+        return {'status': 'skipped', 'reason': 'missing_email'}
 
+    if not _set_email_notified(payment, status_key):
+        return {'status': 'skipped', 'reason': 'already_notified'}
+
+    recipient_name = user.first_name or user.business_name or user.username or 'Customer'
+    order_id = payment.order_id
+    plan_name = payment.plan.name
+    amount = str(payment.amount)
+    profile_url = 'https://cenvora.app/profile'
+
+    if status_key == 'pending':
+        subject = 'Payment Received and Pending Confirmation - Cenvora'
+        body = f"""
+Hello {recipient_name},
+
+We received your payment attempt for the {plan_name} plan, and it is currently pending confirmation from the payment network.
+
+Order ID: {order_id}
+Amount: INR {amount}
+Status: Pending Verification
+
+No action is required from your side right now. We will automatically notify you once the payment is confirmed as successful or failed.
+
+You can also check your latest status here: {profile_url}
+
+Regards,
+Cenvora Billing Team
+support@cenvora.app
+"""
+    elif status_key == 'success':
+        subject = 'Payment Successful - Cenvora'
+        body = f"""
+Hello {recipient_name},
+
+Your payment has been successfully confirmed and your subscription has been updated.
+
+Order ID: {order_id}
 Plan: {plan_name}
-Amount: ₹{amount}
-Action: {action}
-Order ID: {order_id}
+Amount: INR {amount}
+Status: Successful
+Update Applied: {action_summary or 'Subscription updated'}
 
-Your plan is now active and you have full access to all features.
+Thank you for continuing with Cenvora.
 
-If you have any questions, please contact our support team.
+You can review your subscription details here: {profile_url}
 
-Best regards,
-Cenvora Team
+Regards,
+Cenvora Billing Team
 support@cenvora.app
 """
-    
+    else:
+        subject = 'Payment Failed - Cenvora'
+        body = f"""
+Hello {recipient_name},
+
+We could not complete your recent payment.
+
+Order ID: {order_id}
+Plan: {plan_name}
+Amount: INR {amount}
+Status: Failed
+Reason: {reason or 'The payment attempt was not authorized/confirmed.'}
+
+Please retry from your profile billing section. If the amount was debited, it is usually auto-reversed by your bank/payment provider as per their timeline.
+
+Retry here: {profile_url}
+
+Regards,
+Cenvora Billing Team
+support@cenvora.app
+"""
+
     send_async_email_notification.delay(
-        user_id=user_id,
+        user_id=user.id,
         to_email=user.email,
         subject=subject,
         body=body,
         related_model='SubscriptionPayment',
         related_id=order_id,
     )
-    
-    logger.info(f"Queued confirmation email for user {user_id} (order {order_id})")
-    return {'status': 'queued', 'user_id': user_id}
 
-
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
-def send_payment_failure_email(self, user_id: int, order_id: str, reason: str):
-    """
-    Send payment failure notification email from Cenvora.
-    """
-    try:
-        user = User.objects.get(id=user_id)
-    except User.DoesNotExist:
-        logger.error(f"User {user_id} not found for payment failure email")
-        return {'status': 'failed', 'reason': 'user_not_found'}
-    
-    subject = "Payment Failed - Cenvora"
-    body = f"""
-Hello {user.first_name or user.username},
-
-Unfortunately, your payment could not be processed.
-
-Order ID: {order_id}
-Reason: {reason}
-
-Please try again or contact our support team for assistance.
-
-To retry your payment, visit: https://cenvora.app/profile
-
-Best regards,
-Cenvora Team
-support@cenvora.app
-"""
-    
-    send_async_email_notification.delay(
-        user_id=user_id,
-        to_email=user.email,
-        subject=subject,
-        body=body,
-        related_model='SubscriptionPayment',
-        related_id=order_id,
-    )
-    
-    logger.info(f"Queued failure email for user {user_id} (order {order_id})")
-    return {'status': 'queued', 'user_id': user_id}
+    logger.info("Queued %s payment status email for order %s", status_key, order_id)
+    return {'status': 'queued', 'payment_id': payment_id, 'status_key': status_key}
 
 
 @shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)

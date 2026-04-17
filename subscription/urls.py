@@ -6,6 +6,7 @@ from .views import (
     schedule_plan_change,
     create_plan_payment_order,
     confirm_plan_payment,
+    latest_payment_status,
     cashfree_webhook,
 )
 
@@ -16,5 +17,6 @@ urlpatterns = [
     path('plan-change/schedule/', schedule_plan_change, name='schedule_plan_change'),
     path('payments/create-order/', create_plan_payment_order, name='create_plan_payment_order'),
     path('payments/confirm/', confirm_plan_payment, name='confirm_plan_payment'),
+    path('payments/latest-status/', latest_payment_status, name='latest_payment_status'),
     path('webhooks/cashfree/', cashfree_webhook, name='cashfree_webhook'),
 ]

@@ -79,6 +79,13 @@ def get_active_tenant_subscription(user: User):
 
     now = timezone.now()
 
+    # New billing rule: only Free can be scheduled without payment.
+    # Clean up any legacy paid pending plans created by older logic.
+    if subscription.pending_plan and normalize_plan_code(getattr(subscription.pending_plan, 'code', 'free')) != 'free':
+        subscription.pending_plan = None
+        subscription.pending_plan_starts_at = None
+        subscription.save(update_fields=['pending_plan', 'pending_plan_starts_at', 'updated_at'])
+
     # Prepaid behavior: if a next plan was purchased earlier, activate it automatically
     # when its start time arrives.
     if subscription.pending_plan and subscription.pending_plan_starts_at and now >= subscription.pending_plan_starts_at:

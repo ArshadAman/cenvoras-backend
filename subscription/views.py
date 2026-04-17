@@ -64,6 +64,39 @@ def _extract_order_id(payload: dict) -> str | None:
 	return str(order_id).strip() if order_id else None
 
 
+def _is_webhook_test_event(payload: dict, event_type: str, headers) -> bool:
+	if not isinstance(payload, dict):
+		return False
+
+	candidates = {
+		(event_type or '').upper(),
+		str(payload.get('event', '')).upper(),
+		str(payload.get('type', '')).upper(),
+		str(payload.get('event_type', '')).upper(),
+	}
+
+	known_test_events = {
+		'TEST',
+		'PING',
+		'WEBHOOK_TEST',
+		'ENDPOINT_TEST',
+		'WEBHOOK_PING',
+	}
+	if candidates.intersection(known_test_events):
+		return True
+
+	if payload.get('is_test') is True or payload.get('test') is True:
+		return True
+
+	if str(headers.get('x-webhook-event', '')).upper() in known_test_events:
+		return True
+
+	if str(headers.get('x-webhook-test', '')).strip().lower() == 'true':
+		return True
+
+	return False
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def subscription_entitlements(request):
@@ -678,6 +711,10 @@ def cashfree_webhook(request):
 	
 	# Extract webhook details
 	event_type = _normalize_webhook_event_type(payload.get('event') or payload.get('type') or payload.get('event_type') or '')
+	if _is_webhook_test_event(payload, event_type, request.headers):
+		logger.info("Received webhook endpoint test event. Returning 200 acknowledgment.")
+		return Response({'status': 'ok', 'message': 'webhook test acknowledged'}, status=status.HTTP_200_OK)
+
 	header_idempotency_key = str(request.headers.get('x-idempotency-key', '')).strip()
 	payload_event_id = payload.get('eventId') or payload.get('event_id')
 	event_id = header_idempotency_key or (str(payload_event_id).strip() if payload_event_id else '')

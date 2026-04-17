@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from datetime import timedelta
 
 from django.db.models import Count
 from django.utils import timezone
@@ -53,8 +54,63 @@ def get_tenant_subscription(user: User):
     return getattr(tenant, 'subscription', None)
 
 
-def get_tenant_plan(user: User):
+def _is_legacy_trial_active(tenant: User) -> bool:
+    status = (getattr(tenant, 'subscription_status', '') or '').lower()
+    if status != 'trial':
+        return False
+    trial_ends_at = getattr(tenant, 'trial_ends_at', None)
+    if not trial_ends_at:
+        return True
+    return timezone.now() < trial_ends_at
+
+
+def _sync_legacy_status_on_expiry(tenant: User) -> None:
+    current_status = (getattr(tenant, 'subscription_status', '') or '').lower()
+    if current_status in {'active', 'trial'}:
+        tenant.subscription_status = 'expired'
+        tenant.subscription_tier = 'FREE'
+        tenant.save(update_fields=['subscription_status', 'subscription_tier'])
+
+
+def get_active_tenant_subscription(user: User):
     subscription = get_tenant_subscription(user)
+    if not subscription:
+        return None
+
+    now = timezone.now()
+
+    # Prepaid behavior: if a next plan was purchased earlier, activate it automatically
+    # when its start time arrives.
+    if subscription.pending_plan and subscription.pending_plan_starts_at and now >= subscription.pending_plan_starts_at:
+        start_time = subscription.pending_plan_starts_at
+        subscription.plan = subscription.pending_plan
+        subscription.status = 'active'
+        subscription.current_period_start = start_time
+        subscription.current_period_end = start_time + timedelta(days=30)
+        subscription.pending_plan = None
+        subscription.pending_plan_starts_at = None
+        subscription.save(update_fields=[
+            'plan',
+            'status',
+            'current_period_start',
+            'current_period_end',
+            'pending_plan',
+            'pending_plan_starts_at',
+            'updated_at',
+        ])
+
+    if not subscription.is_valid:
+        if subscription.status in {'active', 'trial'}:
+            subscription.status = 'past_due'
+            subscription.save(update_fields=['status', 'updated_at'])
+        _sync_legacy_status_on_expiry(get_tenant(user))
+        return None
+
+    return subscription
+
+
+def get_tenant_plan(user: User):
+    subscription = get_active_tenant_subscription(user)
     if subscription and subscription.plan:
         return subscription.plan
     return None
@@ -67,7 +123,13 @@ def get_effective_plan_code(user: User) -> str:
     plan = get_tenant_plan(user)
     if plan:
         return normalize_plan_code(plan.code)
+
     tenant = get_tenant(user)
+    if not _is_legacy_trial_active(tenant):
+        tenant_status = (getattr(tenant, 'subscription_status', '') or '').lower()
+        if tenant_status != 'active':
+            return 'free'
+
     return normalize_plan_code(getattr(tenant, 'subscription_tier', 'FREE'))
 
 
@@ -135,7 +197,8 @@ def can_use_feature(user: User, feature_code: str) -> bool:
 
 
 def get_entitlements(user: User) -> dict[str, Any]:
-    plan = get_tenant_plan(user)
+    subscription = get_active_tenant_subscription(user)
+    plan = subscription.plan if subscription else None
     plan_code = get_effective_plan_code(user)
     tenant = get_tenant(user)
     vip = is_vip_user(user)
@@ -159,7 +222,11 @@ def get_entitlements(user: User) -> dict[str, Any]:
         'plan': {
             'code': plan_code,
             'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),
-            'status': getattr(get_tenant_subscription(user), 'status', None),
+            'status': getattr(subscription, 'status', 'expired' if plan_code == 'free' else None),
+            'current_period_end': getattr(subscription, 'current_period_end', None),
+            'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+            'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
+            'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
         },
         'limits': limits,
         'usage': usage,

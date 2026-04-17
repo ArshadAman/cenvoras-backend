@@ -60,6 +60,12 @@ class SubscriptionStatus(models.TextChoices):
     PAST_DUE = 'past_due', 'Past Due'
     CANCELLED = 'cancelled', 'Cancelled'
 
+
+class SubscriptionPaymentStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    SUCCESS = 'success', 'Success'
+    FAILED = 'failed', 'Failed'
+
 class TenantSubscription(models.Model):
     """
     Binds a User (Tenant) to a specific Plan and tracks its validity window.
@@ -76,6 +82,8 @@ class TenantSubscription(models.Model):
     current_period_start = models.DateTimeField(default=timezone.now)
     current_period_end = models.DateTimeField(null=True, blank=True)
     cancel_at_period_end = models.BooleanField(default=False)
+    pending_plan = models.ForeignKey('Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions')
+    pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
     
     stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
     stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)
@@ -97,3 +105,29 @@ class TenantSubscription(models.Model):
     @property
     def effective_plan_code(self):
         return self.plan.code if self.plan else 'free'
+
+
+class SubscriptionPayment(models.Model):
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscription_payments')
+    plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='subscription_payments')
+
+    provider = models.CharField(max_length=30, default='cashfree')
+    order_id = models.CharField(max_length=64, unique=True)
+    cf_order_id = models.CharField(max_length=64, blank=True, null=True)
+    payment_session_id = models.TextField(blank=True, null=True)
+    cf_payment_id = models.CharField(max_length=64, blank=True, null=True)
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=10, default='INR')
+    status = models.CharField(max_length=20, choices=SubscriptionPaymentStatus.choices, default=SubscriptionPaymentStatus.PENDING)
+
+    raw_response = models.JSONField(default=dict, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.tenant} - {self.plan.code} - {self.order_id} ({self.status})"

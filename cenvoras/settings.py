@@ -247,6 +247,13 @@ WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 # Gemini AI (load from environment variables)
 GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
 
+# Cashfree Payments
+CASHFREE_CLIENT_ID = os.environ.get('CASHFREE_CLIENT_ID', '')
+CASHFREE_CLIENT_SECRET = os.environ.get('CASHFREE_CLIENT_SECRET', '')
+CASHFREE_ENV = os.environ.get('CASHFREE_ENV', 'sandbox')  # sandbox | production
+CASHFREE_API_VERSION = os.environ.get('CASHFREE_API_VERSION', '2023-08-01')
+CASHFREE_RETURN_URL = os.environ.get('CASHFREE_RETURN_URL', 'https://cenvora.app/profile')
+
 # =============================================================================
 # BACKUP & STORAGE SETTINGS (Cloudinary)
 # =============================================================================

@@ -253,6 +253,8 @@ CASHFREE_CLIENT_SECRET = os.environ.get('CASHFREE_CLIENT_SECRET', '')
 CASHFREE_ENV = os.environ.get('CASHFREE_ENV', 'sandbox')  # sandbox | production
 CASHFREE_API_VERSION = os.environ.get('CASHFREE_API_VERSION', '2023-08-01')
 CASHFREE_RETURN_URL = os.environ.get('CASHFREE_RETURN_URL', 'https://cenvora.app/profile')
+CASHFREE_WEBHOOK_URL = os.environ.get('CASHFREE_WEBHOOK_URL', 'https://api.cenvora.app/subscription/webhooks/cashfree/')
+CASHFREE_WEBHOOK_SECRET = os.environ.get('CASHFREE_WEBHOOK_SECRET', '')  # Set in production
 
 # =============================================================================
 # BACKUP & STORAGE SETTINGS (Cloudinary)

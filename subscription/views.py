@@ -1,10 +1,13 @@
 import uuid
+import json
+import logging
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 import requests
 from django.conf import settings
 from django.utils import timezone
+from django.views.decorators.http import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -17,8 +20,12 @@ from .models import (
 	SubscriptionPayment,
 	SubscriptionPaymentStatus,
 	SubscriptionPaymentAction,
+	WebhookEvent,
 )
 from .services import get_entitlements
+from .tasks import process_cashfree_webhook, verify_cashfree_signature
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(['GET'])
@@ -551,3 +558,74 @@ def confirm_plan_payment(request):
 			'current_period_end': subscription.current_period_end,
 		}
 	})
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([])
+def cashfree_webhook(request):
+	"""
+	Webhook endpoint for Cashfree payment gateway.
+	Receives and verifies payment events, then queues async processing.
+	
+	Expected headers:
+	- x-cashfree-signature: HMAC-SHA256 signature of payload
+	
+	Expected payload:
+	{
+		"event": "PAYMENT_SUCCESS",
+		"eventId": "unique_event_id_from_cashfree",
+		"data": {
+			"orderId": "order_id_in_cenvora",
+			"paymentId": "cashfree_payment_id",
+			...
+		}
+	}
+	"""
+	try:
+		# Get raw payload for signature verification
+		payload_str = request.body.decode('utf-8')
+		payload = request.data or json.loads(payload_str)
+	except Exception as e:
+		logger.error(f"Error parsing webhook payload: {e}")
+		return Response({'error': 'Invalid payload'}, status=status.HTTP_400_BAD_REQUEST)
+	
+	# Extract webhook details
+	event_type = payload.get('event', '').upper()
+	event_id = payload.get('eventId')
+	order_id = payload.get('data', {}).get('orderId')
+	
+	if not event_id:
+		logger.warning("Webhook missing eventId")
+		return Response({'error': 'eventId is required'}, status=status.HTTP_400_BAD_REQUEST)
+	
+	if not order_id:
+		logger.warning(f"Webhook {event_id} missing orderId")
+		return Response({'error': 'orderId is required'}, status=status.HTTP_400_BAD_REQUEST)
+	
+	# Verify signature
+	signature = request.headers.get('x-cashfree-signature', '')
+	if not verify_cashfree_signature(payload_str, signature):
+		logger.error(f"Webhook {event_id} signature verification failed")
+		return Response({'error': 'Signature verification failed'}, status=status.HTTP_401_UNAUTHORIZED)
+	
+	# Check for duplicate (idempotency)
+	if WebhookEvent.objects.filter(event_id=event_id).exists():
+		logger.info(f"Webhook {event_id} already exists, returning 200 OK")
+		return Response({'status': 'received'}, status=status.HTTP_200_OK)
+	
+	# Queue async processing with Celery
+	try:
+		process_cashfree_webhook.delay(
+			event_id=event_id,
+			event_type=event_type,
+			order_id=order_id,
+			payload=payload.get('data', {}),
+		)
+		logger.info(f"Queued webhook {event_id} ({event_type}) for async processing")
+	except Exception as e:
+		logger.error(f"Error queuing webhook {event_id}: {e}")
+		# Still return 200 OK to Cashfree so it doesn't retry infinitely
+		# The event is recorded in WebhookEvent for manual review
+	
+	return Response({'status': 'received'}, status=status.HTTP_200_OK)

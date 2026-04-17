@@ -140,3 +140,32 @@ class SubscriptionPayment(models.Model):
 
     def __str__(self):
         return f"{self.tenant} - {self.plan.code} - {self.order_id} ({self.status})"
+
+
+class WebhookEvent(models.Model):
+    """
+    Tracks incoming webhooks from Cashfree to ensure idempotent processing.
+    Prevents duplicate subscription updates if a webhook is received multiple times.
+    """
+    event_id = models.CharField(max_length=200, unique=True, help_text="Unique event ID from Cashfree webhook")
+    provider = models.CharField(max_length=30, default='cashfree')
+    event_type = models.CharField(max_length=100, help_text="e.g., PAYMENT_SUCCESS, PAYMENT_FAILED")
+    order_id = models.CharField(max_length=64, blank=True, null=True)
+    payload = models.JSONField(default=dict, blank=True)
+    
+    processed = models.BooleanField(default=False, help_text="Whether this event has been processed")
+    error_message = models.TextField(blank=True, null=True, help_text="Error during processing, if any")
+    
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-received_at']
+        indexes = [
+            models.Index(fields=['event_id']),
+            models.Index(fields=['order_id']),
+            models.Index(fields=['processed']),
+        ]
+    
+    def __str__(self):
+        return f"{self.event_type} - {self.event_id} ({self.provider})"

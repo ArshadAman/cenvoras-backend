@@ -221,6 +221,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
 
     return {
         'tenant_id': str(tenant.id),
+        'is_vip': vip,
         'plan': {
             'code': plan_code,
             'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),

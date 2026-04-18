@@ -290,6 +290,11 @@ def process_cashfree_webhook(self, event_id: str, event_type: str, order_id: str
         else:
             logger.warning(f"Unknown event type: {event_type}")
             result = {'status': 'ignored', 'reason': 'unknown_event_type'}
+
+        # Cashfree can briefly report success webhook before payments API reflects SUCCESS.
+        # Retry this event instead of permanently marking it processed.
+        if isinstance(result, dict) and result.get('reason') == 'unverified_success':
+            raise RuntimeError(f"Deferred webhook verification for order {order_id}; retrying")
         
         webhook_event.processed = True
         webhook_event.processed_at = timezone.now()
@@ -356,13 +361,28 @@ Cenvora Team
     
     verified_success_attempt = _fetch_success_payment_attempt(order_id)
     if not verified_success_attempt:
-        logger.warning("Webhook marked success but Cashfree verification found no SUCCESS payment for order %s", order_id)
-        payment.raw_response = {
-            'webhook_payload': payload,
-            'verification': 'no_success_attempt',
-        }
-        payment.save(update_fields=['raw_response', 'updated_at'])
-        return {'status': 'ignored', 'reason': 'unverified_success'}
+        # Fallback trust path for signed PAYMENT_SUCCESS events when API is eventually consistent.
+        payment_id_hint = payload.get('payment_id') or payload.get('cf_payment_id')
+        payment_status_hint = str(payload.get('payment_status') or payload.get('status') or '').upper()
+        if payment_id_hint or payment_status_hint == 'SUCCESS':
+            verified_success_attempt = {
+                'cf_payment_id': payload.get('cf_payment_id') or payment_id_hint,
+                'payment_id': payload.get('payment_id') or payment_id_hint,
+                'payment_status': 'SUCCESS',
+                'verification_mode': 'webhook_fallback',
+            }
+            logger.warning(
+                "Cashfree verification API not yet consistent for order %s; using signed webhook fallback.",
+                order_id,
+            )
+        else:
+            logger.warning("Webhook marked success but Cashfree verification found no SUCCESS payment for order %s", order_id)
+            payment.raw_response = {
+                'webhook_payload': payload,
+                'verification': 'no_success_attempt',
+            }
+            payment.save(update_fields=['raw_response', 'updated_at'])
+            return {'status': 'ignored', 'reason': 'unverified_success'}
 
     tenant = payment.tenant
     subscription, _created = TenantSubscription.objects.get_or_create(
@@ -455,6 +475,11 @@ def _handle_payment_failed(webhook_event, order_id: str, payload: dict):
     except SubscriptionPayment.DoesNotExist:
         logger.warning(f"Payment order {order_id} not found in webhook")
         return {'status': 'error', 'reason': 'payment_not_found'}
+
+    # Out-of-order webhook delivery must not downgrade an already successful payment.
+    if payment.status == SubscriptionPaymentStatus.SUCCESS:
+        logger.info("Ignoring PAYMENT_FAILED for already successful order %s", order_id)
+        return {'status': 'skipped', 'reason': 'already_success'}
     
     payment.status = SubscriptionPaymentStatus.FAILED
     payment.raw_response = payload
@@ -479,6 +504,23 @@ def _handle_payment_pending(webhook_event, order_id: str, payload: dict):
         payment = SubscriptionPayment.objects.get(order_id=order_id)
     except SubscriptionPayment.DoesNotExist:
         return {'status': 'error', 'reason': 'payment_not_found'}
+
+    # Out-of-order webhook delivery must not downgrade an already successful payment.
+    if payment.status == SubscriptionPaymentStatus.SUCCESS:
+        logger.info("Ignoring PAYMENT_PENDING for already successful order %s", order_id)
+        return {'status': 'skipped', 'reason': 'already_success'}
+
+    # Reconcile against Cashfree before marking pending. This catches delayed success webhooks.
+    verified_success_attempt = _fetch_success_payment_attempt(order_id)
+    if verified_success_attempt:
+        logger.info("Pending webhook reconciled to SUCCESS for order %s", order_id)
+        success_payload = {
+            'payment_id': verified_success_attempt.get('payment_id'),
+            'cf_payment_id': verified_success_attempt.get('cf_payment_id'),
+            'payment_status': 'SUCCESS',
+            'source': 'pending_reconciliation',
+        }
+        return _handle_payment_success(webhook_event, order_id, success_payload)
     
     payment.status = SubscriptionPaymentStatus.PENDING
     payment.raw_response = payload

@@ -48,4 +48,9 @@ app.conf.beat_schedule = {
         # Run every 15 minutes to catch 24h reminder and exact expiry windows reliably.
         'schedule': crontab(minute='*/15'),
     },
+    'subscription-payment-pending-reconciliation': {
+        'task': 'subscription.tasks.reconcile_pending_subscription_payments',
+        # Run every 5 minutes to heal missed/delayed success webhooks.
+        'schedule': crontab(minute='*/5'),
+    },
 }

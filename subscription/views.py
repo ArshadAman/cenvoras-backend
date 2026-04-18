@@ -662,7 +662,8 @@ def confirm_plan_payment(request):
 	queued_starts_at = None
 
 	active_until = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else None
-	payment_action = payment.action or SubscriptionPaymentAction.ACTIVATE
+	raw_payment_action = payment.action
+	payment_action = raw_payment_action or SubscriptionPaymentAction.ACTIVATE
 
 	if payment_action == SubscriptionPaymentAction.UPGRADE_NOW and active_until:
 		# Instant upgrade: switch plan now, keep current cycle end.
@@ -685,8 +686,8 @@ def confirm_plan_payment(request):
 			'current_period_end', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
 		])
 		_sync_legacy_subscription_fields(tenant, subscription.plan.code)
-	elif active_until and subscription.plan_id != payment.plan_id:
-		# Backward-compatible fallback: queue when a different-plan payment appears without explicit action.
+	elif raw_payment_action is None and active_until and subscription.plan_id != payment.plan_id:
+		# Backward-compatible fallback only for legacy rows without explicit action.
 		subscription.pending_plan = payment.plan
 		subscription.pending_plan_starts_at = active_until
 		subscription.status = SubscriptionStatus.ACTIVE
@@ -838,8 +839,18 @@ def cashfree_webhook(request):
 		return _ack_ignored('missing_order_id', event_id=event_id)
 	
 	# Verify signature
-	signature = request.headers.get('x-webhook-signature', '') or request.headers.get('x-cashfree-signature', '')
-	timestamp = str(request.headers.get('x-webhook-timestamp', '')).strip()
+	signature = (
+		request.headers.get('x-webhook-signature', '')
+		or request.headers.get('x-cashfree-signature', '')
+		or request.headers.get('x-cf-signature', '')
+		or request.headers.get('x-signature', '')
+	)
+	timestamp = str(
+		request.headers.get('x-webhook-timestamp', '')
+		or request.headers.get('x-cashfree-timestamp', '')
+		or request.headers.get('x-cf-timestamp', '')
+		or request.headers.get('x-timestamp', '')
+	).strip()
 	webhook_secret = getattr(settings, 'CASHFREE_WEBHOOK_SECRET', '')
 	require_signature_setting = bool(getattr(settings, 'CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', True))
 	allow_unsigned = bool(getattr(settings, 'CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', False))
@@ -849,12 +860,8 @@ def cashfree_webhook(request):
 		logger.error(f"Webhook {event_id} missing signature header")
 		return _ack_ignored('missing_signature', event_id=event_id)
 
-	if require_signature and not timestamp:
-		logger.error(f"Webhook {event_id} missing timestamp header")
-		return _ack_ignored('missing_timestamp', event_id=event_id)
-
 	max_skew_ms = int(getattr(settings, 'CASHFREE_WEBHOOK_MAX_SKEW_MS', 10 * 60 * 1000))
-	if require_signature:
+	if require_signature and timestamp:
 		try:
 			request_ts = int(timestamp)
 			now_ts = int(timezone.now().timestamp() * 1000)

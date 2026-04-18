@@ -9,6 +9,7 @@ import hmac
 from datetime import timedelta
 import requests
 from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -197,6 +198,31 @@ def _fetch_success_payment_attempt(order_id: str):
             return attempt
 
     return None
+
+
+def _fetch_payment_attempts(order_id: str):
+    if not settings.CASHFREE_CLIENT_ID or not settings.CASHFREE_CLIENT_SECRET:
+        logger.error("Cashfree credentials are missing; cannot fetch payment attempts.")
+        return []
+
+    response = requests.get(
+        f"{_cashfree_base_url()}/orders/{order_id}/payments",
+        headers=_cashfree_headers(),
+        timeout=20,
+    )
+
+    if response.status_code >= 400:
+        logger.error("Cashfree payments API failed for order %s with status %s", order_id, response.status_code)
+        return []
+
+    try:
+        data = response.json()
+    except Exception:
+        logger.error("Cashfree payments API returned non-JSON response for order %s", order_id)
+        return []
+
+    attempts = data.get('data', []) if isinstance(data, dict) else data
+    return attempts if isinstance(attempts, list) else []
 
 
 def _sync_legacy_subscription_fields(tenant, plan_code):
@@ -524,11 +550,93 @@ def _handle_payment_pending(webhook_event, order_id: str, payload: dict):
     
     payment.status = SubscriptionPaymentStatus.PENDING
     payment.raw_response = payload
-    payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+    details = payment.billing_details or {}
+
+    enqueue_followup = not details.get('pending_followup_enqueued')
+    if enqueue_followup:
+        details['pending_followup_enqueued'] = True
+        details['pending_followup_enqueued_at'] = timezone.now().isoformat()
+        payment.billing_details = details
+        payment.save(update_fields=['status', 'raw_response', 'billing_details', 'updated_at'])
+    else:
+        payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+
+    if enqueue_followup:
+        verify_pending_payment_from_webhook.delay(order_id=order_id)
 
     _queue_status_email_once(payment, status_key='pending')
     
     return {'status': 'pending', 'order_id': order_id}
+
+
+@shared_task(bind=True, max_retries=20)
+def verify_pending_payment_from_webhook(self, order_id: str):
+    """
+    Webhook-native pending follow-up: once PENDING arrives, keep checking Cashfree
+    for this order until terminal SUCCESS/FAILED, without user interaction.
+    """
+    try:
+        payment = SubscriptionPayment.objects.select_related('tenant', 'plan').get(order_id=order_id)
+    except SubscriptionPayment.DoesNotExist:
+        return {'status': 'skipped', 'reason': 'payment_not_found', 'order_id': order_id}
+
+    if payment.status in {SubscriptionPaymentStatus.SUCCESS, SubscriptionPaymentStatus.FAILED}:
+        return {'status': 'skipped', 'reason': 'already_terminal', 'order_id': order_id}
+
+    attempts = _fetch_payment_attempts(order_id)
+    if not attempts:
+        try:
+            raise self.retry(countdown=45)
+        except MaxRetriesExceededError:
+            logger.warning("Pending webhook follow-up exhausted retries for order %s (no attempts)", order_id)
+            return {'status': 'pending_timeout', 'order_id': order_id}
+
+    success_attempt = None
+    failed_states = {'FAILED', 'FAILURE', 'CANCELLED', 'USER_DROPPED'}
+    observed_states = []
+
+    for attempt in attempts:
+        state = str(attempt.get('payment_status') or '').upper().strip()
+        if state:
+            observed_states.append(state)
+        if state == 'SUCCESS':
+            success_attempt = attempt
+            break
+
+    if success_attempt:
+        result = _handle_payment_success(
+            webhook_event=None,
+            order_id=order_id,
+            payload={
+                'payment_id': success_attempt.get('payment_id'),
+                'cf_payment_id': success_attempt.get('cf_payment_id'),
+                'payment_status': 'SUCCESS',
+                'source': 'pending_webhook_followup',
+            },
+        )
+        return {'status': 'success', 'order_id': order_id, 'result': result}
+
+    if observed_states and all(state in failed_states for state in observed_states):
+        result = _handle_payment_failed(
+            webhook_event=None,
+            order_id=order_id,
+            payload={
+                'error_message': 'Payment reached terminal failure state after pending webhook.',
+                'attempts': attempts,
+                'source': 'pending_webhook_followup',
+            },
+        )
+        return {'status': 'failed', 'order_id': order_id, 'result': result}
+
+    try:
+        raise self.retry(countdown=45)
+    except MaxRetriesExceededError:
+        logger.warning(
+            "Pending webhook follow-up exhausted retries for order %s with states=%s",
+            order_id,
+            observed_states,
+        )
+        return {'status': 'pending_timeout', 'order_id': order_id, 'states': observed_states}
 
 
 @shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
@@ -779,4 +887,62 @@ def notify_subscription_expiry_windows(self):
     return {
         'expiring_24h_sent': reminder_sent,
         'expired_now_sent': expired_sent,
+    }
+
+
+@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=2)
+def reconcile_pending_subscription_payments(self):
+    """
+    Safety-net reconciliation for cases where Cashfree success webhook is delayed/missed.
+    Periodically checks pending payments against Cashfree payments API and promotes to SUCCESS.
+    """
+    now = timezone.now()
+    lookback_hours = max(int(getattr(settings, 'CASHFREE_PENDING_RECONCILE_LOOKBACK_HOURS', 72)), 1)
+    cutoff = now - timedelta(hours=lookback_hours)
+
+    pending_qs = SubscriptionPayment.objects.select_related('tenant', 'plan').filter(
+        status=SubscriptionPaymentStatus.PENDING,
+        created_at__gte=cutoff,
+    ).order_by('-created_at')
+
+    checked = 0
+    promoted = 0
+
+    for payment in pending_qs[:200]:
+        checked += 1
+
+        details = payment.billing_details or {}
+        if details.get('superseded'):
+            continue
+
+        success_attempt = _fetch_success_payment_attempt(payment.order_id)
+        if not success_attempt:
+            continue
+
+        # Reuse existing success application path so behavior matches webhook success.
+        result = _handle_payment_success(
+            webhook_event=None,
+            order_id=payment.order_id,
+            payload={
+                'payment_id': success_attempt.get('payment_id'),
+                'cf_payment_id': success_attempt.get('cf_payment_id'),
+                'payment_status': 'SUCCESS',
+                'source': 'periodic_pending_reconciliation',
+            },
+        )
+
+        if isinstance(result, dict) and result.get('status') in {'success', 'skipped'}:
+            promoted += 1
+
+    logger.info(
+        "Pending payment reconciliation completed. checked=%s promoted=%s lookback_hours=%s",
+        checked,
+        promoted,
+        lookback_hours,
+    )
+
+    return {
+        'checked': checked,
+        'promoted': promoted,
+        'lookback_hours': lookback_hours,
     }

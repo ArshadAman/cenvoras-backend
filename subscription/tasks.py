@@ -93,7 +93,7 @@ Manage your subscription here: {profile_url}
 
 Regards,
 Cenvora Billing Team
-support@cenvora.app
+cenvoras@gmail.com
 """
     else:
         subject = f"Your {plan_name} Plan Has Expired | Cenvora"
@@ -343,7 +343,7 @@ Hello {payment.tenant.first_name or payment.tenant.username},
 We received a payment for an older/superseded order ({order_id}).
 
 This payment was not applied to change your subscription because a newer payment intent exists.
-Please contact support@cenvora.app so we can help with refund/reconciliation.
+Please contact cenvoras@gmail.com so we can help with refund/reconciliation.
 
 Best regards,
 Cenvora Team
@@ -531,7 +531,7 @@ You can also check your latest status here: {profile_url}
 
 Regards,
 Cenvora Billing Team
-support@cenvora.app
+cenvoras@gmail.com
 """
     elif status_key == 'success':
         subject = 'Payment Successful - Cenvora'
@@ -552,7 +552,7 @@ You can review your subscription details here: {profile_url}
 
 Regards,
 Cenvora Billing Team
-support@cenvora.app
+cenvoras@gmail.com
 """
     else:
         subject = 'Payment Failed - Cenvora'
@@ -573,7 +573,7 @@ Retry here: {profile_url}
 
 Regards,
 Cenvora Billing Team
-support@cenvora.app
+cenvoras@gmail.com
 """
 
     send_async_email_notification.delay(

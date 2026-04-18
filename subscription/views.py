@@ -485,11 +485,11 @@ def create_plan_payment_order(request):
 		'order_amount': float(order_amount),
 		'customer_details': {
 			'customer_id': str(tenant.id),
-			'customer_name': tenant.business_name or tenant.username or 'Cenvora User',
-			'customer_email': tenant.email or 'support@cenvora.app',
+			'customer_name': 'Cenvora Customer',
+			'customer_email': tenant.email or 'cenvoras@gmail.com',
 			'customer_phone': tenant.phone or '9999999999',
 		},
-		'order_note': quote.get('summary') or f'Plan payment for {plan.name}',
+		'order_note': f"Cenvora Subscription - {quote.get('summary') or f'Plan payment for {plan.name}'}",
 		'order_meta': {
 			'return_url': f"{getattr(settings, 'CASHFREE_RETURN_URL', 'https://cenvora.app/profile')}?order_id={order_id}",
 		},

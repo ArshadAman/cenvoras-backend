@@ -22,6 +22,7 @@ PLAN_CODE_ALIASES = {
 MODULE_FEATURES = {
     'inventory': 'inventory_core',
     'analytics': 'advanced_analytics',
+    'ai_copilot': 'ai_copilot',
     'integrations': 'integrations',
     'dashboard': 'dashboard_analytics',
     'reports': 'advanced_reports',
@@ -247,6 +248,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
         'can': {
             'inventory': can_use_feature(user, MODULE_FEATURES['inventory']),
             'analytics': can_use_feature(user, MODULE_FEATURES['analytics']),
+            'ai_copilot': can_use_feature(user, MODULE_FEATURES['ai_copilot']),
             'integrations': can_use_feature(user, MODULE_FEATURES['integrations']),
             'dashboard': can_use_feature(user, MODULE_FEATURES['dashboard']),
             'reports': can_use_feature(user, MODULE_FEATURES['reports']),

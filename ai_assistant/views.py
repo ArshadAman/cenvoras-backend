@@ -11,6 +11,7 @@ from django.db.models import Sum, Count, F, Q
 from datetime import timedelta
 import json
 import logging
+from subscription.services import can_use_feature
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +345,11 @@ class AIChatView(APIView):
     def post(self, request):
         question = request.data.get('question', '').strip()
         user = request.user
+
+        if not can_use_feature(user, 'ai_copilot'):
+            return Response({
+                "detail": "Gemini chat is available only on the Business plan.",
+            }, status=403)
 
         if not question:
             return Response({

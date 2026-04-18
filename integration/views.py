@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.http import HttpResponse
 import uuid
@@ -189,12 +190,26 @@ class SendPaymentRemindersView(APIView):
 
 
 class NotificationLogListView(generics.ListAPIView):
-    """GET: View notification history."""
+    """GET: View tenant-scoped notification history."""
     serializer_class = NotificationLogSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return NotificationLog.objects.filter(user=self.request.user)
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+
+        queryset = NotificationLog.objects.filter(
+            Q(user=tenant) | Q(user__parent=tenant)
+        )
+
+        # Keep this dashboard customer-facing by excluding internal billing/status emails.
+        queryset = queryset.exclude(
+            related_model__in=['SubscriptionPayment', 'TenantSubscriptionExpiry']
+        )
+
+        if getattr(tenant, 'email', None):
+            queryset = queryset.exclude(recipient__iexact=tenant.email)
+
+        return queryset
 
 
 class NotificationTemplateListView(generics.ListCreateAPIView):

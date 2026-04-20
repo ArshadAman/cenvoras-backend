@@ -437,6 +437,9 @@ def create_plan_payment_order(request):
 			'error': 'Cashfree credentials are not configured on server.'
 		}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+	current_cashfree_env = (getattr(settings, 'CASHFREE_ENV', 'sandbox') or 'sandbox').lower()
+	force_new_order = bool(request.data.get('force_new_order', False))
+
 	reuse_window_seconds = max(int(getattr(settings, 'CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS', 1800)), 0)
 	reuse_cutoff = now - timedelta(seconds=reuse_window_seconds)
 
@@ -453,7 +456,16 @@ def create_plan_payment_order(request):
 		if candidate_details.get('superseded'):
 			continue
 
-		if candidate.created_at >= reuse_cutoff and candidate.payment_session_id:
+		candidate_env = str(candidate_details.get('cashfree_env') or '').strip().lower()
+		env_matches = candidate_env == current_cashfree_env
+		can_reuse_session = (
+			not force_new_order
+			and candidate.created_at >= reuse_cutoff
+			and bool(candidate.payment_session_id)
+			and env_matches
+		)
+
+		if can_reuse_session:
 			return Response({
 				'success': True,
 				'data': {
@@ -465,12 +477,20 @@ def create_plan_payment_order(request):
 					'action': quote['action'],
 					'summary': quote.get('summary', ''),
 					'currency': candidate.currency,
+					'cashfree_env': current_cashfree_env,
 					'reused_order': True,
 				}
 			})
 
 		candidate_details['superseded'] = True
-		candidate_details['superseded_reason'] = 'newer_payment_intent_created'
+		if force_new_order:
+			candidate_details['superseded_reason'] = 'force_new_order_requested'
+		elif not candidate_env:
+			candidate_details['superseded_reason'] = 'missing_cashfree_env_on_candidate'
+		elif not env_matches:
+			candidate_details['superseded_reason'] = 'cashfree_env_changed'
+		else:
+			candidate_details['superseded_reason'] = 'newer_payment_intent_created'
 		candidate_details['superseded_at'] = now.isoformat()
 		candidate.billing_details = candidate_details
 		candidate.save(update_fields=['billing_details', 'updated_at'])
@@ -534,6 +554,7 @@ def create_plan_payment_order(request):
 			'summary': quote.get('summary', ''),
 			'apply_immediately': quote.get('apply_immediately', False),
 			'quoted_amount': str(order_amount),
+			'cashfree_env': current_cashfree_env,
 			'intent_key': f"{quote['action']}:{quote.get('source_plan_code') or 'free'}->{plan.code}:{order_amount}",
 			'superseded': False,
 		},
@@ -551,6 +572,7 @@ def create_plan_payment_order(request):
 			'action': quote['action'],
 			'summary': quote.get('summary', ''),
 			'currency': 'INR',
+			'cashfree_env': current_cashfree_env,
 			'reused_order': False,
 		}
 	})

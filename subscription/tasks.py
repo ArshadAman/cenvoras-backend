@@ -616,13 +616,18 @@ def verify_pending_payment_from_webhook(self, order_id: str):
         )
         return {'status': 'success', 'order_id': order_id, 'result': result}
 
-    if observed_states and all(state in failed_states for state in observed_states):
+    if observed_states and any(state in failed_states for state in observed_states):
+        latest_failure_state = next(
+            (state for state in reversed(observed_states) if state in failed_states),
+            observed_states[-1],
+        )
         result = _handle_payment_failed(
             webhook_event=None,
             order_id=order_id,
             payload={
-                'error_message': 'Payment reached terminal failure state after pending webhook.',
+                'error_message': f'Payment reached terminal failure state after pending webhook ({latest_failure_state}).',
                 'attempts': attempts,
+                'payment_status': latest_failure_state,
                 'source': 'pending_webhook_followup',
             },
         )

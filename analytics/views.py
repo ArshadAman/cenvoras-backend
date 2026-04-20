@@ -53,7 +53,7 @@ def sales_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
-    qs = SalesInvoice.objects.filter(created_by=request.user)
+    qs = SalesInvoice.objects.filter(created_by=request.user, status='final')
     if date_from:
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
@@ -341,7 +341,7 @@ def dashboard_summary(request):
     tenant = getattr(request.user, 'active_tenant', request.user)
 
     # Sales
-    sales_qs = SalesInvoice.objects.filter(created_by=tenant)
+    sales_qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
     total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
     # Purchases
@@ -357,7 +357,10 @@ def dashboard_summary(request):
 
     # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
     # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
-    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=tenant)
+    sales_items = SalesInvoiceItem.objects.filter(
+        sales_invoice__created_by=tenant,
+        sales_invoice__status='final'
+    )
     gst_collected = Decimal('0.00')
     for item in sales_items:
         qty = Decimal(item.quantity)

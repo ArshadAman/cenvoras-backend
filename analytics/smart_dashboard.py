@@ -45,7 +45,8 @@ class SmartDashboard:
         """Total sales amount for today"""
         result = SalesInvoice.objects.filter(
             created_by=self.tenant,
-            invoice_date=self.today
+            invoice_date=self.today,
+            status='final'
         ).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
@@ -53,7 +54,8 @@ class SmartDashboard:
         """Total sales amount for yesterday"""
         result = SalesInvoice.objects.filter(
             created_by=self.tenant,
-            invoice_date=self.yesterday
+            invoice_date=self.yesterday,
+            status='final'
         ).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
@@ -88,7 +90,8 @@ class SmartDashboard:
         # Get today's sales items
         sales_items = SalesInvoiceItem.objects.filter(
             sales_invoice__created_by=self.tenant,
-            sales_invoice__invoice_date=self.today
+            sales_invoice__invoice_date=self.today,
+            sales_invoice__status='final'
         ).select_related('product', 'batch')
         
         total_revenue = Decimal('0')
@@ -115,7 +118,8 @@ class SmartDashboard:
         # Get today's invoices
         today_invoices = SalesInvoice.objects.filter(
             created_by=self.tenant,
-            invoice_date=self.today
+            invoice_date=self.today,
+            status='final'
         )
         
         total_billed = today_invoices.aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
@@ -221,7 +225,8 @@ class SmartDashboard:
         result = SalesInvoiceItem.objects.filter(
             sales_invoice__created_by=self.user,
             product_id=product_id,
-            sales_invoice__invoice_date__gte=thirty_days_ago
+            sales_invoice__invoice_date__gte=thirty_days_ago,
+            sales_invoice__status='final'
         ).aggregate(total_qty=Sum('quantity'))
         
         total_sold = result['total_qty'] or 0
@@ -245,8 +250,10 @@ class SmartDashboard:
         for c in customers_with_credit:
             # Check for overdue invoices
             overdue_invoices = SalesInvoice.objects.filter(
+                created_by=self.tenant,
                 customer_id=c['id'],
                 due_date__lt=self.today,
+                status='final',
                 # Simplified: assume any invoice with a customer is on credit
             ).count()
             
@@ -279,7 +286,8 @@ class SmartDashboard:
             recent_sales = SalesInvoiceItem.objects.filter(
                 sales_invoice__created_by=self.user,
                 product_id=p['id'],
-                sales_invoice__invoice_date__gte=sixty_days_ago
+                sales_invoice__invoice_date__gte=sixty_days_ago,
+                sales_invoice__status='final'
             ).exists()
             
             if not recent_sales:
@@ -304,7 +312,8 @@ class SmartDashboard:
         
         total_sales = SalesInvoice.objects.filter(
             created_by=self.user,
-            invoice_date__gte=thirty_days_ago
+            invoice_date__gte=thirty_days_ago,
+            status='final'
         ).aggregate(total=Sum('total_amount'))['total'] or 0
         
         total_purchases = PurchaseBill.objects.filter(
@@ -344,7 +353,8 @@ class SmartDashboard:
         
         top_products = SalesInvoiceItem.objects.filter(
             sales_invoice__created_by=self.user,
-            sales_invoice__invoice_date__gte=thirty_days_ago
+            sales_invoice__invoice_date__gte=thirty_days_ago,
+            sales_invoice__status='final'
         ).values('product__name', 'product__id').annotate(
             total_revenue=Sum(F('quantity') * F('price')),
             total_qty=Sum('quantity')
@@ -381,7 +391,8 @@ class SmartDashboard:
             sales_qty = SalesInvoiceItem.objects.filter(
                 sales_invoice__created_by=self.user,
                 product=product,
-                sales_invoice__invoice_date__gte=thirty_days_ago
+                sales_invoice__invoice_date__gte=thirty_days_ago,
+                sales_invoice__status='final'
             ).aggregate(total=Sum('quantity'))['total'] or 0
             
             # If selling less than 1 per week
@@ -460,7 +471,8 @@ class SmartDashboard:
         
         result = SalesInvoice.objects.filter(
             created_by=self.user,
-            invoice_date__gte=fy_start
+            invoice_date__gte=fy_start,
+            status='final'
         ).aggregate(total=Sum('total_amount'))
         
         return float(result['total'] or 0)
@@ -501,7 +513,8 @@ class SmartDashboard:
         
         items = SalesInvoiceItem.objects.filter(
             sales_invoice__created_by=self.user,
-            sales_invoice__invoice_date__gte=month_start
+            sales_invoice__invoice_date__gte=month_start,
+            sales_invoice__status='final'
         )
         
         total_gst = Decimal('0')

@@ -15,7 +15,6 @@ from cloudinary.uploader import upload as cloudinary_upload
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.core.mail import send_mail
 from django.utils import timezone
 
 from .models import ActionLog
@@ -240,18 +239,55 @@ def _open_circuit(now):
 
 
 @shared_task
-def send_async_email(subject, message, recipient_list):
+def send_async_email(subject, message, recipient_list, force_cenvora_branding=False):
     """
-    Asynchronously sends an email to prevent blocking the HTTP response.
+    Asynchronously sends an email via AhaSend using Cenvora branding.
     """
     try:
-        from_email = settings.DEFAULT_FROM_EMAIL
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=from_email,
-            recipient_list=recipient_list,
+        api_key = getattr(settings, 'TRANSACTIONAL_EMAIL_API_KEY', '')
+        base_url = (getattr(settings, 'TRANSACTIONAL_EMAIL_API_URL', '') or 'https://api.ahasend.com/v1').rstrip('/')
+        send_endpoint = getattr(settings, 'TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
+        timeout_seconds = int(getattr(settings, 'TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS', 20))
+
+        from_email = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
+        default_from_name = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_NAME', 'Cenvora')
+        from_name = 'Cenvora' if force_cenvora_branding else default_from_name
+
+        if not api_key:
+            logger.error("Transactional email API key missing; unable to send async email")
+            return False
+
+        endpoint = send_endpoint if str(send_endpoint).startswith('/') else f"/{send_endpoint}"
+        url = f"{base_url}{endpoint}"
+
+        recipients = [{'email': email} for email in recipient_list if email]
+        if not recipients:
+            return False
+
+        payload = {
+            'from': {'email': from_email, 'name': from_name},
+            'recipients': recipients,
+            'content': {
+                'subject': subject,
+                'text_body': message,
+                'html_body': str(message).replace('\n', '<br>'),
+            },
+        }
+
+        response = http_requests.post(
+            url,
+            headers={
+                'X-Api-Key': api_key,
+                'Content-Type': 'application/json',
+            },
+            json=payload,
+            timeout=timeout_seconds,
         )
+
+        if response.status_code not in (200, 201, 202):
+            logger.error("AhaSend rejected async email: status=%s body=%s", response.status_code, response.text[:500])
+            return False
+
         logger.info("Successfully sent async email to %s", recipient_list)
         return True
     except Exception as e:

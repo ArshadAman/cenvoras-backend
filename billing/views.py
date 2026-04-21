@@ -64,6 +64,12 @@ def purchase_bill_update_delete(request, pk):
         return Response({'success': False, 'message': 'Purchase bill not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
+        if bill.payment_status != 'pending':
+            return Response(
+                {'success': False, 'message': 'Only pending purchase bills can be edited.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = PurchaseBillSerializer(
             bill,
             data=request.data,
@@ -182,6 +188,9 @@ def sales_invoice_update_delete(request, pk):
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
+        if invoice.payment_status != 'pending':
+            return Response({'error': 'Only pending sales invoices can be edited.'}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = SalesInvoiceSerializer(
             invoice,
             data=request.data,

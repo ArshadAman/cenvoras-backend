@@ -757,6 +757,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 except Exception as e:
                      print(f"DEBUG: Failed to accrue loyalty points: {e}")
 
+            if sales_invoice.status == 'final' and sales_invoice.customer_id:
+                Customer.objects.filter(pk=sales_invoice.customer_id).update(
+                    current_balance=F('current_balance') + sales_invoice.total_amount
+                )
+
             transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
                 
             return sales_invoice
@@ -771,6 +776,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
         old_customer_id = instance.customer_id
+        old_status = instance.status
+        old_total_amount = Decimal(str(instance.total_amount or 0))
         resolved_customer = getattr(self, '_customer_obj', None)
         
         # Update the sales invoice fields
@@ -824,6 +831,34 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             for attr, value in meta_data.items():
                 setattr(meta, attr, value)
             meta.save()
+
+        new_total_amount = Decimal(str(instance.total_amount or 0))
+        new_status = instance.status
+
+        if old_customer_id != instance.customer_id:
+            if old_status == 'final' and old_customer_id:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') - old_total_amount
+                )
+            if new_status == 'final' and instance.customer_id:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') + new_total_amount
+                )
+        else:
+            if old_status == 'final' and new_status == 'final' and instance.customer_id:
+                balance_delta = new_total_amount - old_total_amount
+                if balance_delta != 0:
+                    Customer.objects.filter(pk=instance.customer_id).update(
+                        current_balance=F('current_balance') + balance_delta
+                    )
+            elif old_status != 'final' and new_status == 'final' and instance.customer_id:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') + new_total_amount
+                )
+            elif old_status == 'final' and new_status != 'final' and old_customer_id:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') - old_total_amount
+                )
 
         transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
 
@@ -959,6 +994,9 @@ class PaymentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'amount': 'Amount must be greater than 0.'})
 
         if invoice:
+            if getattr(invoice, 'status', None) == 'draft':
+                raise serializers.ValidationError({'invoice': 'Payments cannot be linked to draft invoices.'})
+
             if customer and invoice.customer_id != customer.id:
                 raise serializers.ValidationError({'invoice': 'Selected invoice does not belong to the selected customer.'})
 

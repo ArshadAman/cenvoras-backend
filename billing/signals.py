@@ -83,29 +83,19 @@ def decrease_stock_on_sale(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def update_financials_on_sale_item(sender, instance, created, **kwargs):
-    if created and instance.sales_invoice and instance.sales_invoice.customer:
-        # Atomic increase: Invoice total
+    if created and instance.sales_invoice:
+        # Atomic increase: Invoice total remains item-driven.
         SalesInvoice.objects.filter(pk=instance.sales_invoice.pk).update(
             total_amount=F('total_amount') + instance.amount
         )
-        # Atomic increase: Customer balance (Udhaar)
-        Customer.objects.filter(pk=instance.sales_invoice.customer.pk).update(
-            current_balance=F('current_balance') + instance.amount
-        )
-        print(f"DEBUG: Atomically increased Udhaar by {instance.amount} for item {instance.id}")
 
 @receiver(post_delete, sender=SalesInvoiceItem)
 def revert_financials_on_sale_item_delete(sender, instance, **kwargs):
-    if instance.sales_invoice and instance.sales_invoice.customer:
+    if instance.sales_invoice:
         # Atomic revert: Invoice total
         SalesInvoice.objects.filter(pk=instance.sales_invoice.pk).update(
             total_amount=Greatest(F('total_amount') - instance.amount, 0)
         )
-        # Atomic revert: Customer balance (Udhaar)
-        Customer.objects.filter(pk=instance.sales_invoice.customer.pk).update(
-            current_balance=F('current_balance') - instance.amount
-        )
-        print(f"DEBUG: Atomically reverted Udhaar by {instance.amount} for deleted item")
 
 @receiver(post_delete, sender=PurchaseBillItem)
 def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
@@ -167,6 +157,10 @@ def revert_balance_on_sale_delete(sender, instance, **kwargs):
 @receiver(post_save, sender=Payment)
 def update_balance_on_payment(sender, instance, created, **kwargs):
     if created and instance.customer:
+        if instance.invoice_id and getattr(instance.invoice, 'status', None) == 'draft':
+            print(f"DEBUG: Payment {instance.pk} ignored for draft invoice {instance.invoice_id}")
+            return
+
         Customer.objects.filter(pk=instance.customer.pk).update(
             current_balance=F('current_balance') - instance.amount
         )
@@ -202,6 +196,10 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=Payment)
 def revert_balance_on_payment_delete(sender, instance, **kwargs):
     if instance.customer:
+        if instance.invoice_id and getattr(instance.invoice, 'status', None) == 'draft':
+            print(f"DEBUG: Payment deletion ignored for draft invoice {instance.invoice_id}")
+            return
+
         Customer.objects.filter(pk=instance.customer.pk).update(
             current_balance=F('current_balance') + instance.amount
         )

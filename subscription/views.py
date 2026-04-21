@@ -226,6 +226,16 @@ def _calculate_plan_change_quote(subscription, target_plan, now):
 			'summary': f"Renew {target_plan.name} for 30 more days.",
 		}
 
+	if target_rank == current_rank:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.ACTIVATE,
+			'apply_immediately': True,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Activate {target_plan.name} immediately for 30 days.",
+		}
+
 	if target_rank > current_rank and active_until and current_rank > 0:
 		total_seconds = max(int((subscription.current_period_end - subscription.current_period_start).total_seconds()), 1)
 		remaining_seconds = max(int((active_until - now).total_seconds()), 0)
@@ -254,36 +264,13 @@ def _calculate_plan_change_quote(subscription, target_plan, now):
 		}
 
 	if active_until:
-		if target_rank == 0:
-			return {
-				'payment_required': False,
-				'action': 'schedule_free',
-				'apply_immediately': False,
-				'amount': Decimal('0.00'),
-				'source_plan_code': current_code,
-				'effective_at': active_until,
-				'summary': 'Will move to Free plan after current cycle ends.',
-			}
 		return {
 			'payment_required': False,
-			'action': 'unsupported_paid_schedule',
+			'action': 'downgrade_not_allowed',
 			'apply_immediately': False,
 			'amount': Decimal('0.00'),
 			'source_plan_code': current_code,
-			'summary': (
-				f"Paid plan changes to {target_plan.name} cannot be scheduled without payment. "
-				"Choose Free at expiry, then activate the target plan with payment."
-			),
-		}
-
-	if target_rank == 0:
-		return {
-			'payment_required': False,
-			'action': 'already_free',
-			'apply_immediately': False,
-			'amount': Decimal('0.00'),
-			'source_plan_code': current_code,
-			'summary': 'You are already on Free plan.',
+			'summary': 'Downgrades are not available from profile. Renew the current plan or upgrade to a higher plan.',
 		}
 
 	return {
@@ -364,25 +351,21 @@ def schedule_plan_change(request):
 	active_until = subscription.current_period_end
 
 	if lookup_code == 'free':
-		subscription.cancel_at_period_end = True
-		subscription.pending_plan = None
-		subscription.pending_plan_starts_at = None
-		subscription.save(update_fields=['cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'])
 		return Response({
-			'success': True,
+			'success': False,
+			'error': 'Downgrades to Starter are not available from profile. Renew the current plan or upgrade instead.',
 			'data': {
-				'action': 'schedule_free',
-				'effective_at': active_until,
-				'message': 'Plan will move to Starter after current cycle ends.',
+				'action': 'downgrade_not_allowed',
+				'message': 'Downgrades to Starter are not available from profile. Renew the current plan or upgrade instead.',
 			}
-		})
+		}, status=status.HTTP_400_BAD_REQUEST)
 
 	if not target_plan:
 		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 	return Response({
 		'success': False,
-		'error': 'Only Free plan can be scheduled for next cycle without payment.',
+		'error': 'Only paid upgrades can be scheduled without immediate payment.',
 		'data': {
 			'action': 'unsupported_paid_schedule',
 			'message': 'Activate Pro/Business with payment when current cycle ends.',

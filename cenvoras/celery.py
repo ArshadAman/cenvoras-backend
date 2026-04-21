@@ -4,6 +4,9 @@ from celery import Celery
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cenvoras.settings')
 
+from celery.signals import task_postrun, task_prerun, worker_process_init
+from django.db import connections, close_old_connections
+
 # Monkeypatch django-dbbackup to prevent it from appending .bin
 # Cloudinary Raw Media Storage strictly rejects .bin files for security.
 try:
@@ -54,3 +57,23 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/5'),
     },
 }
+
+
+def _reset_celery_db_connections():
+    close_old_connections()
+    connections.close_all()
+
+
+@worker_process_init.connect
+def _on_worker_process_init(**kwargs):
+    _reset_celery_db_connections()
+
+
+@task_prerun.connect
+def _on_task_prerun(**kwargs):
+    _reset_celery_db_connections()
+
+
+@task_postrun.connect
+def _on_task_postrun(**kwargs):
+    _reset_celery_db_connections()

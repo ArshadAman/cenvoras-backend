@@ -308,17 +308,18 @@ def plan_change_quote(request):
 		}, status=status.HTTP_403_FORBIDDEN)
 
 	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
-	if target_code not in {'free', 'pro', 'business'}:
-		return Response({'success': False, 'error': 'target_plan_code must be free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	if target_code not in {'starter', 'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be starter, free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	lookup_code = 'free' if target_code == 'starter' else target_code
 
-	target_plan = Plan.objects.filter(code=target_code, is_active=True).first() if target_code != 'free' else None
-	if target_code != 'free' and not target_plan:
+	target_plan = Plan.objects.filter(code=lookup_code, is_active=True).first() if lookup_code != 'free' else None
+	if lookup_code != 'free' and not target_plan:
 		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 	now = timezone.now()
 	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
 	if not target_plan:
-		free_plan = Plan(code='free', name='Free', monthly_price=Decimal('0.00'))
+		free_plan = Plan(code='free', name='Starter', monthly_price=Decimal('0.00'))
 		quote = _calculate_plan_change_quote(subscription, free_plan, now)
 	else:
 		quote = _calculate_plan_change_quote(subscription, target_plan, now)
@@ -327,7 +328,7 @@ def plan_change_quote(request):
 		'success': True,
 		'data': {
 			'target_plan_code': target_code,
-			'target_plan_name': target_plan.name if target_plan else 'Free',
+			'target_plan_name': target_plan.name if target_plan else 'Starter',
 			'payment_required': quote['payment_required'],
 			'action': quote['action'],
 			'apply_immediately': quote.get('apply_immediately', False),
@@ -350,18 +351,19 @@ def schedule_plan_change(request):
 		}, status=status.HTTP_403_FORBIDDEN)
 
 	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
-	if target_code not in {'free', 'pro', 'business'}:
-		return Response({'success': False, 'error': 'target_plan_code must be free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	if target_code not in {'starter', 'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be starter, free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	lookup_code = 'free' if target_code == 'starter' else target_code
 
 	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
 	now = timezone.now()
 	if not subscription or not subscription.current_period_end or subscription.current_period_end <= now:
 		return Response({'success': False, 'error': 'No active cycle available. Use payment to activate a plan now.'}, status=status.HTTP_400_BAD_REQUEST)
 
-	target_plan = Plan.objects.filter(code=target_code, is_active=True).first() if target_code != 'free' else None
+	target_plan = Plan.objects.filter(code=lookup_code, is_active=True).first() if lookup_code != 'free' else None
 	active_until = subscription.current_period_end
 
-	if target_code == 'free':
+	if lookup_code == 'free':
 		subscription.cancel_at_period_end = True
 		subscription.pending_plan = None
 		subscription.pending_plan_starts_at = None
@@ -371,7 +373,7 @@ def schedule_plan_change(request):
 			'data': {
 				'action': 'schedule_free',
 				'effective_at': active_until,
-				'message': 'Plan will move to Free after current cycle ends.',
+				'message': 'Plan will move to Starter after current cycle ends.',
 			}
 		})
 

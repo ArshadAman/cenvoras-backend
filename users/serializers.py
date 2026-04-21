@@ -39,8 +39,8 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         # Use email as username for simplicity
         validated_data['username'] = validated_data['email']
         
-        # Set trial period (30 days from signup)
-        trial_end = timezone.now() + timedelta(days=30)
+        # Set trial period (14 days from signup)
+        trial_end = timezone.now() + timedelta(days=14)
         
         user = User.objects.create_user(
             username=validated_data['username'],
@@ -97,7 +97,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         
     def get_plan_name(self, obj):
         plan = get_tenant_plan(obj)
-        return plan.name if plan else "Free"
+        if plan:
+            return plan.name
+        return "Starter"
 
     def get_plan_code(self, obj):
         return get_effective_plan_code(obj)

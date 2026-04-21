@@ -67,13 +67,14 @@ services:
 
   celery_worker:
     build: .
-    command: celery -A cenvoras worker -l info --pool=gevent --concurrency=4 --prefetch-multiplier=1 --max-tasks-per-child=200
+    command: celery -A cenvoras worker -l info --pool=prefork --concurrency=2 --prefetch-multiplier=1 --max-tasks-per-child=50
     env_file:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CONN_MAX_AGE=0
     restart: unless-stopped
     mem_limit: 450m
     cpus: "0.60"
@@ -100,6 +101,7 @@ services:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CONN_MAX_AGE=0
     volumes:
       - celerybeat_data:/app/celerybeat-data
     restart: unless-stopped

@@ -130,11 +130,14 @@ def get_effective_plan_code(user: User) -> str:
     if is_vip_user(user):
         return 'business'
 
+    tenant = get_tenant(user)
+    if _is_legacy_trial_active(tenant):
+        return 'starter'
+
     plan = get_tenant_plan(user)
     if plan:
         return normalize_plan_code(plan.code)
 
-    tenant = get_tenant(user)
     if not _is_legacy_trial_active(tenant):
         tenant_status = (getattr(tenant, 'subscription_status', '') or '').lower()
         if tenant_status != 'active':
@@ -178,6 +181,10 @@ def get_current_usage(user: User) -> dict[str, int]:
 
 def can_use_feature(user: User, feature_code: str) -> bool:
     if is_vip_user(user):
+        return True
+
+    tenant = get_tenant(user)
+    if _is_legacy_trial_active(tenant):
         return True
 
     plan_code = get_effective_plan_code(user)
@@ -232,15 +239,15 @@ def get_entitlements(user: User) -> dict[str, Any]:
         'is_vip': vip,
         'plan': {
             'code': plan_code,
-            'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),
-            'status': getattr(subscription, 'status', 'expired' if plan_code == 'free' else None),
+            'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else ('Starter' if plan_code == 'starter' else plan_code.title())),
+            'status': getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
             'current_period_end': getattr(subscription, 'current_period_end', None),
             'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
             'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
             'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
             'cancel_at_period_end': getattr(subscription, 'cancel_at_period_end', False),
-            'next_plan_code': 'free' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'code', None),
-            'next_plan_name': 'Free' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'name', None),
+            'next_plan_code': 'starter' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+            'next_plan_name': 'Starter' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'name', None),
         },
         'limits': limits,
         'usage': usage,

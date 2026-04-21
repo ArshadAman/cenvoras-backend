@@ -93,7 +93,7 @@ def quick_signup_view(request):
                     'trial_info': {
                         'trial_active': user.is_trial_active,
                         'trial_ends_at': user.trial_ends_at,
-                        'days_remaining': (user.trial_ends_at - timezone.now()).days if user.trial_ends_at else 30
+                        'days_remaining': (user.trial_ends_at - timezone.now()).days if user.trial_ends_at else 14
                     }
                 }, status=status.HTTP_201_CREATED)
                 

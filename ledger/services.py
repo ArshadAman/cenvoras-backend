@@ -42,16 +42,24 @@ class AccountingService:
             ('6001', 'Purchases', AccountType.EXPENSE),
         ]
         
+        existing_accounts = Account.objects.filter(
+            created_by=user,
+            code__in=[code for code, _name, _type in default_accounts],
+        )
+        accounts_by_code = {account.code: account for account in existing_accounts}
+
         for code, name, account_type in default_accounts:
-            account, created = Account.objects.get_or_create(
-                code=code,
-                created_by=user,
-                defaults={
-                    'name': name,
-                    'account_type': account_type,
-                    'description': f'Default {account_type} account'
-                }
-            )
+            account = accounts_by_code.get(code)
+            if account is None:
+                account = Account.objects.create(
+                    code=code,
+                    name=name,
+                    account_type=account_type,
+                    description=f'Default {account_type} account',
+                    created_by=user,
+                )
+                accounts_by_code[code] = account
+
             # Store by both code and clean name for easy access
             clean_name = name.lower().replace(' ', '_').replace('\'', '')
             accounts[clean_name] = account

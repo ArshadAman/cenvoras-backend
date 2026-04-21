@@ -5,6 +5,7 @@ from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, Deliver
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 from cenvoras.constants import IndianStates
+from django.db import transaction
 from django.db.models import F, Sum
 import uuid
 from decimal import Decimal
@@ -71,6 +72,22 @@ def normalize_indian_state_choice(value):
         return upper
 
     return raw
+
+
+def _rebuild_sales_invoice_ledger(invoice_id):
+    from ledger.models import GeneralLedgerEntry
+    from ledger.services import AccountingService
+    sales_invoice = SalesInvoice.objects.select_related('customer').get(pk=invoice_id)
+    GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice).delete()
+    AccountingService.create_sales_invoice_entries(sales_invoice)
+
+
+def _rebuild_purchase_bill_ledger(bill_id):
+    from ledger.models import GeneralLedgerEntry
+    from ledger.services import AccountingService
+    purchase_bill = PurchaseBill.objects.select_related('vendor').get(pk=bill_id)
+    GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill).delete()
+    AccountingService.create_purchase_bill_entries(purchase_bill)
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):
@@ -234,6 +251,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+
+        transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         return purchase_bill
 
     def update(self, instance, validated_data):
@@ -288,6 +307,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
             instance.refresh_payment_status(save=False)
             instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+
+        transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
         
         return instance
 
@@ -735,6 +756,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         print(f"DEBUG: Accrued {points_earned} loyalty points for {customer_obj.name}")
                 except Exception as e:
                      print(f"DEBUG: Failed to accrue loyalty points: {e}")
+
+            transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
                 
             return sales_invoice
         except Exception as e:
@@ -801,6 +824,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             for attr, value in meta_data.items():
                 setattr(meta, attr, value)
             meta.save()
+
+        transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
 
         return instance
 

@@ -329,10 +329,10 @@ def call_gemini(question, business_context, user):
     except requests.exceptions.HTTPError as e:
         error_msg = f"HTTP Error: {e}\nResponse: {e.response.text}"
         logger.error(error_msg)
-        return f"⚠️ AI service unavailable. Detailed Error: {e.response.text[:200]}"
+        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
     except requests.exceptions.RequestException as e:
         logger.error(f"Gemini API error: {e}")
-        return f"⚠️ AI service unavailable. Error: {str(e)[:100]}"
+        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
 
 
 class AIChatView(APIView):

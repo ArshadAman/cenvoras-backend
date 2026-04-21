@@ -137,9 +137,11 @@ def _upload_backup_to_cloudinary(file_path, backup_name):
     )
 
     folder = getattr(settings, "BACKUP_CLOUDINARY_FOLDER", "cenvoras/db_backups")
+    backup_type = str(getattr(settings, "BACKUP_CLOUDINARY_TYPE", "private") or "private").strip().lower()
     result = cloudinary_upload(
         file_path,
         resource_type="raw",
+        type=backup_type,
         folder=folder,
         public_id=backup_name,
         overwrite=False,
@@ -156,8 +158,9 @@ def _upload_backup_to_cloudinary(file_path, backup_name):
 
 def _cleanup_old_cloudinary_backups(keep_count):
     folder = getattr(settings, "BACKUP_CLOUDINARY_FOLDER", "cenvoras/db_backups")
+    backup_type = str(getattr(settings, "BACKUP_CLOUDINARY_TYPE", "private") or "private").strip().lower()
     result = resources(
-        type="upload",
+        type=backup_type,
         resource_type="raw",
         prefix=f"{folder}/backup_",
         max_results=500,
@@ -186,7 +189,7 @@ def _cleanup_old_cloudinary_backups(keep_count):
     ids_to_delete = sorted(old_by_age_ids.union(over_count_ids))
     deleted = []
     if ids_to_delete:
-        delete_resources(ids_to_delete, resource_type="raw", invalidate=True)
+        delete_resources(ids_to_delete, resource_type="raw", type=backup_type, invalidate=True)
         deleted = ids_to_delete
 
     return {

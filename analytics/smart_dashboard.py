@@ -381,19 +381,25 @@ class SmartDashboard:
         thirty_days_ago = self.today - timedelta(days=30)
         
         # Get all products with stock
-        products_with_stock = Product.objects.filter(
+        products_with_stock = list(Product.objects.filter(
             created_by=self.user,
             stock__gt=10  # Only consider if decent stock
-        )
-        
-        slow_movers = []
-        for product in products_with_stock[:10]:
-            sales_qty = SalesInvoiceItem.objects.filter(
+        ).order_by('-stock')[:10])
+
+        product_ids = [product.id for product in products_with_stock]
+        sales_by_product = {
+            row['product_id']: row['total'] or 0
+            for row in SalesInvoiceItem.objects.filter(
                 sales_invoice__created_by=self.user,
-                product=product,
+                product_id__in=product_ids,
                 sales_invoice__invoice_date__gte=thirty_days_ago,
                 sales_invoice__status='final'
-            ).aggregate(total=Sum('quantity'))['total'] or 0
+            ).values('product_id').annotate(total=Sum('quantity'))
+        }
+        
+        slow_movers = []
+        for product in products_with_stock:
+            sales_qty = sales_by_product.get(product.id, 0)
             
             # If selling less than 1 per week
             if sales_qty < 4:

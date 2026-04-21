@@ -246,5 +246,5 @@ def customer_update_delete(request, pk):
         except Exception as e:
             return Response({
                 "success": False,
-                "message": f"Failed to delete customer: {str(e)}"
+                "message": "Failed to delete customer. Please try again later."
             }, status=status.HTTP_400_BAD_REQUEST)

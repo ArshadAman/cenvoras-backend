@@ -23,6 +23,7 @@ from .models import (
     TenantSubscription,
     WebhookEvent,
 )
+from .services import invalidate_subscription_cache
 from integration.tasks import send_async_email_notification
 
 User = get_user_model()
@@ -452,6 +453,7 @@ Cenvora Team
             'plan', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
         ])
         _sync_legacy_subscription_fields(tenant, payment.plan.code)
+        invalidate_subscription_cache(tenant)
         action_summary = f"Upgraded to {payment.plan.name}"
     
     elif payment_action == SubscriptionPaymentAction.RENEW and active_until:
@@ -465,6 +467,7 @@ Cenvora Team
             'current_period_end', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
         ])
         _sync_legacy_subscription_fields(tenant, subscription.plan.code)
+        invalidate_subscription_cache(tenant)
         action_summary = f"Renewed {subscription.plan.name} plan"
     
     else:
@@ -481,6 +484,7 @@ Cenvora Team
             'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
         ])
         _sync_legacy_subscription_fields(tenant, payment.plan.code)
+        invalidate_subscription_cache(tenant)
         action_summary = f"Activated {payment.plan.name} plan"
     
     # Send one-time success status email.
@@ -768,6 +772,7 @@ def auto_activate_pending_plans():
             subscription.save(update_fields=['plan', 'pending_plan', 'pending_plan_starts_at', 'updated_at'])
             
             _sync_legacy_subscription_fields(subscription.tenant, subscription.plan.code)
+            invalidate_subscription_cache(subscription.tenant)
             
             # Send notification email
             send_async_email_notification.delay(
@@ -828,6 +833,7 @@ def auto_downgrade_cancelled_subscriptions():
             ])
             
             _sync_legacy_subscription_fields(subscription.tenant, 'free')
+            invalidate_subscription_cache(subscription.tenant)
             
             # Send notification
             send_async_email_notification.delay(

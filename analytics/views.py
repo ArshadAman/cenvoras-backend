@@ -12,6 +12,8 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.views.decorators.cache import cache_page
 
+from cenvoras.cache_utils import CACHE_TTL_MEDIUM, cache_get_or_set, tenant_cache_key
+
 # Create your views here.
 
 @swagger_auto_schema(
@@ -334,102 +336,106 @@ def dashboard_summary(request):
     """
     Returns a summary of sales, purchases, inventory, and GST.
     """
-    from django.db.models.functions import TruncMonth
-    from collections import defaultdict
-    from decimal import Decimal
-    
     tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('analytics', tenant.id, 'dashboard-summary')
 
-    # Sales
-    sales_qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
-    total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    def build_summary():
+        from django.db.models.functions import TruncMonth
+        from collections import defaultdict
+        from decimal import Decimal
 
-    # Purchases
-    purchase_qs = PurchaseBill.objects.filter(created_by=tenant)
-    total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        # Sales
+        sales_qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
+        total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
-    # Inventory
-    products = Product.objects.filter(created_by=tenant)
-    total_inventory_value = products.aggregate(
-        value=Sum(F('stock') * F('price'))
-    )['value'] or 0
-    low_stock_count = products.filter(stock__lte=F('low_stock_alert')).count()
+        # Purchases
+        purchase_qs = PurchaseBill.objects.filter(created_by=tenant)
+        total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
-    # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
-    # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
-    sales_items = SalesInvoiceItem.objects.filter(
-        sales_invoice__created_by=tenant,
-        sales_invoice__status='final'
-    )
-    gst_collected = Decimal('0.00')
-    for item in sales_items:
-        qty = Decimal(item.quantity)
-        price = Decimal(item.price)
-        discount_pct = Decimal(item.discount or 0)
-        tax_rate = Decimal(item.tax or 0)
-        
-        line_value = qty * price
-        discount_amount = (line_value * discount_pct) / Decimal('100')
-        taxable_value = line_value - discount_amount
-        tax_amount = (taxable_value * tax_rate) / Decimal('100')
-        gst_collected += tax_amount
+        # Inventory
+        products = Product.objects.filter(created_by=tenant)
+        total_inventory_value = products.aggregate(
+            value=Sum(F('stock') * F('price'))
+        )['value'] or 0
+        low_stock_count = products.filter(stock__lte=F('low_stock_alert')).count()
 
-    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
-    gst_paid = Decimal('0.00')
-    for item in purchase_items:
-        qty = Decimal(item.quantity)
-        price = Decimal(item.price)
-        discount_pct = Decimal(item.discount or 0)
-        tax_rate = Decimal(item.tax or 0)
-        
-        line_value = qty * price
-        discount_amount = (line_value * discount_pct) / Decimal('100')
-        taxable_value = line_value - discount_amount
-        tax_amount = (taxable_value * tax_rate) / Decimal('100')
-        gst_paid += tax_amount
+        # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
+        # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
+        sales_items = SalesInvoiceItem.objects.filter(
+            sales_invoice__created_by=tenant,
+            sales_invoice__status='final'
+        )
+        gst_collected = Decimal('0.00')
+        for item in sales_items:
+            qty = Decimal(item.quantity)
+            price = Decimal(item.price)
+            discount_pct = Decimal(item.discount or 0)
+            tax_rate = Decimal(item.tax or 0)
 
-    gst_payable = gst_collected - gst_paid
+            line_value = qty * price
+            discount_amount = (line_value * discount_pct) / Decimal('100')
+            taxable_value = line_value - discount_amount
+            tax_amount = (taxable_value * tax_rate) / Decimal('100')
+            gst_collected += tax_amount
 
-    # Sales vs Purchases Chart Data (Monthly aggregation)
-    sales_by_month = sales_qs.annotate(
-        month=TruncMonth('invoice_date')
-    ).values('month').annotate(
-        total=Sum('total_amount')
-    ).order_by('month')
+        purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
+        gst_paid = Decimal('0.00')
+        for item in purchase_items:
+            qty = Decimal(item.quantity)
+            price = Decimal(item.price)
+            discount_pct = Decimal(item.discount or 0)
+            tax_rate = Decimal(item.tax or 0)
 
-    purchases_by_month = purchase_qs.annotate(
-        month=TruncMonth('bill_date')
-    ).values('month').annotate(
-        total=Sum('total_amount')
-    ).order_by('month')
+            line_value = qty * price
+            discount_amount = (line_value * discount_pct) / Decimal('100')
+            taxable_value = line_value - discount_amount
+            tax_amount = (taxable_value * tax_rate) / Decimal('100')
+            gst_paid += tax_amount
 
-    # Merge into chart format
-    month_data = defaultdict(lambda: {'Sales': 0, 'Purchases': 0})
-    for entry in sales_by_month:
-        if entry['month']:
-            month_name = entry['month'].strftime('%b %Y')
-            month_data[month_name]['Sales'] = float(entry['total'] or 0)
-    for entry in purchases_by_month:
-        if entry['month']:
-            month_name = entry['month'].strftime('%b %Y')
-            month_data[month_name]['Purchases'] = float(entry['total'] or 0)
-    
-    # Convert to list for chart
-    sales_vs_purchases = [
-        {'name': month, 'Sales': data['Sales'], 'Purchases': data['Purchases']}
-        for month, data in sorted(month_data.items())
-    ]
+        gst_payable = gst_collected - gst_paid
 
-    return Response({
-        'total_sales': total_sales,
-        'total_purchases': total_purchases,
-        'total_inventory_value': total_inventory_value,
-        'low_stock_count': low_stock_count,
-        'gst_collected': float(gst_collected),
-        'gst_paid': float(gst_paid),
-        'gst_payable': float(gst_payable),
-        'sales_vs_purchases': sales_vs_purchases,
-    })
+        # Sales vs Purchases Chart Data (Monthly aggregation)
+        sales_by_month = sales_qs.annotate(
+            month=TruncMonth('invoice_date')
+        ).values('month').annotate(
+            total=Sum('total_amount')
+        ).order_by('month')
+
+        purchases_by_month = purchase_qs.annotate(
+            month=TruncMonth('bill_date')
+        ).values('month').annotate(
+            total=Sum('total_amount')
+        ).order_by('month')
+
+        # Merge into chart format
+        month_data = defaultdict(lambda: {'Sales': 0, 'Purchases': 0})
+        for entry in sales_by_month:
+            if entry['month']:
+                month_name = entry['month'].strftime('%b %Y')
+                month_data[month_name]['Sales'] = float(entry['total'] or 0)
+        for entry in purchases_by_month:
+            if entry['month']:
+                month_name = entry['month'].strftime('%b %Y')
+                month_data[month_name]['Purchases'] = float(entry['total'] or 0)
+
+        # Convert to list for chart
+        sales_vs_purchases = [
+            {'name': month, 'Sales': data['Sales'], 'Purchases': data['Purchases']}
+            for month, data in sorted(month_data.items())
+        ]
+
+        return {
+            'total_sales': total_sales,
+            'total_purchases': total_purchases,
+            'total_inventory_value': total_inventory_value,
+            'low_stock_count': low_stock_count,
+            'gst_collected': float(gst_collected),
+            'gst_paid': float(gst_paid),
+            'gst_payable': float(gst_payable),
+            'sales_vs_purchases': sales_vs_purchases,
+        }
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_summary))
 @swagger_auto_schema(
     method='get',
     manual_parameters=[
@@ -685,8 +691,14 @@ def smart_dashboard(request):
     """
     from .smart_dashboard import SmartDashboard
     
-    dashboard = SmartDashboard(request.user)
-    return Response(dashboard.get_full_dashboard())
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('analytics', tenant.id, 'smart-dashboard')
+
+    def build_dashboard():
+        dashboard = SmartDashboard(request.user)
+        return dashboard.get_full_dashboard()
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_dashboard))
 
 
 # ═══════════════════════════════════════════════════════════════

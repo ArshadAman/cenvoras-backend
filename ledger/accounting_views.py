@@ -187,7 +187,7 @@ def account_detail(request, account_id):
             logger.error(f"Error deleting account {account.name} (ID: {account_id}): {str(e)}")
             return Response({
                 'success': False,
-                'error': f'Error deleting account: {str(e)}'
+                'error': 'Unable to delete account right now. Please try again later.'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -303,7 +303,7 @@ def setup_default_accounts(request):
     except Exception as e:
         return Response({
             'success': False,
-            'error': f'Failed to create default accounts: {str(e)}'
+            'error': 'Failed to create default accounts. Please try again later.'
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -572,7 +572,7 @@ def create_sales_invoice_ledger_entries(request):
         logger.error(f"Error creating sales invoice ledger entries: {str(e)}")
         return Response({
             'success': False,
-            'error': f'Internal server error: {str(e)}'
+            'error': 'Internal server error while creating sales invoice ledger entries.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -783,5 +783,5 @@ def create_purchase_bill_ledger_entries(request):
         logger.error(f"Error creating purchase bill ledger entries: {str(e)}")
         return Response({
             'success': False,
-            'error': f'Internal server error: {str(e)}'
+            'error': 'Internal server error while creating purchase bill ledger entries.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

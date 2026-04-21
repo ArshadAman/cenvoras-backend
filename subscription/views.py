@@ -14,6 +14,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
+from cenvoras.cache_utils import CACHE_TTL_LONG, cache_get_or_set, global_cache_key
+
 from .models import (
 	Plan,
 	TenantSubscription,
@@ -144,10 +146,9 @@ def subscription_entitlements(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def plan_catalog(request):
-	plans = Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
-	data = []
-	for plan in plans:
-		data.append({
+	cache_key = global_cache_key('subscription', 'plan-catalog')
+	data = cache_get_or_set(cache_key, CACHE_TTL_LONG, lambda: [
+		{
 			'id': str(plan.id),
 			'code': plan.code,
 			'name': plan.name,
@@ -159,7 +160,9 @@ def plan_catalog(request):
 			'max_customers': getattr(plan, 'max_customers', -1),
 			'max_invoices_per_month': plan.max_invoices_per_month,
 			'features': [feature.code for feature in plan.features.all()],
-		})
+		}
+		for plan in Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
+	])
 
 	return Response({
 		'success': True,

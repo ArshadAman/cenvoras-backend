@@ -6,8 +6,40 @@ from .serializers import CustomerSerializer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.db import models
-from .models import Customer
+from django.db.models import Sum, F, Value, DecimalField, ExpressionWrapper
+from django.db.models.functions import Coalesce
+from .models import Customer, SalesInvoice
 from cenvoras.pagination import StandardResultsSetPagination
+
+
+def _sync_customer_current_balances(customers, tenant):
+    customer_ids = [customer.id for customer in customers]
+    if not customer_ids:
+        return
+
+    outstanding_expr = ExpressionWrapper(
+        Coalesce(F('total_amount'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2)))
+        - Coalesce(F('amount_paid'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))),
+        output_field=DecimalField(max_digits=12, decimal_places=2),
+    )
+
+    rows = (
+        SalesInvoice.objects.filter(created_by=tenant, status='final', customer_id__in=customer_ids)
+        .values('customer_id')
+        .annotate(
+            outstanding=Coalesce(
+                Sum(outstanding_expr),
+                Value(0, output_field=DecimalField(max_digits=12, decimal_places=2)),
+            )
+        )
+    )
+    outstanding_map = {row['customer_id']: row['outstanding'] for row in rows}
+
+    for customer in customers:
+        computed_balance = outstanding_map.get(customer.id, 0)
+        if customer.current_balance != computed_balance:
+            Customer.objects.filter(pk=customer.id).update(current_balance=computed_balance)
+            customer.current_balance = computed_balance
 
 
 @swagger_auto_schema(
@@ -108,10 +140,13 @@ def customer_list_create(request):
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(customers, request)
         if page is not None:
+            _sync_customer_current_balances(page, tenant)
             serializer = CustomerSerializer(page, many=True)
             return paginator.get_paginated_response(serializer.data)
-        
-        serializer = CustomerSerializer(customers, many=True)
+
+        customers_list = list(customers)
+        _sync_customer_current_balances(customers_list, tenant)
+        serializer = CustomerSerializer(customers_list, many=True)
         return Response(serializer.data)
     
     elif request.method == 'POST':
@@ -158,6 +193,8 @@ def customer_detail(request, pk):
             "success": False,
             "message": "Customer not found."
         }, status=status.HTTP_404_NOT_FOUND)
+
+    _sync_customer_current_balances([customer], tenant)
     
     serializer = CustomerSerializer(customer)
     return Response(serializer.data)

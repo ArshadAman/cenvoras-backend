@@ -930,7 +930,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'credit_limit', 'current_balance', 'allow_credit',
             'created_by', 'created_at', 'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance']
 
     def validate_email(self, value):
         if value:

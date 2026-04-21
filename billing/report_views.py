@@ -76,7 +76,7 @@ def customer_balance_reconciliation(request):
 
     def build_report():
         customers = Customer.objects.filter(created_by=tenant).order_by('name')
-        invoices = SalesInvoice.objects.filter(created_by=tenant)
+        invoices = SalesInvoice.objects.filter(created_by=tenant, status='final')
 
         if request.query_params.get('customer'):
             customer_id = request.query_params.get('customer')

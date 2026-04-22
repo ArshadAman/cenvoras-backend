@@ -20,7 +20,7 @@ class SmartDashboard:
     def __init__(self, user):
         self.user = user
         self.tenant = getattr(user, 'active_tenant', user)
-        self.today = date.today()
+        self.today = timezone.localdate()
         self.yesterday = self.today - timedelta(days=1)
     
     # ═══════════════════════════════════════════════════════════════

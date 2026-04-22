@@ -339,6 +339,10 @@ def dashboard_summary(request):
     tenant = getattr(request.user, 'active_tenant', request.user)
     cache_key = tenant_cache_key('analytics', tenant.id, 'dashboard-summary')
 
+    if request.query_params.get('refresh') == 'true':
+        from django.core.cache import cache
+        cache.delete(cache_key)
+
     def build_summary():
         from django.db.models.functions import TruncMonth
         from collections import defaultdict
@@ -693,6 +697,11 @@ def smart_dashboard(request):
     
     tenant = getattr(request.user, 'active_tenant', request.user)
     cache_key = tenant_cache_key('analytics', tenant.id, 'smart-dashboard')
+    
+    # If the client strictly requests fresh data
+    if request.query_params.get('refresh') == 'true':
+        from django.core.cache import cache
+        cache.delete(cache_key)
 
     def build_dashboard():
         dashboard = SmartDashboard(request.user)

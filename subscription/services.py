@@ -225,6 +225,13 @@ def can_use_feature(user: User, feature_code: str) -> bool:
     return feature_code in free_allowed
 
 
+def can_auto_create_inventory_product(user: User) -> bool:
+    if is_vip_user(user):
+        return True
+
+    return get_effective_plan_code(user) in {'pro', 'business'}
+
+
 def get_entitlements(user: User) -> dict[str, Any]:
     tenant = get_tenant(user)
     cache_key = tenant_cache_key('subscription', tenant.id, 'entitlements')

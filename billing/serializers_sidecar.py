@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from rest_framework import serializers
+from subscription.services import can_auto_create_inventory_product
 from .models_sidecar import (
     TransactionMeta,
     SalesOrder,
@@ -208,23 +209,61 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['converted_to_order']
 
+    def _get_tenant(self):
+        request = self.context.get('request')
+        if not request or not hasattr(request, 'user'):
+            raise serializers.ValidationError({'product': 'Authentication required.'})
+        return getattr(request.user, 'active_tenant', request.user)
+
     def to_internal_value(self, data):
         mutable = dict(data)
         product_value = mutable.get('product')
-        if isinstance(product_value, str):
-            # First accept UUID-style product IDs from the shared sales form.
-            try:
-                UUID(product_value)
-                if Product.objects.filter(id=product_value).exists():
-                    return super().to_internal_value(mutable)
-            except (ValueError, TypeError):
-                pass
+        if not product_value or not str(product_value).strip():
+            raise serializers.ValidationError({'product': 'Product is required.'})
 
-            # Fallback: allow product names from the existing sales form payload.
-            product_obj = Product.objects.filter(name__iexact=product_value).first()
+        tenant = self._get_tenant()
+        can_auto_create_inventory = can_auto_create_inventory_product(tenant)
+        product_obj = None
+
+        if isinstance(product_value, str):
+            product_value = product_value.strip()
+
+        try:
+            product_uuid = UUID(str(product_value))
+            product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
             if not product_obj:
-                raise serializers.ValidationError({'product': f'Unknown product: {product_value}'})
-            mutable['product'] = str(product_obj.id)
+                raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
+        except (ValueError, TypeError):
+            product_name = str(product_value).strip()
+            product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
+
+            if product_obj:
+                updated_fields = []
+                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                    field_value = mutable.get(field)
+                    if field_value is None:
+                        continue
+                    if isinstance(field_value, str) and not field_value.strip():
+                        continue
+                    setattr(product_obj, field, field_value)
+                    updated_fields.append(field)
+                if updated_fields:
+                    product_obj.save(update_fields=updated_fields)
+            else:
+                if not can_auto_create_inventory:
+                    raise serializers.ValidationError({
+                        'product': 'Only Pro and above plans can create new inventory products from quotation forms.'
+                    })
+                product_obj = Product.objects.create(
+                    name=product_name,
+                    hsn_sac_code=mutable.get('hsn_sac_code') or '',
+                    unit=mutable.get('unit') or 'pcs',
+                    price=mutable.get('price') or 0,
+                    tax=mutable.get('tax') or 0,
+                    created_by=tenant,
+                )
+
+        mutable['product'] = str(product_obj.id)
         return super().to_internal_value(mutable)
 
 

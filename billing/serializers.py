@@ -5,6 +5,7 @@ from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, Deliver
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 from cenvoras.constants import IndianStates
+from subscription.services import can_auto_create_inventory_product
 from django.db import transaction
 from django.db.models import F, Sum
 import uuid
@@ -355,8 +356,9 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             error_msg = 'Authentication required.'
             print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
             raise serializers.ValidationError({'product': error_msg})
-        user = request.user
+        user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceItemSerializer: User:", user)
+        can_auto_create_inventory = can_auto_create_inventory_product(user)
 
         try:
             # Try to find product by UUID first
@@ -364,7 +366,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             uuid_obj = uuid.UUID(str(product_value))
             print("DEBUG SalesInvoiceItemSerializer: Valid UUID, looking for product:", uuid_obj)
             try:
-                product = Product.objects.get(id=uuid_obj)
+                product = Product.objects.get(id=uuid_obj, created_by=user)
                 print("DEBUG SalesInvoiceItemSerializer: Found existing product by UUID:", product.name)
                 # Update product fields if present in data
                 updated = False
@@ -395,6 +397,10 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     print("DEBUG SalesInvoiceItemSerializer: Updating existing product fields")
                     product.save()
             except Product.DoesNotExist:
+                if not can_auto_create_inventory:
+                    error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
+                    print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
+                    raise serializers.ValidationError({'product': error_msg})
                 # Create new product
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)
                 try:

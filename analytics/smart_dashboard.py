@@ -67,22 +67,29 @@ class SmartDashboard:
         return round(((today - yesterday) / yesterday) * 100, 1)
     
     def _get_cash_collections(self):
-        """Cash payments received today"""
-        result = Payment.objects.filter(
-            created_by_id__in=self.owner_ids,
-            date=self.today,
-            mode='cash'
-        ).aggregate(total=Sum('amount'))
-        return float(result['total'] or 0)
+        """Running liquid balance (all-time receipts - purchase payments)."""
+        return self._get_net_liquid_balance()
     
     def _get_bank_collections(self):
-        """Bank/UPI payments received today"""
-        result = Payment.objects.filter(
-            created_by_id__in=self.owner_ids,
-            date=self.today,
-            mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
-        ).aggregate(total=Sum('amount'))
+        """Kept for response compatibility; net liquid is returned in cash_in_hand."""
+        return 0.0
+
+    def _get_collections_total(self, on_date=None):
+        payments = Payment.objects.filter(created_by_id__in=self.owner_ids)
+        if on_date is not None:
+            payments = payments.filter(date=on_date)
+        result = payments.aggregate(total=Sum('amount'))
         return float(result['total'] or 0)
+
+    def _get_purchase_paid_total(self):
+        result = PurchaseBill.objects.filter(
+            created_by_id__in=self.owner_ids,
+        ).aggregate(total=Sum('amount_paid'))
+        return float(result['total'] or 0)
+
+    def _get_net_liquid_balance(self):
+        net_balance = self._get_collections_total() - self._get_purchase_paid_total()
+        return round(net_balance, 2)
     
     def _get_net_profit_today(self):
         """Estimated net profit = Sales - Cost of Goods Sold"""
@@ -125,7 +132,7 @@ class SmartDashboard:
         
         # Get payments received for today's invoices
         # This is simplified - ideally would track invoice-level payments
-        total_collected = self._get_cash_collections() + self._get_bank_collections()
+        total_collected = self._get_collections_total(on_date=self.today)
         
         credit_given = float(total_billed) - total_collected
         return max(0, credit_given)

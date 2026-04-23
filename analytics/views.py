@@ -695,18 +695,12 @@ def smart_dashboard(request):
     from .smart_dashboard import SmartDashboard
     
     tenant = getattr(request.user, 'active_tenant', request.user)
-    cache_key = tenant_cache_key('analytics', tenant.id, 'smart-dashboard')
-    
-    # If the client strictly requests fresh data
-    if request.query_params.get('refresh') == 'true':
-        from django.core.cache import cache
-        cache.delete(cache_key)
 
     def build_dashboard():
         dashboard = SmartDashboard(request.user)
         return dashboard.get_full_dashboard()
 
-    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_dashboard))
+    return Response(build_dashboard())
 
 
 # ═══════════════════════════════════════════════════════════════

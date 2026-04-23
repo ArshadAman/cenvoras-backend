@@ -248,7 +248,7 @@ def sales_summary_analytics(request):
     start_date = request.GET.get('start_date')
     end_date = request.GET.get('end_date')
 
-    qs = SalesInvoice.objects.filter(created_by=request.user.active_tenant, status='final')
+    qs = SalesInvoice.objects.filter(created_by=request.user.active_tenant).exclude(status='draft')
     if start_date:
         qs = qs.filter(invoice_date__gte=start_date)
     if end_date:
@@ -262,8 +262,7 @@ def sales_summary_analytics(request):
     this_month_qs = SalesInvoice.objects.filter(
         created_by=request.user.active_tenant,
         invoice_date__gte=this_month_start.date(),
-        status='final',
-    )
+    ).exclude(status='draft')
 
     this_month_revenue = this_month_qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
     this_month_invoices = this_month_qs.count()

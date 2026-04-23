@@ -135,6 +135,70 @@ class SalesInvoiceTests(TestCase):
         self.assertEqual(res.data['total_revenue'], 100.00)
         self.assertEqual(res.data['total_invoices'], 1)
 
+    def test_analytics_includes_non_draft_invoices(self):
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Alice",
+            invoice_number="INV-ND-001",
+            invoice_date="2024-01-10",
+            total_amount=150.00,
+            status="final",
+        )
+        # Legacy/edge-case non-draft status should still count in analytics totals.
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Bob",
+            invoice_number="INV-ND-002",
+            invoice_date="2024-01-10",
+            total_amount=250.00,
+            status="pending",
+        )
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Charlie",
+            invoice_number="INV-ND-003",
+            invoice_date="2024-01-10",
+            total_amount=500.00,
+            status="draft",
+        )
+
+        res = self.client.get("/api/billing/sales-invoices/analytics/?start_date=2024-01-01&end_date=2024-01-31")
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['total_invoices'], 2)
+        self.assertEqual(float(res.data['total_revenue']), 400.00)
+
+    def test_overdue_report_excludes_drafts_and_returns_invoice_rows(self):
+        due_date = date.today() - timedelta(days=3)
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Overdue Final",
+            invoice_number="INV-OD-001",
+            invoice_date=date.today(),
+            due_date=due_date,
+            total_amount=300.00,
+            amount_paid=0,
+            payment_status="pending",
+            status="final",
+        )
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Overdue Draft",
+            invoice_number="INV-OD-002",
+            invoice_date=date.today(),
+            due_date=due_date,
+            total_amount=400.00,
+            amount_paid=0,
+            payment_status="pending",
+            status="draft",
+        )
+
+        res = self.client.get("/api/billing/reports/overdue-bills/")
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['count'], 1)
+        self.assertEqual(res.data['results'][0]['invoice_number'], "INV-OD-001")
+
     def test_partial_paid_invoice_blocks_immutable_field_edit(self):
         invoice = SalesInvoice.objects.create(
             created_by=self.tenant,

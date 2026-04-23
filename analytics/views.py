@@ -349,7 +349,7 @@ def dashboard_summary(request):
         from decimal import Decimal
 
         # Sales
-        sales_qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
+        sales_qs = SalesInvoice.objects.filter(created_by=tenant).exclude(status='draft')
         total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Purchases
@@ -367,8 +367,7 @@ def dashboard_summary(request):
         # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
         sales_items = SalesInvoiceItem.objects.filter(
             sales_invoice__created_by=tenant,
-            sales_invoice__status='final'
-        )
+        ).exclude(sales_invoice__status='draft')
         gst_collected = Decimal('0.00')
         for item in sales_items:
             qty = Decimal(item.quantity)

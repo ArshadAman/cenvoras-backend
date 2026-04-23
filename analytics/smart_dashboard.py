@@ -46,8 +46,7 @@ class SmartDashboard:
         result = SalesInvoice.objects.filter(
             created_by=self.tenant,
             invoice_date=self.today,
-            status='final'
-        ).aggregate(total=Sum('total_amount'))
+        ).exclude(status='draft').aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
     def _get_sales_yesterday(self):
@@ -55,8 +54,7 @@ class SmartDashboard:
         result = SalesInvoice.objects.filter(
             created_by=self.tenant,
             invoice_date=self.yesterday,
-            status='final'
-        ).aggregate(total=Sum('total_amount'))
+        ).exclude(status='draft').aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
     def _get_sales_change_percent(self):

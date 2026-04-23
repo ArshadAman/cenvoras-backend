@@ -15,7 +15,8 @@ def overdue_bills_report(request):
     """Get overdue invoices with true invoice-level outstanding amounts."""
     today = timezone.now().date()
     tenant = getattr(request.user, 'active_tenant', request.user)
-    cache_key = tenant_cache_key('billing', tenant.id, 'overdue-bills')
+    selected_customer_id = request.query_params.get('customer') or 'all'
+    cache_key = tenant_cache_key('billing', tenant.id, 'overdue-bills', selected_customer_id)
 
     def build_report():
         outstanding_expr = ExpressionWrapper(
@@ -28,6 +29,7 @@ def overdue_bills_report(request):
             SalesInvoice.objects.filter(
                 created_by=tenant,
                 due_date__lt=today,
+                status='final',
                 payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID],
             )
             .annotate(outstanding_amount=outstanding_expr)
@@ -35,6 +37,9 @@ def overdue_bills_report(request):
             .select_related('customer')
             .order_by('due_date')
         )
+
+        if request.query_params.get('customer'):
+            overdue_invoices = overdue_invoices.filter(customer_id=request.query_params.get('customer'))
 
         data = []
         for invoice in overdue_invoices:

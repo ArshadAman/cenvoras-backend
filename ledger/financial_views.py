@@ -193,6 +193,18 @@ def balance_sheet(request):
     total_equity += retained_earnings
 
     is_balanced = abs(total_assets - (total_liabilities + total_equity)) < Decimal('0.01')
+    difference = total_assets - (total_liabilities + total_equity)
+
+    if not is_balanced:
+        # Append Virtual Suspense Account to Equity so the totals balance mathematically
+        equity_items.append({
+            'id': 'suspense',
+            'code': 'SUSP',
+            'name': 'Suspense Account (Action Required)',
+            'amount': float(difference),
+            'is_suspense': True,
+        })
+        total_equity += difference
 
     return Response({
         'as_of': as_of or 'current',
@@ -210,7 +222,7 @@ def balance_sheet(request):
             'total': float(total_equity),
         },
         'is_balanced': is_balanced,
-        'difference': float(total_assets - (total_liabilities + total_equity)),
+        'difference': float(difference),
     })
 
 

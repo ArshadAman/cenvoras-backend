@@ -785,3 +785,98 @@ def create_purchase_bill_ledger_entries(request):
             'success': False,
             'error': 'Internal server error while creating purchase bill ledger entries.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@swagger_auto_schema(
+    method='post',
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description='Date of journal entry'),
+            'description': openapi.Schema(type=openapi.TYPE_STRING, description='Global description'),
+            'reference': openapi.Schema(type=openapi.TYPE_STRING, description='Reference number'),
+            'entries': openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'account_id': openapi.Schema(type=openapi.TYPE_STRING),
+                        'debit': openapi.Schema(type=openapi.TYPE_NUMBER),
+                        'credit': openapi.Schema(type=openapi.TYPE_NUMBER),
+                    }
+                )
+            ),
+        },
+        required=['date', 'description', 'entries']
+    ),
+    responses={
+        201: openapi.Response(description="Manual journal entries created successfully")
+    }
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_manual_journal_entry(request):
+    """Manually create balancing journal entries (both debits and credits)"""
+    try:
+        from django.db import transaction
+        from decimal import Decimal
+
+        date = request.data.get('date')
+        description = request.data.get('description')
+        reference = request.data.get('reference', '')
+        entries_data = request.data.get('entries', [])
+
+        if not all([date, description, entries_data]):
+            return Response({'success': False, 'error': 'date, description, and entries are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        total_debit = Decimal('0')
+        total_credit = Decimal('0')
+
+        # Validate entries and sum debits/credits
+        for item in entries_data:
+            total_debit += Decimal(str(item.get('debit') or 0))
+            total_credit += Decimal(str(item.get('credit') or 0))
+
+        if total_debit != total_credit:
+            return Response({'success': False, 'error': f'Debits ({total_debit}) must equal Credits ({total_credit})'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if total_debit == 0:
+            return Response({'success': False, 'error': 'Journal entry requires at least a non-zero debit and credit amount'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            created_entries = []
+            for item in entries_data:
+                try:
+                    account = Account.objects.get(id=item.get('account_id'), created_by=request.user)
+                except Account.DoesNotExist:
+                    raise ValueError(f"Account setup issue: {item.get('account_id')} not found")
+
+                debit = Decimal(str(item.get('debit') or 0))
+                credit = Decimal(str(item.get('credit') or 0))
+
+                # Do not insert empty 0 / 0 rows unless absolutely needed
+                if debit == 0 and credit == 0:
+                    continue
+
+                entry = GeneralLedgerEntry.objects.create(
+                    date=date,
+                    account=account,
+                    debit=debit,
+                    credit=credit,
+                    description=description,
+                    reference=reference,
+                    created_by=request.user
+                )
+                created_entries.append(entry)
+
+        return Response({
+            'success': True,
+            'message': 'Journal entry created successfully',
+            'entries_created': len(created_entries)
+        }, status=status.HTTP_201_CREATED)
+
+    except ValueError as ve:
+        return Response({'success': False, 'error': str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"Error creating manual journal entry: {str(e)}")
+        return Response({'success': False, 'error': 'Internal server error while creating manual entries.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

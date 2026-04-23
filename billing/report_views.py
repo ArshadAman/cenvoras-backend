@@ -3,9 +3,10 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from .models import SalesInvoice, SalesInvoiceItem, Customer, BillPaymentStatus
 from django.utils import timezone
-from django.db.models import Sum, F, DecimalField, Value, ExpressionWrapper
+from django.db.models import Sum, F, DecimalField, Value, ExpressionWrapper, Q
 from django.db.models.functions import Coalesce
 from decimal import Decimal
+from django.core.cache import cache
 
 from cenvoras.cache_utils import CACHE_TTL_MEDIUM, cache_get_or_set, tenant_cache_key
 
@@ -18,6 +19,9 @@ def overdue_bills_report(request):
     selected_customer_id = request.query_params.get('customer') or 'all'
     cache_key = tenant_cache_key('billing', tenant.id, 'overdue-bills', selected_customer_id)
 
+    if str(request.query_params.get('refresh', '')).lower() == 'true':
+        cache.delete(cache_key)
+
     def build_report():
         outstanding_expr = ExpressionWrapper(
             Coalesce(F('total_amount'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))) -
@@ -28,9 +32,12 @@ def overdue_bills_report(request):
         overdue_invoices = (
             SalesInvoice.objects.filter(
                 created_by=tenant,
-                due_date__lt=today,
-                status='final',
                 payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID],
+            )
+            .exclude(status='draft')
+            .filter(
+                Q(due_date__lt=today) |
+                (Q(due_date__isnull=True) & Q(invoice_date__lt=today))
             )
             .annotate(outstanding_amount=outstanding_expr)
             .filter(outstanding_amount__gt=0)

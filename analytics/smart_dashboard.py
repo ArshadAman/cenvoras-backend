@@ -20,6 +20,7 @@ class SmartDashboard:
     def __init__(self, user):
         self.user = user
         self.tenant = getattr(user, 'active_tenant', user)
+        self.owner_ids = list({self.user.id, self.tenant.id})
         self.today = timezone.localdate()
         self.yesterday = self.today - timedelta(days=1)
     
@@ -43,18 +44,18 @@ class SmartDashboard:
     
     def _get_sales_today(self):
         """Total sales amount for today"""
+        today_filter = Q(invoice_date=self.today) | Q(created_at__date=self.today)
         result = SalesInvoice.objects.filter(
-            created_by=self.tenant,
-            invoice_date=self.today,
-        ).exclude(status='draft').aggregate(total=Sum('total_amount'))
+            created_by_id__in=self.owner_ids,
+        ).exclude(status='draft').filter(today_filter).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
     def _get_sales_yesterday(self):
         """Total sales amount for yesterday"""
+        yesterday_filter = Q(invoice_date=self.yesterday) | Q(created_at__date=self.yesterday)
         result = SalesInvoice.objects.filter(
-            created_by=self.tenant,
-            invoice_date=self.yesterday,
-        ).exclude(status='draft').aggregate(total=Sum('total_amount'))
+            created_by_id__in=self.owner_ids,
+        ).exclude(status='draft').filter(yesterday_filter).aggregate(total=Sum('total_amount'))
         return float(result['total'] or 0)
     
     def _get_sales_change_percent(self):
@@ -68,7 +69,7 @@ class SmartDashboard:
     def _get_cash_collections(self):
         """Cash payments received today"""
         result = Payment.objects.filter(
-            created_by=self.tenant,
+            created_by_id__in=self.owner_ids,
             date=self.today,
             mode='cash'
         ).aggregate(total=Sum('amount'))
@@ -77,7 +78,7 @@ class SmartDashboard:
     def _get_bank_collections(self):
         """Bank/UPI payments received today"""
         result = Payment.objects.filter(
-            created_by=self.tenant,
+            created_by_id__in=self.owner_ids,
             date=self.today,
             mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
         ).aggregate(total=Sum('amount'))
@@ -87,10 +88,10 @@ class SmartDashboard:
         """Estimated net profit = Sales - Cost of Goods Sold"""
         # Get today's sales items
         sales_items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=self.tenant,
-            sales_invoice__invoice_date=self.today,
-            sales_invoice__status='final'
-        ).select_related('product', 'batch')
+            sales_invoice__created_by_id__in=self.owner_ids,
+        ).filter(
+            Q(sales_invoice__invoice_date=self.today) | Q(sales_invoice__created_at__date=self.today)
+        ).exclude(sales_invoice__status='draft').select_related('product', 'batch')
         
         total_revenue = Decimal('0')
         total_cost = Decimal('0')
@@ -115,9 +116,9 @@ class SmartDashboard:
         """Total unpaid invoices created today (Udhaar given)"""
         # Get today's invoices
         today_invoices = SalesInvoice.objects.filter(
-            created_by=self.tenant,
-            invoice_date=self.today,
-            status='final'
+            created_by_id__in=self.owner_ids,
+        ).exclude(status='draft').filter(
+            Q(invoice_date=self.today) | Q(created_at__date=self.today)
         )
         
         total_billed = today_invoices.aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
@@ -133,7 +134,7 @@ class SmartDashboard:
         """Payments received today for old invoices"""
         # Total payments today
         total_payments = Payment.objects.filter(
-            created_by=self.tenant,
+            created_by_id__in=self.owner_ids,
             date=self.today
         ).aggregate(total=Sum('amount'))['total'] or 0
         return float(total_payments)
@@ -142,7 +143,7 @@ class SmartDashboard:
         """Total money owed to the business"""
         # Sum of all customer outstanding balance
         result = Customer.objects.filter(
-            created_by=self.tenant,
+            created_by_id__in=self.owner_ids,
             current_balance__gt=0
         ).aggregate(total=Sum('current_balance'))
         return float(result['total'] or 0)

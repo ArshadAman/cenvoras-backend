@@ -36,6 +36,7 @@ class SmartDashboard:
             'sales_change_percent': self._get_sales_change_percent(),
             'cash_in_hand': self._get_cash_collections(),
             'bank_collections': self._get_bank_collections(),
+            'total_liquid_balance': self._get_net_liquid_balance(),
             'net_profit_today': self._get_net_profit_today(),
             'udhaar_given_today': self._get_credit_given_today(),
             'udhaar_collected_today': self._get_credit_collected_today(),
@@ -67,12 +68,22 @@ class SmartDashboard:
         return round(((today - yesterday) / yesterday) * 100, 1)
     
     def _get_cash_collections(self):
-        """Running liquid balance (all-time receipts - purchase payments)."""
-        return self._get_net_liquid_balance()
+        """Today's cash collections."""
+        result = Payment.objects.filter(
+            created_by_id__in=self.owner_ids,
+            date=self.today,
+            mode='cash'
+        ).aggregate(total=Sum('amount'))
+        return float(result['total'] or 0)
     
     def _get_bank_collections(self):
-        """Kept for response compatibility; net liquid is returned in cash_in_hand."""
-        return 0.0
+        """Today's bank/UPI collections."""
+        result = Payment.objects.filter(
+            created_by_id__in=self.owner_ids,
+            date=self.today,
+            mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
+        ).aggregate(total=Sum('amount'))
+        return float(result['total'] or 0)
 
     def _get_collections_total(self, on_date=None):
         payments = Payment.objects.filter(created_by_id__in=self.owner_ids)

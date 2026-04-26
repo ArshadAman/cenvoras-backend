@@ -18,12 +18,11 @@ class AuditLogListView(generics.ListAPIView):
         
         qs = AuditLog.objects.filter(tenant=tenant).exclude(user_email='system')
         
-        # Security: Hide any action performed by a superuser
-        qs = qs.exclude(user__is_superuser=True)
+        # Security: Hide any action performed by a superuser or staff
+        qs = qs.exclude(user__is_superuser=True).exclude(user__is_staff=True)
         
-        # Safety net: Hide actions by common admin emails if they aren't meant for the tenant
-        # (Though tenant filtering should handle this, we add it as a secondary layer)
-        qs = qs.exclude(user_email__in=['cenvoras@gmail.com'])
+        # Safety net: Hide actions by common admin emails
+        qs = qs.exclude(user_email__in=['cenvoras@gmail.com', 'admin@cenvora.app', 'system'])
         
         return qs.order_by('-timestamp')
 

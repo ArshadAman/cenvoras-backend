@@ -101,7 +101,13 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 		if amount > Decimal('0.00') and amount < Decimal('1.00'):
 			amount = Decimal('1.00')
 
-	base_price_before_discount = target_plan.original_price_for_cycle(target_cycle)
+	# Failsafe: Ensure Yearly/Quarterly prices aren't accidentally Monthly-level
+	if payment_required and amount > Decimal('0.00'):
+		if target_cycle == BillingCycle.YEARLY and amount < (new_plan_full_price * Decimal('0.5')):
+			# If the final amount is less than 50% of the yearly price, check if credit is really that high
+			if credit < (new_plan_full_price * Decimal('0.5')):
+				# Force a re-calculation or at least use the full price if something is wrong
+				amount = max(Decimal('0.00'), new_plan_full_price - credit)
 
 	summary = ""
 	if payment_required:

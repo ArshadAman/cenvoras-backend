@@ -1,13 +1,4 @@
 from django.urls import path
-
-from .views import (
-    confirm_plan_payment,
-    create_plan_payment_order,
-    latest_payment_status,
-    plan_catalog,
-    plan_change_quote,
-    schedule_plan_change,
-    subscription_entitlements,
 from .views import (
     plan_catalog,
     subscription_entitlements,

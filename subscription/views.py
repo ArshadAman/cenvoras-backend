@@ -1,226 +1,142 @@
-from datetime import datetime, timedelta
 import uuid
-from decimal import Decimal
+import json
+import logging
+import hashlib
+from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
-from django.db import transaction
+import requests
+from django.conf import settings
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import BillingCycle, Plan, SubscriptionPaymentOrder, SubscriptionStatus, TenantSubscription
-from .services import get_entitlements, get_tenant
+from cenvoras.cache_utils import CACHE_TTL_LONG, cache_get_or_set, global_cache_key
+
+from .models import (
+	Plan,
+	TenantSubscription,
+	SubscriptionStatus,
+	SubscriptionPayment,
+	SubscriptionPaymentStatus,
+	SubscriptionPaymentAction,
+	WebhookEvent,
+)
+from .services import get_entitlements
+from .tasks import process_cashfree_webhook, verify_cashfree_signature, send_payment_status_email
+
+logger = logging.getLogger(__name__)
 
 
-def _normalize_cycle(cycle: str | None) -> str:
-	normalized = str(cycle or BillingCycle.MONTHLY).lower()
-	if normalized in {BillingCycle.MONTHLY, BillingCycle.QUARTERLY, BillingCycle.YEARLY}:
-		return normalized
-	return BillingCycle.MONTHLY
+def _normalize_webhook_event_type(raw_event_type: str) -> str:
+	event_type = (raw_event_type or '').upper().strip().replace('-', '_').replace(' ', '_')
+	if event_type.endswith('_WEBHOOK'):
+		event_type = event_type.replace('_WEBHOOK', '')
+	if event_type in {'PAYMENT_SUCCEEDED', 'PAYMENT_SUCCESSFUL'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'PAYMENT_FAILURE', 'PAYMENT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'PAYMENT_PENDING'}:
+		return 'PAYMENT_PENDING'
+	# New endpoint labels / variants commonly seen in provider dashboards.
+	if event_type in {'SUCCESS_PAYMENT', 'PAYMENT_SUCCESS'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'FAILED_PAYMENT', 'CHECKOUT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'ABANDONED_CHECKOUT', 'USER_DROPPED_PAYMENT'}:
+		return 'PAYMENT_PENDING'
+	return event_type
 
 
-def _days_for_cycle(cycle: str) -> int:
-	normalized = _normalize_cycle(cycle)
-	if normalized == BillingCycle.YEARLY:
-		return 365
-	if normalized == BillingCycle.QUARTERLY:
-		return 90
-	return 30
+def _extract_payment_status(payload: dict) -> str:
+	if not isinstance(payload, dict):
+		return ''
 
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
 
-def _get_plan_change_data(subscription, target_plan, target_cycle):
-	now = timezone.now()
-	current_plan = subscription.plan
-	current_code = str(current_plan.code or 'free').lower() if current_plan else 'free'
-	target_code = str(target_plan.code or 'free').lower()
-	current_rank = _rank(current_code)
-	target_rank = _rank(target_code)
-	current_is_free = current_code in {'free', 'starter'}
-
-	action = 'upgrade'
-	payment_required = True
-	effective_at = now
-
-	if target_plan.is_free:
-		action = 'current' if target_code == current_code else 'downgrade_not_allowed'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-	elif target_code == current_code and target_cycle == _normalize_cycle(subscription.current_billing_cycle):
-		action = 'renewal'
-	elif target_code == current_code:
-		action = 'upgrade'
-	elif target_rank < current_rank and target_plan.is_free:
-		action = 'downgrade_not_allowed'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-	elif target_rank < current_rank:
-		action = 'unsupported_paid_schedule'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-
-	credit = Decimal('0.00')
-	days_used = 0
-	days_remaining = 0
-	current_daily_rate = Decimal('0.00')
-	current_cycle_price = Decimal('0.00')
-	current_cycle_total_days = 0
-	new_plan_full_price = Decimal('0.00')
-	amount = Decimal('0.00')
-
-	if payment_required:
-		new_plan_full_price = target_plan.price_for_cycle(target_cycle)
-		
-		has_active_paid_period = (
-			not current_is_free
-			and subscription.current_period_end
-			and subscription.current_period_end > now
-			and subscription.current_period_start
-		)
-
-		if has_active_paid_period and action != 'renewal':
-			current_cycle = _normalize_cycle(subscription.current_billing_cycle)
-			current_cycle_total_days = _days_for_cycle(current_cycle)
-			current_cycle_price = current_plan.price_for_cycle(current_cycle)
-
-			days_used = max(0, (now - subscription.current_period_start).days)
-			days_remaining = max(0, current_cycle_total_days - days_used)
-
-			if current_cycle_total_days > 0 and days_remaining > 0:
-				current_daily_rate = current_cycle_price / Decimal(str(current_cycle_total_days))
-				credit = (current_daily_rate * Decimal(str(days_remaining))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
-			amount = max(Decimal('0.00'), new_plan_full_price - credit)
-			effective_at = now
-		elif action == 'renewal':
-			amount = new_plan_full_price
-			effective_at = subscription.current_period_end or now
-		else:
-			amount = new_plan_full_price
-
-		if amount > Decimal('0.00') and amount < Decimal('1.00'):
-			amount = Decimal('1.00')
-
-	# Failsafe: Ensure Yearly/Quarterly prices aren't accidentally Monthly-level
-	if payment_required and amount > Decimal('0.00'):
-		if target_cycle == BillingCycle.YEARLY and amount < (new_plan_full_price * Decimal('0.5')):
-			# If the final amount is less than 50% of the yearly price, check if credit is really that high
-			if credit < (new_plan_full_price * Decimal('0.5')):
-				# Force a re-calculation or at least use the full price if something is wrong
-				amount = max(Decimal('0.00'), new_plan_full_price - credit)
-
-	summary = ""
-	if payment_required:
-		if credit > Decimal('0.00'):
-			summary = f"Upgrade to {target_plan.name}. Credit of INR {credit} for {days_remaining} unused days applied. Pay INR {amount}."
-		else:
-			summary = f"Upgrade to {target_plan.name}. Pay INR {amount}."
-
-	return {
-		'action': action,
-		'payment_required': payment_required,
-		'amount': amount,
-		'new_plan_full_price': new_plan_full_price,
-		'base_price_before_discount': base_price_before_discount,
-		'credit': credit,
-		'days_used': days_used,
-		'days_remaining': days_remaining,
-		'current_daily_rate': current_daily_rate,
-		'current_cycle_price': current_cycle_price,
-		'current_cycle_total_days': current_cycle_total_days,
-		'effective_at': effective_at,
-		'summary': summary,
-	}
-
-
-def _rank(plan_code: str | None) -> int:
-	code = str(plan_code or '').lower()
-	if code == 'business':
-		return 2
-	if code == 'pro':
-		return 1
-	return 0
-
-
-def _add_days(dt: datetime, days: int) -> datetime:
-	return dt + timedelta(days=int(days))
-
-
-def _coerce_bool(value) -> bool:
-	if isinstance(value, bool):
-		return value
-	return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-
-
-def _get_subscription(tenant):
-	subscription, _ = TenantSubscription.objects.get_or_create(
-		tenant=tenant,
-		defaults={
-			'plan': Plan.objects.filter(code='free').first() or Plan.objects.filter(is_active=True).order_by('monthly_price').first(),
-			'status': SubscriptionStatus.TRIAL if getattr(tenant, 'is_trial_active', False) else SubscriptionStatus.ACTIVE,
-			'current_period_start': timezone.now(),
-			'current_billing_cycle': BillingCycle.MONTHLY,
-		},
+	status_value = (
+		payment.get('payment_status')
+		or data.get('payment_status')
+		or payload.get('payment_status')
+		or ''
 	)
-	return subscription
+	return str(status_value).upper().strip().replace('-', '_').replace(' ', '_')
 
 
-def _apply_pending_if_due(subscription: TenantSubscription):
-	if not subscription.pending_plan or not subscription.pending_plan_starts_at:
-		return
-	now = timezone.now()
-	if now < subscription.pending_plan_starts_at:
-		return
+def _extract_order_id(payload: dict) -> str | None:
+	if not isinstance(payload, dict):
+		return None
 
-	cycle = _normalize_cycle(subscription.pending_billing_cycle)
-	start_at = subscription.pending_plan_starts_at
-	end_at = _add_days(start_at, _days_for_cycle(cycle))
-	subscription.plan = subscription.pending_plan
-	subscription.current_billing_cycle = cycle
-	subscription.current_period_start = start_at
-	subscription.current_period_end = end_at
-	subscription.status = SubscriptionStatus.ACTIVE
-	subscription.pending_plan = None
-	subscription.pending_billing_cycle = None
-	subscription.pending_plan_starts_at = None
-	subscription.save(update_fields=[
-		'plan',
-		'current_billing_cycle',
-		'current_period_start',
-		'current_period_end',
-		'status',
-		'pending_plan',
-		'pending_billing_cycle',
-		'pending_plan_starts_at',
-		'updated_at',
-	])
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	order = data.get('order', {}) if isinstance(data.get('order', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+	order_id = (
+		data.get('orderId')
+		or data.get('order_id')
+		or order.get('order_id')
+		or order.get('orderId')
+		or payment.get('order_id')
+		or payment.get('orderId')
+		or payload.get('orderId')
+		or payload.get('order_id')
+	)
+
+	return str(order_id).strip() if order_id else None
 
 
-def _serialize_order(order: SubscriptionPaymentOrder):
-	return {
-		'order_id': order.order_id,
-		'payment_session_id': order.payment_session_id,
-		'status': order.status,
-		'amount': str(order.amount),
-		'plan_code': order.target_plan.code,
-		'plan_name': order.target_plan.name,
-		'billing_cycle': order.billing_cycle,
-		'duration_days': order.duration_days,
-		'created_at': order.created_at,
-		'paid_at': order.paid_at,
-		'failure_reason': order.failure_reason,
-		'cashfree_env': 'sandbox',
-		# Frontend uses this to skip checkout when backend is not yet wired to a payment gateway.
-		'skip_checkout': not bool(order.payment_session_id),
+def _is_webhook_test_event(payload: dict, event_type: str, headers) -> bool:
+	if not isinstance(payload, dict):
+		return False
+
+	candidates = {
+		(event_type or '').upper(),
+		str(payload.get('event', '')).upper(),
+		str(payload.get('type', '')).upper(),
+		str(payload.get('event_type', '')).upper(),
 	}
+
+	known_test_events = {
+		'TEST',
+		'PING',
+		'WEBHOOK_TEST',
+		'ENDPOINT_TEST',
+		'WEBHOOK_PING',
+	}
+	if candidates.intersection(known_test_events):
+		return True
+
+	if payload.get('is_test') is True or payload.get('test') is True:
+		return True
+
+	if str(headers.get('x-webhook-event', '')).upper() in known_test_events:
+		return True
+
+	if str(headers.get('x-webhook-test', '')).strip().lower() == 'true':
+		return True
+
+	return False
+
+
+def _ack_ignored(reason: str, event_id: str | None = None, details: str | None = None):
+	payload = {
+		'status': 'ignored',
+		'reason': reason,
+	}
+	if event_id:
+		payload['event_id'] = event_id
+	if details:
+		payload['details'] = details
+	return Response(payload, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def subscription_entitlements(request):
-	tenant = get_tenant(request.user)
-	subscription = _get_subscription(tenant)
-	_apply_pending_if_due(subscription)
 	return Response({
 		'success': True,
 		'data': get_entitlements(request.user),
@@ -237,23 +153,16 @@ def plan_catalog(request):
 			'code': plan.code,
 			'name': plan.name,
 			'description': plan.description,
-			'monthly_price': str(plan.price_for_cycle(BillingCycle.MONTHLY)),
-			'quarterly_price': str(plan.price_for_cycle(BillingCycle.QUARTERLY)),
-			'yearly_price': str(plan.price_for_cycle(BillingCycle.YEARLY)),
-			'original_monthly_price': str(plan.original_price_for_cycle(BillingCycle.MONTHLY)),
-			'original_quarterly_price': str(plan.original_price_for_cycle(BillingCycle.QUARTERLY)),
-			'original_yearly_price': str(plan.original_price_for_cycle(BillingCycle.YEARLY)),
+			'monthly_price': str(plan.monthly_price),
+			'yearly_price': str(plan.yearly_price),
 			'max_managers': plan.max_managers,
 			'max_team_members': getattr(plan, 'max_team_members', plan.max_managers),
 			'max_customers': getattr(plan, 'max_customers', -1),
 			'max_invoices_per_month': plan.max_invoices_per_month,
 			'features': [feature.code for feature in plan.features.all()],
-			'cycle_days': {
-				BillingCycle.MONTHLY: _days_for_cycle(BillingCycle.MONTHLY),
-				BillingCycle.QUARTERLY: _days_for_cycle(BillingCycle.QUARTERLY),
-				BillingCycle.YEARLY: _days_for_cycle(BillingCycle.YEARLY),
-			},
-		})
+		}
+		for plan in Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
+	])
 
 	return Response({
 		'success': True,
@@ -261,215 +170,745 @@ def plan_catalog(request):
 	})
 
 
+def _cashfree_base_url():
+	env = (getattr(settings, 'CASHFREE_ENV', 'sandbox') or 'sandbox').lower()
+	return 'https://api.cashfree.com/pg' if env == 'production' else 'https://sandbox.cashfree.com/pg'
+
+
+def _cashfree_headers():
+	return {
+		'Content-Type': 'application/json',
+		'x-api-version': getattr(settings, 'CASHFREE_API_VERSION', '2023-08-01'),
+		'x-client-id': getattr(settings, 'CASHFREE_CLIENT_ID', ''),
+		'x-client-secret': getattr(settings, 'CASHFREE_CLIENT_SECRET', ''),
+	}
+
+
+def _sync_legacy_subscription_fields(tenant, plan_code):
+	tier_map = {
+		'free': 'FREE',
+		'pro': 'MID',
+		'business': 'PRO',
+	}
+	tenant.subscription_status = 'active'
+	tenant.subscription_tier = tier_map.get(plan_code, 'FREE')
+	tenant.save(update_fields=['subscription_status', 'subscription_tier'])
+
+
+def _plan_rank(plan_code: str) -> int:
+	code = (plan_code or '').lower()
+	if code == 'business':
+		return 2
+	if code == 'pro':
+		return 1
+	return 0
+
+
+def _quantize_money(value: Decimal) -> Decimal:
+	return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def _calculate_plan_change_quote(subscription, target_plan, now):
+	current_plan = subscription.plan if subscription else None
+	current_code = getattr(current_plan, 'code', 'free')
+	target_code = target_plan.code
+	active_until = None
+	if subscription and subscription.current_period_end and subscription.current_period_end > now:
+		active_until = subscription.current_period_end
+
+	current_rank = _plan_rank(current_code)
+	target_rank = _plan_rank(target_code)
+
+	if target_code == current_code and active_until:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.RENEW,
+			'apply_immediately': False,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Renew {target_plan.name} for 30 more days.",
+		}
+
+	if target_rank == current_rank:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.ACTIVATE,
+			'apply_immediately': True,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Activate {target_plan.name} immediately for 30 days.",
+		}
+
+	if target_rank > current_rank and active_until and current_rank > 0:
+		total_seconds = max(int((subscription.current_period_end - subscription.current_period_start).total_seconds()), 1)
+		remaining_seconds = max(int((active_until - now).total_seconds()), 0)
+		remaining_ratio = Decimal(remaining_seconds) / Decimal(total_seconds)
+		delta = max(Decimal('0.00'), Decimal(target_plan.monthly_price) - Decimal(current_plan.monthly_price))
+		amount = _quantize_money(delta * remaining_ratio)
+		if amount < Decimal('1.00'):
+			amount = Decimal('1.00')
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.UPGRADE_NOW,
+			'apply_immediately': True,
+			'amount': amount,
+			'source_plan_code': current_code,
+			'summary': f"Upgrade now to {target_plan.name}. Remaining-cycle prorated charge applies.",
+		}
+
+	if target_rank > current_rank:
+		return {
+			'payment_required': True,
+			'action': SubscriptionPaymentAction.ACTIVATE,
+			'apply_immediately': True,
+			'amount': _quantize_money(target_plan.monthly_price),
+			'source_plan_code': current_code,
+			'summary': f"Activate {target_plan.name} immediately for 30 days.",
+		}
+
+	if active_until:
+		return {
+			'payment_required': False,
+			'action': 'downgrade_not_allowed',
+			'apply_immediately': False,
+			'amount': Decimal('0.00'),
+			'source_plan_code': current_code,
+			'summary': 'Downgrades are not available from profile. Renew the current plan or upgrade to a higher plan.',
+		}
+
+	return {
+		'payment_required': True,
+		'action': SubscriptionPaymentAction.ACTIVATE,
+		'apply_immediately': True,
+		'amount': _quantize_money(target_plan.monthly_price),
+		'source_plan_code': current_code,
+		'summary': f"Activate {target_plan.name} immediately for 30 days.",
+	}
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def plan_change_quote(request):
-	target_plan_code = str(request.data.get('target_plan_code') or '').lower().strip()
-	billing_cycle = _normalize_cycle(request.data.get('billing_cycle'))
-	if not target_plan_code:
-		return Response({'success': False, 'error': 'target_plan_code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+	tenant = getattr(request.user, 'active_tenant', request.user)
 
-	target_plan = Plan.objects.filter(code=target_plan_code, is_active=True).first()
+	if request.user.id != tenant.id:
+		return Response({
+			'success': False,
+			'error': 'Only tenant admin can manage plan changes.'
+		}, status=status.HTTP_403_FORBIDDEN)
+
+	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
+	if target_code not in {'starter', 'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be starter, free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	lookup_code = 'free' if target_code == 'starter' else target_code
+
+	target_plan = Plan.objects.filter(code=lookup_code, is_active=True).first() if lookup_code != 'free' else None
+	if lookup_code != 'free' and not target_plan:
+		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+	now = timezone.now()
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
 	if not target_plan:
-		return Response({'success': False, 'error': 'Requested plan does not exist.'}, status=status.HTTP_404_NOT_FOUND)
-
-	tenant = get_tenant(request.user)
-	subscription = _get_subscription(tenant)
-	_apply_pending_if_due(subscription)
-	
-	quote_data = _get_plan_change_data(subscription, target_plan, billing_cycle)
-	
-	summary = ""
-	if quote_data['payment_required']:
-		cycle_label = billing_cycle.capitalize()
-		if quote_data['credit'] > Decimal('0.00'):
-			summary = (
-				f"Upgrade to {target_plan.name} ({cycle_label}). "
-				f"Credit of INR {quote_data['credit']} applied for unused days. "
-				f"Total to pay: INR {quote_data['amount']}."
-			)
-		else:
-			summary = f"Upgrade to {target_plan.name} ({cycle_label}). Total: INR {quote_data['amount']}."
+		free_plan = Plan(code='free', name='Starter', monthly_price=Decimal('0.00'))
+		quote = _calculate_plan_change_quote(subscription, free_plan, now)
 	else:
-		summary = f"{target_plan.name} — no payment required."
+		quote = _calculate_plan_change_quote(subscription, target_plan, now)
 
 	return Response({
 		'success': True,
 		'data': {
-			'action': quote_data['action'],
-			'payment_required': quote_data['payment_required'],
-			'target_plan_code': target_plan.code,
-			'target_plan_name': target_plan.name,
-			'billing_cycle': billing_cycle,
-			'amount': str(quote_data['amount']),
-			'original_amount': str(quote_data['base_price_before_discount']),
-			'base_price_before_discount': str(quote_data['base_price_before_discount']),
-			'new_plan_full_price': str(quote_data['new_plan_full_price']),
-			'credit': str(quote_data['credit']),
-			'days_used': quote_data['days_used'],
-			'days_remaining': quote_data['days_remaining'],
-			'current_daily_rate': str(quote_data['current_daily_rate'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-			'current_cycle_price': str(quote_data['current_cycle_price']),
-			'current_cycle_total_days': quote_data['current_cycle_total_days'],
-			'duration_days': _days_for_cycle(billing_cycle) if quote_data['payment_required'] else 0,
-			'effective_at': quote_data['effective_at'],
-			'summary': summary,
-		},
+			'target_plan_code': target_code,
+			'target_plan_name': target_plan.name if target_plan else 'Starter',
+			'payment_required': quote['payment_required'],
+			'action': quote['action'],
+			'apply_immediately': quote.get('apply_immediately', False),
+			'amount': str(quote['amount']),
+			'effective_at': quote.get('effective_at'),
+			'summary': quote.get('summary', ''),
+		}
 	})
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def schedule_plan_change(request):
-	target_plan_code = str(request.data.get('target_plan_code') or '').lower().strip()
-	billing_cycle = _normalize_cycle(request.data.get('billing_cycle'))
-	if not target_plan_code:
-		return Response({'success': False, 'error': 'target_plan_code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+	tenant = getattr(request.user, 'active_tenant', request.user)
 
-	target_plan = Plan.objects.filter(code=target_plan_code, is_active=True).first()
+	if request.user.id != tenant.id:
+		return Response({
+			'success': False,
+			'error': 'Only tenant admin can manage plan changes.'
+		}, status=status.HTTP_403_FORBIDDEN)
+
+	target_code = str(request.data.get('target_plan_code', '')).strip().lower()
+	if target_code not in {'starter', 'free', 'pro', 'business'}:
+		return Response({'success': False, 'error': 'target_plan_code must be starter, free, pro or business.'}, status=status.HTTP_400_BAD_REQUEST)
+	lookup_code = 'free' if target_code == 'starter' else target_code
+
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
+	now = timezone.now()
+	if not subscription or not subscription.current_period_end or subscription.current_period_end <= now:
+		return Response({'success': False, 'error': 'No active cycle available. Use payment to activate a plan now.'}, status=status.HTTP_400_BAD_REQUEST)
+
+	target_plan = Plan.objects.filter(code=lookup_code, is_active=True).first() if lookup_code != 'free' else None
+	active_until = subscription.current_period_end
+
+	if lookup_code == 'free':
+		return Response({
+			'success': False,
+			'error': 'Downgrades to Starter are not available from profile. Renew the current plan or upgrade instead.',
+			'data': {
+				'action': 'downgrade_not_allowed',
+				'message': 'Downgrades to Starter are not available from profile. Renew the current plan or upgrade instead.',
+			}
+		}, status=status.HTTP_400_BAD_REQUEST)
+
 	if not target_plan:
-		return Response({'success': False, 'error': 'Requested plan does not exist.'}, status=status.HTTP_404_NOT_FOUND)
-
-	tenant = get_tenant(request.user)
-	subscription = _get_subscription(tenant)
-	_apply_pending_if_due(subscription)
-	if not subscription.current_period_end:
-		return Response({'success': False, 'error': 'No active paid period found to schedule against.'}, status=status.HTTP_400_BAD_REQUEST)
-
-	subscription.pending_plan = target_plan
-	subscription.pending_billing_cycle = billing_cycle
-	subscription.pending_plan_starts_at = subscription.current_period_end
-	subscription.save(update_fields=['pending_plan', 'pending_billing_cycle', 'pending_plan_starts_at', 'updated_at'])
+		return Response({'success': False, 'error': 'Target plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 	return Response({
-		'success': True,
+		'success': False,
+		'error': 'Only paid upgrades can be scheduled without immediate payment.',
 		'data': {
-			'message': f'Next plan ({target_plan.name}, {billing_cycle}) is scheduled.',
-			'effective_at': subscription.pending_plan_starts_at,
-		},
-	})
+			'action': 'unsupported_paid_schedule',
+			'message': 'Activate Pro/Business with payment when current cycle ends.',
+		}
+	}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_plan_payment_order(request):
-	plan_code = str(request.data.get('plan_code') or '').lower().strip()
-	billing_cycle = _normalize_cycle(request.data.get('billing_cycle'))
-	force_new_order = _coerce_bool(request.data.get('force_new_order'))
-	if not plan_code:
-		return Response({'success': False, 'error': 'plan_code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+	tenant = getattr(request.user, 'active_tenant', request.user)
 
-	target_plan = Plan.objects.filter(code=plan_code, is_active=True).first()
-	if not target_plan:
-		return Response({'success': False, 'error': 'Requested plan does not exist.'}, status=status.HTTP_404_NOT_FOUND)
+	if request.user.id != tenant.id:
+		return Response({
+			'success': False,
+			'error': 'Only tenant admin can create plan payments.'
+		}, status=status.HTTP_403_FORBIDDEN)
 
-	tenant = get_tenant(request.user)
-	subscription = _get_subscription(tenant)
-	_apply_pending_if_due(subscription)
-	
-	quote_data = _get_plan_change_data(subscription, target_plan, billing_cycle)
-	amount = quote_data['amount']
-	duration_days = _days_for_cycle(billing_cycle)
+	plan_code = str(request.data.get('plan_code', '')).strip().lower()
+	if plan_code not in {'pro', 'business'}:
+		return Response({
+			'success': False,
+			'error': 'Only pro and business plans are payable.'
+		}, status=status.HTTP_400_BAD_REQUEST)
 
-	if target_plan.is_free or (amount <= Decimal('0.00') and quote_data['action'] != 'upgrade'):
-		return Response({'success': False, 'error': 'No payment is required for this plan.'}, status=status.HTTP_400_BAD_REQUEST)
+	plan = Plan.objects.filter(code=plan_code, is_active=True).first()
+	if not plan:
+		return Response({'success': False, 'error': 'Plan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-	if not force_new_order:
-		existing = SubscriptionPaymentOrder.objects.filter(
-			tenant=tenant,
-			target_plan=target_plan,
-			billing_cycle=billing_cycle,
-			amount=amount,
-			duration_days=duration_days,
-			status=SubscriptionPaymentOrder.OrderStatus.CREATED,
-		).first()
-		if existing:
-			return Response({'success': True, 'data': _serialize_order(existing)})
+	now = timezone.now()
+	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
+	quote = _calculate_plan_change_quote(subscription, plan, now)
 
-	order = SubscriptionPaymentOrder.objects.create(
+	if not quote['payment_required']:
+		return Response({
+			'success': False,
+			'error': 'This plan change does not require payment. Use schedule plan change endpoint.',
+			'data': {
+				'action': quote['action'],
+				'effective_at': quote.get('effective_at'),
+			}
+		}, status=status.HTTP_400_BAD_REQUEST)
+
+	order_amount = quote['amount']
+	if order_amount <= Decimal('0.00'):
+		return Response({
+			'success': False,
+			'error': 'No payable amount for this change.',
+		}, status=status.HTTP_400_BAD_REQUEST)
+
+	if not settings.CASHFREE_CLIENT_ID or not settings.CASHFREE_CLIENT_SECRET:
+		return Response({
+			'success': False,
+			'error': 'Cashfree credentials are not configured on server.'
+		}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+	current_cashfree_env = (getattr(settings, 'CASHFREE_ENV', 'sandbox') or 'sandbox').lower()
+	force_new_order = bool(request.data.get('force_new_order', False))
+
+	reuse_window_seconds = max(int(getattr(settings, 'CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS', 1800)), 0)
+	reuse_cutoff = now - timedelta(seconds=reuse_window_seconds)
+
+	pending_candidates = SubscriptionPayment.objects.filter(
 		tenant=tenant,
-		order_id=f"SUB-{uuid.uuid4().hex[:16].upper()}",
-		payment_session_id='',
-		target_plan=target_plan,
-		billing_cycle=billing_cycle,
-		duration_days=duration_days,
-		amount=amount,
-		status=SubscriptionPaymentOrder.OrderStatus.CREATED,
+		plan=plan,
+		status=SubscriptionPaymentStatus.PENDING,
+		action=quote['action'],
+		source_plan_code=quote.get('source_plan_code'),
+	).order_by('-created_at')
+
+	for candidate in pending_candidates:
+		candidate_details = candidate.billing_details or {}
+		if candidate_details.get('superseded'):
+			continue
+
+		candidate_env = str(candidate_details.get('cashfree_env') or '').strip().lower()
+		env_matches = candidate_env == current_cashfree_env
+		can_reuse_session = (
+			not force_new_order
+			and candidate.created_at >= reuse_cutoff
+			and bool(candidate.payment_session_id)
+			and env_matches
+		)
+
+		if can_reuse_session:
+			return Response({
+				'success': True,
+				'data': {
+					'order_id': candidate.order_id,
+					'cf_order_id': candidate.cf_order_id,
+					'payment_session_id': candidate.payment_session_id,
+					'plan_code': plan.code,
+					'amount': str(candidate.amount),
+					'action': quote['action'],
+					'summary': quote.get('summary', ''),
+					'currency': candidate.currency,
+					'cashfree_env': current_cashfree_env,
+					'reused_order': True,
+				}
+			})
+
+		candidate_details['superseded'] = True
+		if force_new_order:
+			candidate_details['superseded_reason'] = 'force_new_order_requested'
+		elif not candidate_env:
+			candidate_details['superseded_reason'] = 'missing_cashfree_env_on_candidate'
+		elif not env_matches:
+			candidate_details['superseded_reason'] = 'cashfree_env_changed'
+		else:
+			candidate_details['superseded_reason'] = 'newer_payment_intent_created'
+		candidate_details['superseded_at'] = now.isoformat()
+		candidate.billing_details = candidate_details
+		candidate.save(update_fields=['billing_details', 'updated_at'])
+
+	order_id = f"sub_{str(tenant.id).replace('-', '')[:8]}_{uuid.uuid4().hex[:18]}"
+	request_id = str(uuid.uuid4())
+	idempotency_key = str(uuid.uuid4())
+
+	body = {
+		'order_id': order_id,
+		'order_currency': 'INR',
+		'order_amount': float(order_amount),
+		'customer_details': {
+			'customer_id': str(tenant.id),
+			'customer_name': 'Cenvora Customer',
+			'customer_email': tenant.email or 'cenvoras@gmail.com',
+			'customer_phone': tenant.phone or '9999999999',
+		},
+		'order_note': f"Cenvora Subscription - {quote.get('summary') or f'Plan payment for {plan.name}'}",
+		'order_meta': {
+			'return_url': f"{getattr(settings, 'CASHFREE_RETURN_URL', 'https://cenvora.app/profile')}?order_id={order_id}",
+		},
+	}
+
+	headers = _cashfree_headers()
+	headers['x-request-id'] = request_id
+	headers['x-idempotency-key'] = idempotency_key
+
+	response = requests.post(
+		f"{_cashfree_base_url()}/orders",
+		json=body,
+		headers=headers,
+		timeout=20,
 	)
 
-	return Response({'success': True, 'data': _serialize_order(order)})
+	try:
+		response_data = response.json()
+	except Exception:
+		response_data = {'raw': response.text}
+
+	if response.status_code >= 400:
+		return Response({
+			'success': False,
+			'error': 'Failed to create Cashfree order.',
+			'details': response_data,
+		}, status=status.HTTP_400_BAD_REQUEST)
+
+	SubscriptionPayment.objects.create(
+		tenant=tenant,
+		plan=plan,
+		provider='cashfree',
+		order_id=order_id,
+		cf_order_id=response_data.get('cf_order_id'),
+		payment_session_id=response_data.get('payment_session_id'),
+		amount=order_amount,
+		currency='INR',
+		status=SubscriptionPaymentStatus.PENDING,
+		action=quote['action'],
+		source_plan_code=quote.get('source_plan_code'),
+		billing_details={
+			'summary': quote.get('summary', ''),
+			'apply_immediately': quote.get('apply_immediately', False),
+			'quoted_amount': str(order_amount),
+			'cashfree_env': current_cashfree_env,
+			'intent_key': f"{quote['action']}:{quote.get('source_plan_code') or 'free'}->{plan.code}:{order_amount}",
+			'superseded': False,
+		},
+		raw_response=response_data,
+	)
+
+	return Response({
+		'success': True,
+		'data': {
+			'order_id': order_id,
+			'cf_order_id': response_data.get('cf_order_id'),
+			'payment_session_id': response_data.get('payment_session_id'),
+			'plan_code': plan.code,
+			'amount': str(order_amount),
+			'action': quote['action'],
+			'summary': quote.get('summary', ''),
+			'currency': 'INR',
+			'cashfree_env': current_cashfree_env,
+			'reused_order': False,
+		}
+	})
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@transaction.atomic
 def confirm_plan_payment(request):
-	order_id = str(request.data.get('order_id') or '').strip()
+	tenant = getattr(request.user, 'active_tenant', request.user)
+	order_id = str(request.data.get('order_id', '')).strip()
+
 	if not order_id:
 		return Response({'success': False, 'error': 'order_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-	tenant = get_tenant(request.user)
-	order = SubscriptionPaymentOrder.objects.select_for_update().filter(order_id=order_id, tenant=tenant).first()
-	if not order:
-		return Response({'success': False, 'error': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+	payment = SubscriptionPayment.objects.filter(order_id=order_id, tenant=tenant).select_related('plan').first()
+	if not payment:
+		return Response({'success': False, 'error': 'Payment order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-	if order.status == SubscriptionPaymentOrder.OrderStatus.SUCCESS:
-		return Response({'success': True, 'data': _serialize_order(order)})
+	billing_details = payment.billing_details or {}
+	if billing_details.get('superseded'):
+		return Response({
+			'success': False,
+			'error': 'This payment order is no longer active. Please use the latest payment request.',
+			'data': {
+				'order_id': order_id,
+				'status': payment.status,
+				'reason': 'superseded_order',
+			}
+		}, status=status.HTTP_409_CONFLICT)
+
+	headers = _cashfree_headers()
+	response = requests.get(
+		f"{_cashfree_base_url()}/orders/{order_id}/payments",
+		headers=headers,
+		timeout=20,
+	)
+
+	try:
+		payments_data = response.json()
+	except Exception:
+		payments_data = []
+
+	if response.status_code >= 400:
+		return Response({
+			'success': False,
+			'error': 'Unable to verify payment with Cashfree.',
+			'details': payments_data,
+		}, status=status.HTTP_400_BAD_REQUEST)
+
+	if isinstance(payments_data, dict):
+		payments_data = payments_data.get('data', []) if isinstance(payments_data.get('data', []), list) else []
+
+	success_payment = None
+	for attempt in payments_data:
+		if attempt.get('payment_status') == 'SUCCESS':
+			success_payment = attempt
+			break
+
+	if not success_payment:
+		any_pending = any(item.get('payment_status') in {'PENDING', 'NOT_ATTEMPTED'} for item in payments_data)
+		if not any_pending:
+			payment.status = SubscriptionPaymentStatus.FAILED
+			payment.raw_response = {'attempts': payments_data}
+			payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+			send_payment_status_email.delay(
+				payment_id=payment.id,
+				status_key='failed',
+				reason='Payment attempt did not complete successfully.',
+			)
+		else:
+			payment.status = SubscriptionPaymentStatus.PENDING
+			payment.raw_response = {'attempts': payments_data}
+			payment.save(update_fields=['status', 'raw_response', 'updated_at'])
+			send_payment_status_email.delay(
+				payment_id=payment.id,
+				status_key='pending',
+			)
+
+		return Response({
+			'success': False,
+			'data': {
+				'order_id': order_id,
+				'status': payment.status,
+				'message': 'Payment not successful yet.'
+			}
+		})
 
 	now = timezone.now()
-	order.status = SubscriptionPaymentOrder.OrderStatus.SUCCESS
-	order.paid_at = now
-	order.failure_reason = ''
-	order.save(update_fields=['status', 'paid_at', 'failure_reason', 'updated_at'])
+	payment.status = SubscriptionPaymentStatus.SUCCESS
+	payment.cf_payment_id = success_payment.get('cf_payment_id')
+	payment.paid_at = now
+	payment.raw_response = {'attempts': payments_data, 'successful_attempt': success_payment}
+	payment.save(update_fields=['status', 'cf_payment_id', 'paid_at', 'raw_response', 'updated_at'])
 
-	subscription = _get_subscription(tenant)
-	_apply_pending_if_due(subscription)
+	subscription, _created = TenantSubscription.objects.get_or_create(
+		tenant=tenant,
+		defaults={
+			'plan': payment.plan,
+			'status': SubscriptionStatus.ACTIVE,
+			'current_period_start': now,
+			'current_period_end': now + timedelta(days=30),
+			'cancel_at_period_end': False,
+			'pending_plan': None,
+			'pending_plan_starts_at': None,
+		},
+	)
 
-	# Calculate new period
-	quote_data = _get_plan_change_data(subscription, order.target_plan, order.billing_cycle)
-	
-	if quote_data['action'] == 'upgrade' or quote_data['credit'] > Decimal('0.00'):
-		# For upgrades with credit or tier change, start from now
-		base = now
+	queued = False
+	queued_starts_at = None
+
+	active_until = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else None
+	raw_payment_action = payment.action
+	payment_action = raw_payment_action or SubscriptionPaymentAction.ACTIVATE
+
+	if payment_action == SubscriptionPaymentAction.UPGRADE_NOW and active_until:
+		# Instant upgrade: switch plan now, keep current cycle end.
+		subscription.plan = payment.plan
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=[
+			'plan', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
+		])
+		_sync_legacy_subscription_fields(tenant, payment.plan.code)
+	elif payment_action == SubscriptionPaymentAction.RENEW and active_until:
+		subscription.current_period_end = active_until + timedelta(days=30)
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=[
+			'current_period_end', 'status', 'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
+		])
+		_sync_legacy_subscription_fields(tenant, subscription.plan.code)
+	elif raw_payment_action is None and active_until and subscription.plan_id != payment.plan_id:
+		# Backward-compatible fallback only for legacy rows without explicit action.
+		subscription.pending_plan = payment.plan
+		subscription.pending_plan_starts_at = active_until
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.cancel_at_period_end = False
+		subscription.save(update_fields=['pending_plan', 'pending_plan_starts_at', 'status', 'cancel_at_period_end', 'updated_at'])
+		queued = True
+		queued_starts_at = active_until
+		_sync_legacy_subscription_fields(tenant, subscription.plan.code)
 	else:
-		# For renewals or other cases, append to end if current period is valid
-		base = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else now
-	
-	duration_days = order.duration_days or _days_for_cycle(order.billing_cycle)
-	new_end = _add_days(base, duration_days)
+		# Expired or no active cycle: activate immediately for 30 days.
+		subscription.plan = payment.plan
+		subscription.status = SubscriptionStatus.ACTIVE
+		subscription.current_period_start = now
+		subscription.current_period_end = now + timedelta(days=30)
+		subscription.cancel_at_period_end = False
+		subscription.pending_plan = None
+		subscription.pending_plan_starts_at = None
+		subscription.save(update_fields=[
+			'plan', 'status', 'current_period_start', 'current_period_end',
+			'cancel_at_period_end', 'pending_plan', 'pending_plan_starts_at', 'updated_at'
+		])
+		_sync_legacy_subscription_fields(tenant, payment.plan.code)
 
-	subscription.plan = order.target_plan
-	subscription.current_billing_cycle = order.billing_cycle
-	subscription.current_period_start = base
-	subscription.current_period_end = new_end
-	subscription.status = SubscriptionStatus.ACTIVE
-	subscription.save(update_fields=[
-		'plan',
-		'current_billing_cycle',
-		'current_period_start',
-		'current_period_end',
-		'status',
-		'updated_at',
-	])
+	send_payment_status_email.delay(
+		payment_id=payment.id,
+		status_key='success',
+		action_summary=(payment_action or SubscriptionPaymentAction.ACTIVATE),
+	)
 
-	tenant_update_fields = []
-	if hasattr(tenant, 'subscription_status'):
-		tenant.subscription_status = 'active'
-		tenant_update_fields.append('subscription_status')
-	if hasattr(tenant, 'subscription_tier'):
-		tenant.subscription_tier = 'PRO' if order.target_plan.is_business else 'MID'
-		tenant_update_fields.append('subscription_tier')
-	if tenant_update_fields:
-		tenant.save(update_fields=tenant_update_fields)
-
-	return Response({'success': True, 'data': _serialize_order(order)})
+	return Response({
+		'success': True,
+		'data': {
+			'order_id': order_id,
+			'plan_code': subscription.plan.code,
+			'action': payment_action,
+			'queued_plan_code': subscription.pending_plan.code if subscription.pending_plan else None,
+			'queued': queued,
+			'queued_starts_at': queued_starts_at,
+			'subscription_status': subscription.status,
+			'current_period_end': subscription.current_period_end,
+		}
+	})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def latest_payment_status(request):
-	tenant = get_tenant(request.user)
-	latest = SubscriptionPaymentOrder.objects.filter(tenant=tenant).first()
-	if not latest:
+	tenant = getattr(request.user, 'active_tenant', request.user)
+	payment = SubscriptionPayment.objects.filter(tenant=tenant).select_related('plan').order_by('-created_at').first()
+
+	if not payment:
 		return Response({'success': True, 'data': None})
-	return Response({'success': True, 'data': _serialize_order(latest)})
+
+	raw = payment.raw_response or {}
+	failure_reason = ''
+	if isinstance(raw, dict):
+		failure_reason = (
+			raw.get('error_message')
+			or raw.get('reason')
+			or (raw.get('webhook_payload', {}) if isinstance(raw.get('webhook_payload', {}), dict) else {}).get('error_message')
+			or ''
+		)
+
+	return Response({
+		'success': True,
+		'data': {
+			'order_id': payment.order_id,
+			'plan_name': payment.plan.name,
+			'amount': str(payment.amount),
+			'status': payment.status,
+			'action': payment.action,
+			'failure_reason': failure_reason,
+			'created_at': payment.created_at,
+			'paid_at': payment.paid_at,
+		}
+	})
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([])
+def cashfree_webhook(request):
+	"""
+	Webhook endpoint for Cashfree payment gateway.
+	Receives and verifies payment events, then queues async processing.
+	
+	Expected headers:
+	- x-webhook-signature: HMAC-SHA256 signature of payload
+	- x-idempotency-key: unique event key
+	- x-webhook-timestamp: milliseconds epoch
+	
+	Expected payload:
+	{
+		"event": "PAYMENT_SUCCESS",
+		"eventId": "unique_event_id_from_cashfree",
+		"data": {
+			"orderId": "order_id_in_cenvora",
+			"paymentId": "cashfree_payment_id",
+			...
+		}
+	}
+	"""
+	try:
+		# Get raw payload for signature verification
+		payload_str = request.body.decode('utf-8')
+		payload = request.data or json.loads(payload_str)
+	except Exception as e:
+		logger.error(f"Error parsing webhook payload: {e}")
+		return _ack_ignored('invalid_payload')
+	
+	# Extract webhook details
+	event_type = _normalize_webhook_event_type(payload.get('event') or payload.get('type') or payload.get('event_type') or '')
+	payment_status = _extract_payment_status(payload)
+	if _is_webhook_test_event(payload, event_type, request.headers):
+		logger.info("Received webhook endpoint test event. Returning 200 acknowledgment.")
+		return Response({'status': 'ok', 'message': 'webhook test acknowledged'}, status=status.HTTP_200_OK)
+
+	header_idempotency_key = str(request.headers.get('x-idempotency-key', '')).strip()
+	payload_event_id = payload.get('eventId') or payload.get('event_id')
+	event_id = header_idempotency_key or (str(payload_event_id).strip() if payload_event_id else '')
+	if not event_id:
+		# Deterministic fallback keeps retries idempotent even without explicit key.
+		event_id = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
+
+	order_id = _extract_order_id(payload)
+	known_events = {'PAYMENT_SUCCESS', 'PAYMENT_FAILED', 'PAYMENT_PENDING'}
+	if event_type in {'PAYMENT_VERIFICATION_UPDATE', 'PAYMENT_VERIFICATION'}:
+		if payment_status == 'SUCCESS':
+			event_type = 'PAYMENT_SUCCESS'
+		elif payment_status in {'FAILED', 'FAILURE'}:
+			event_type = 'PAYMENT_FAILED'
+		else:
+			event_type = 'PAYMENT_PENDING'
+
+	if event_type not in known_events and payment_status:
+		if payment_status == 'SUCCESS':
+			event_type = 'PAYMENT_SUCCESS'
+		elif payment_status in {'FAILED', 'FAILURE'}:
+			event_type = 'PAYMENT_FAILED'
+		elif payment_status in {'PENDING', 'NOT_ATTEMPTED', 'USER_DROPPED', 'CANCELLED'}:
+			event_type = 'PAYMENT_PENDING'
+
+	if event_type not in known_events:
+		logger.info(f"Ignoring unsupported webhook event type={event_type or 'UNKNOWN'} event_id={event_id}")
+		return _ack_ignored('unsupported_event', event_id=event_id, details=event_type or 'UNKNOWN')
+	
+	if not order_id:
+		logger.warning(f"Webhook {event_id} missing orderId")
+		return _ack_ignored('missing_order_id', event_id=event_id)
+	
+	# Verify signature
+	signature = (
+		request.headers.get('x-webhook-signature', '')
+		or request.headers.get('x-cashfree-signature', '')
+		or request.headers.get('x-cf-signature', '')
+		or request.headers.get('x-signature', '')
+	)
+	timestamp = str(
+		request.headers.get('x-webhook-timestamp', '')
+		or request.headers.get('x-cashfree-timestamp', '')
+		or request.headers.get('x-cf-timestamp', '')
+		or request.headers.get('x-timestamp', '')
+	).strip()
+	webhook_secret = getattr(settings, 'CASHFREE_WEBHOOK_SECRET', '')
+	require_signature_setting = bool(getattr(settings, 'CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', True))
+	allow_unsigned = bool(getattr(settings, 'CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', False))
+	require_signature = require_signature_setting or bool(webhook_secret) or not allow_unsigned
+
+	if require_signature and not signature:
+		logger.error(f"Webhook {event_id} missing signature header")
+		return _ack_ignored('missing_signature', event_id=event_id)
+
+	max_skew_ms = int(getattr(settings, 'CASHFREE_WEBHOOK_MAX_SKEW_MS', 10 * 60 * 1000))
+	if require_signature and timestamp:
+		try:
+			request_ts = int(timestamp)
+			now_ts = int(timezone.now().timestamp() * 1000)
+			if abs(now_ts - request_ts) > max_skew_ms:
+				logger.error(f"Webhook {event_id} timestamp outside allowed skew")
+				return _ack_ignored('timestamp_expired', event_id=event_id)
+		except ValueError:
+			logger.error(f"Webhook {event_id} has invalid timestamp header")
+			return _ack_ignored('invalid_timestamp', event_id=event_id)
+
+	if require_signature:
+		if not verify_cashfree_signature(payload_str, signature, timestamp=timestamp or None):
+			logger.error(f"Webhook {event_id} signature verification failed")
+			return _ack_ignored('signature_verification_failed', event_id=event_id)
+	else:
+		logger.warning(
+			"Accepting unsigned webhook event %s because CASHFREE_ALLOW_UNSIGNED_WEBHOOKS is enabled.",
+			event_id,
+		)
+	
+	# Check for duplicate (idempotency)
+	if WebhookEvent.objects.filter(event_id=event_id).exists():
+		logger.info(f"Webhook {event_id} already exists, returning 200 OK")
+		return Response({'status': 'received'}, status=status.HTTP_200_OK)
+	
+	# Queue async processing with Celery
+	try:
+		process_cashfree_webhook.delay(
+			event_id=event_id,
+			event_type=event_type,
+			order_id=order_id,
+			payload=payload,
+		)
+		logger.info(f"Queued webhook {event_id} ({event_type}) for async processing")
+	except Exception as e:
+		logger.error(f"Error queuing webhook {event_id}: {e}")
+		# Still return 200 OK to Cashfree so it doesn't retry infinitely
+		# The event is recorded in WebhookEvent for manual review
+	
+	return Response({'status': 'received'}, status=status.HTTP_200_OK)

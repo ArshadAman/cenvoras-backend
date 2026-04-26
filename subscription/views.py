@@ -29,6 +29,93 @@ def _days_for_cycle(cycle: str) -> int:
 	return 30
 
 
+def _get_plan_change_data(subscription, target_plan, target_cycle):
+	now = timezone.now()
+	current_plan = subscription.plan
+	current_code = str(current_plan.code or 'free').lower() if current_plan else 'free'
+	target_code = str(target_plan.code or 'free').lower()
+	current_rank = _rank(current_code)
+	target_rank = _rank(target_code)
+	current_is_free = current_code in {'free', 'starter'}
+
+	action = 'upgrade'
+	payment_required = True
+	effective_at = now
+
+	if target_plan.is_free:
+		action = 'current' if target_code == current_code else 'downgrade_not_allowed'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+	elif target_code == current_code and target_cycle == _normalize_cycle(subscription.current_billing_cycle):
+		action = 'renewal'
+	elif target_code == current_code:
+		action = 'upgrade'
+	elif target_rank < current_rank and target_plan.is_free:
+		action = 'downgrade_not_allowed'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+	elif target_rank < current_rank:
+		action = 'unsupported_paid_schedule'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+
+	credit = Decimal('0.00')
+	days_used = 0
+	days_remaining = 0
+	current_daily_rate = Decimal('0.00')
+	current_cycle_price = Decimal('0.00')
+	current_cycle_total_days = 0
+	new_plan_full_price = Decimal('0.00')
+	amount = Decimal('0.00')
+
+	if payment_required:
+		new_plan_full_price = target_plan.price_for_cycle(target_cycle)
+		
+		has_active_paid_period = (
+			not current_is_free
+			and subscription.current_period_end
+			and subscription.current_period_end > now
+			and subscription.current_period_start
+		)
+
+		if has_active_paid_period and action != 'renewal':
+			current_cycle = _normalize_cycle(subscription.current_billing_cycle)
+			current_cycle_total_days = _days_for_cycle(current_cycle)
+			current_cycle_price = current_plan.price_for_cycle(current_cycle)
+
+			days_used = max(0, (now - subscription.current_period_start).days)
+			days_remaining = max(0, current_cycle_total_days - days_used)
+
+			if current_cycle_total_days > 0 and days_remaining > 0:
+				current_daily_rate = current_cycle_price / Decimal(str(current_cycle_total_days))
+				credit = (current_daily_rate * Decimal(str(days_remaining))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+			amount = max(Decimal('0.00'), new_plan_full_price - credit)
+			effective_at = now
+		elif action == 'renewal':
+			amount = new_plan_full_price
+			effective_at = subscription.current_period_end or now
+		else:
+			amount = new_plan_full_price
+
+		if amount > Decimal('0.00') and amount < Decimal('1.00'):
+			amount = Decimal('1.00')
+
+	return {
+		'action': action,
+		'payment_required': payment_required,
+		'amount': amount,
+		'new_plan_full_price': new_plan_full_price,
+		'credit': credit,
+		'days_used': days_used,
+		'days_remaining': days_remaining,
+		'current_daily_rate': current_daily_rate,
+		'current_cycle_price': current_cycle_price,
+		'current_cycle_total_days': current_cycle_total_days,
+		'effective_at': effective_at,
+	}
+
+
 def _rank(plan_code: str | None) -> int:
 	code = str(plan_code or '').lower()
 	if code == 'business':
@@ -173,53 +260,47 @@ def plan_change_quote(request):
 	tenant = get_tenant(request.user)
 	subscription = _get_subscription(tenant)
 	_apply_pending_if_due(subscription)
-	now = timezone.now()
-	current_plan = subscription.plan
-	current_code = str(current_plan.code or 'free').lower() if current_plan else 'free'
-	current_rank = _rank(current_code)
-	target_rank = _rank(target_plan.code)
-
-	action = 'upgrade'
-	payment_required = True
-	effective_at = now
-
-	if target_plan.is_free:
-		action = 'current' if target_plan.code == current_code else 'downgrade_not_allowed'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-	elif target_plan.code == current_code:
-		action = 'renewal'
-	elif target_rank < current_rank and target_plan.code in {'free', 'starter'}:
-		action = 'downgrade_not_allowed'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-	elif target_rank < current_rank:
-		action = 'unsupported_paid_schedule'
-		payment_required = False
-		effective_at = subscription.current_period_end or now
-
-	if payment_required:
-		if subscription.current_period_end and subscription.current_period_end > now:
-			effective_at = subscription.current_period_end
-		amount = target_plan.price_for_cycle(billing_cycle)
-		original = target_plan.original_price_for_cycle(billing_cycle)
+	
+	quote_data = _get_plan_change_data(subscription, target_plan, billing_cycle)
+	
+	summary = ""
+	if quote_data['payment_required']:
+		if quote_data['credit'] > Decimal('0.00'):
+			summary = (
+				f"Upgrade now to {target_plan.name}. "
+				f"Credit of INR {quote_data['credit']} for {quote_data['days_remaining']} unused day(s) on {subscription.plan.name}. "
+				f"Pay INR {quote_data['amount']}."
+			)
+		elif quote_data['action'] == 'renewal':
+			summary = (
+				f"Renew {target_plan.name} ({billing_cycle}) for INR {quote_data['amount']}. "
+				f"Extends from current period end."
+			)
+		else:
+			summary = f"Upgrade now to {target_plan.name}. Remaining-cycle prorated charge applies."
 	else:
-		amount = Decimal('0.00')
-		original = Decimal('0.00')
+		summary = f"{target_plan.name} — no payment required."
 
 	return Response({
 		'success': True,
 		'data': {
-			'action': action,
-			'payment_required': payment_required,
+			'action': quote_data['action'],
+			'payment_required': quote_data['payment_required'],
 			'target_plan_code': target_plan.code,
 			'target_plan_name': target_plan.name,
 			'billing_cycle': billing_cycle,
-			'amount': str(amount),
-			'original_amount': str(original),
-			'duration_days': _days_for_cycle(billing_cycle) if payment_required else 0,
-			'effective_at': effective_at,
-			'summary': f"{target_plan.name} ({billing_cycle}) at INR {amount}",
+			'amount': str(quote_data['amount']),
+			'original_amount': str(target_plan.original_price_for_cycle(billing_cycle)),
+			'new_plan_full_price': str(quote_data['new_plan_full_price']),
+			'credit': str(quote_data['credit']),
+			'days_used': quote_data['days_used'],
+			'days_remaining': quote_data['days_remaining'],
+			'current_daily_rate': str(quote_data['current_daily_rate'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+			'current_cycle_price': str(quote_data['current_cycle_price']),
+			'current_cycle_total_days': quote_data['current_cycle_total_days'],
+			'duration_days': _days_for_cycle(billing_cycle) if quote_data['payment_required'] else 0,
+			'effective_at': quote_data['effective_at'],
+			'summary': summary,
 		},
 	})
 
@@ -270,11 +351,15 @@ def create_plan_payment_order(request):
 		return Response({'success': False, 'error': 'Requested plan does not exist.'}, status=status.HTTP_404_NOT_FOUND)
 
 	tenant = get_tenant(request.user)
-	amount = target_plan.price_for_cycle(billing_cycle)
+	subscription = _get_subscription(tenant)
+	_apply_pending_if_due(subscription)
+	
+	quote_data = _get_plan_change_data(subscription, target_plan, billing_cycle)
+	amount = quote_data['amount']
 	duration_days = _days_for_cycle(billing_cycle)
 
-	if target_plan.is_free or amount <= Decimal('0.00'):
-		return Response({'success': False, 'error': 'No payment is required for the Starter plan.'}, status=status.HTTP_400_BAD_REQUEST)
+	if target_plan.is_free or (amount <= Decimal('0.00') and quote_data['action'] != 'upgrade'):
+		return Response({'success': False, 'error': 'No payment is required for this plan.'}, status=status.HTTP_400_BAD_REQUEST)
 
 	if not force_new_order:
 		existing = SubscriptionPaymentOrder.objects.filter(
@@ -327,13 +412,22 @@ def confirm_plan_payment(request):
 	subscription = _get_subscription(tenant)
 	_apply_pending_if_due(subscription)
 
-	base = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else now
+	# Calculate new period
+	quote_data = _get_plan_change_data(subscription, order.target_plan, order.billing_cycle)
+	
+	if quote_data['action'] == 'upgrade' or quote_data['credit'] > Decimal('0.00'):
+		# For upgrades with credit or tier change, start from now
+		base = now
+	else:
+		# For renewals or other cases, append to end if current period is valid
+		base = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > now else now
+	
 	duration_days = order.duration_days or _days_for_cycle(order.billing_cycle)
 	new_end = _add_days(base, duration_days)
 
 	subscription.plan = order.target_plan
 	subscription.current_billing_cycle = order.billing_cycle
-	subscription.current_period_start = now if not subscription.current_period_start else subscription.current_period_start
+	subscription.current_period_start = base
 	subscription.current_period_end = new_end
 	subscription.status = SubscriptionStatus.ACTIVE
 	subscription.save(update_fields=[

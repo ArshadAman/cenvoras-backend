@@ -4,11 +4,18 @@ from .serializers import AuditLogSerializer
 
 class AuditLogListView(generics.ListAPIView):
     serializer_class = AuditLogSerializer
+    permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        # Exclude internal system actions (e.g. migrations, background tasks)
-        return AuditLog.objects.exclude(user_email='system').order_by('-timestamp')
-    permission_classes = [permissions.IsAuthenticated] # Later restrict to Admin/Manager
-    filterset_fields = ['action', 'model_name', 'user__email']
+        user = self.request.user
+        # System admins (superusers) see everything
+        if user.is_superuser:
+            return AuditLog.objects.exclude(user_email='system').order_by('-timestamp')
+            
+        # Tenant admins and team members see logs for their shared business (active_tenant)
+        tenant = getattr(user, 'active_tenant', user)
+        return AuditLog.objects.filter(tenant=tenant).order_by('-timestamp')
+
+    filterset_fields = ['action', 'model_name', 'user__email', 'tenant__id']
     search_fields = ['object_repr', 'changes', 'user_email']
     ordering_fields = ['timestamp']

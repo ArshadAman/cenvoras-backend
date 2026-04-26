@@ -276,14 +276,15 @@ def plan_change_quote(request):
 	
 	summary = ""
 	if quote_data['payment_required']:
+		cycle_label = billing_cycle.capitalize()
 		if quote_data['credit'] > Decimal('0.00'):
 			summary = (
-				f"Upgrade to {target_plan.name}. "
+				f"Upgrade to {target_plan.name} ({cycle_label}). "
 				f"Credit of INR {quote_data['credit']} applied for unused days. "
-				f"Final payment: INR {quote_data['amount']}."
+				f"Total to pay: INR {quote_data['amount']}."
 			)
 		else:
-			summary = f"Upgrade to {target_plan.name}. Total: INR {quote_data['amount']}."
+			summary = f"Upgrade to {target_plan.name} ({cycle_label}). Total: INR {quote_data['amount']}."
 	else:
 		summary = f"{target_plan.name} — no payment required."
 
@@ -296,7 +297,8 @@ def plan_change_quote(request):
 			'target_plan_name': target_plan.name,
 			'billing_cycle': billing_cycle,
 			'amount': str(quote_data['amount']),
-			'original_amount': str(target_plan.original_price_for_cycle(billing_cycle)),
+			'original_amount': str(quote_data['base_price_before_discount']),
+			'base_price_before_discount': str(quote_data['base_price_before_discount']),
 			'new_plan_full_price': str(quote_data['new_plan_full_price']),
 			'credit': str(quote_data['credit']),
 			'days_used': quote_data['days_used'],

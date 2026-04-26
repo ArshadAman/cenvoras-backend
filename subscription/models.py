@@ -116,6 +116,18 @@ class SubscriptionStatus(models.TextChoices):
     PAST_DUE = 'past_due', 'Past Due'
     CANCELLED = 'cancelled', 'Cancelled'
 
+
+class SubscriptionPaymentStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    SUCCESS = 'success', 'Success'
+    FAILED = 'failed', 'Failed'
+
+
+class SubscriptionPaymentAction(models.TextChoices):
+    ACTIVATE = 'activate', 'Activate'
+    RENEW = 'renew', 'Renew'
+    UPGRADE_NOW = 'upgrade_now', 'Upgrade Now'
+
 class TenantSubscription(models.Model):
     """
     Binds a User (Tenant) to a specific Plan and tracks its validity window.
@@ -145,6 +157,8 @@ class TenantSubscription(models.Model):
     )
     pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
     cancel_at_period_end = models.BooleanField(default=False)
+    pending_plan = models.ForeignKey('Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions')
+    pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
     
     stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
     stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)

@@ -8,6 +8,8 @@ from django.utils import timezone
 from datetime import timedelta
 from django.db import transaction
 from django.db.models import Sum, F
+from django.db.models.functions import Coalesce
+from cenvoras.cache_utils import CACHE_TTL_MEDIUM, cache_get_or_set, tenant_cache_key
 from .models import Product, Warehouse, StockPoint, StockTransfer, ProductBatch
 from .models_pricing import PriceList, Scheme
 from .serializers import (
@@ -52,7 +54,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     search_fields = ['name', 'description', 'hsn_sac_code']
 
     def get_queryset(self):
-        return Product.objects.filter(created_by=self.request.user.active_tenant).order_by('name')
+        return Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant).order_by('name')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)
@@ -109,7 +111,11 @@ class WarehouseListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Warehouse.objects.filter(created_by=self.request.user.active_tenant)
+        return (
+            Warehouse.objects
+            .filter(created_by=self.request.user.active_tenant)
+            .order_by('name', 'id')
+        )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)
@@ -132,7 +138,7 @@ def stock_point_list(request):
     List stock points (inventory levels per batch per warehouse)
     Optional filters: ?product=UUID & ?warehouse=UUID
     """
-    queryset = StockPoint.objects.all()
+    queryset = StockPoint.objects.select_related('batch__product', 'warehouse').all()
     
     # Filter by user's warehouses
     user_warehouses = Warehouse.objects.filter(created_by=request.user.active_tenant)
@@ -164,7 +170,13 @@ class StockTransferListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return StockTransfer.objects.filter(created_by=self.request.user.active_tenant).order_by('-transfer_date')
+        return (
+            StockTransfer.objects
+            .filter(created_by=self.request.user.active_tenant)
+            .select_related('source_warehouse', 'destination_warehouse')
+            .prefetch_related('items__product', 'items__batch')
+            .order_by('-transfer_date')
+        )
 
 class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StockTransferSerializer
@@ -264,8 +276,8 @@ def bulk_upload_products(request):
 
     try:
         process_bulk_upload_csv.delay(csv_content, str(request.user.id))
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception:
+        return Response({'error': 'Unable to enqueue bulk upload right now. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(
         {
@@ -290,40 +302,48 @@ def expiry_report(request):
     Returns batches with stock > 0 that expire within the window.
     """
     days = int(request.query_params.get('days', 90))
-    today = timezone.now().date()
-    cutoff = today + timedelta(days=days)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('inventory', tenant.id, 'expiry-report', f'days-{days}')
 
-    batches = ProductBatch.objects.filter(
-        product__created_by=request.user.active_tenant.active_tenant,
-        expiry_date__isnull=False,
-        expiry_date__lte=cutoff,
-        is_active=True,
-    ).select_related('product').order_by('expiry_date')
+    def build_report():
+        today = timezone.now().date()
+        cutoff = today + timedelta(days=days)
 
-    results = []
-    for batch in batches:
-        total_qty = batch.stock_points.aggregate(total=Sum('quantity'))['total'] or 0
-        if total_qty <= 0:
-            continue
-        days_left = (batch.expiry_date - today).days
-        results.append({
-            'batch_id': str(batch.id),
-            'product_name': batch.product.name,
-            'batch_number': batch.batch_number,
-            'expiry_date': batch.expiry_date,
-            'days_until_expiry': days_left,
-            'status': 'expired' if days_left < 0 else ('critical' if days_left <= 30 else 'warning'),
-            'quantity': total_qty,
-            'mrp': float(batch.mrp),
-            'value': float(batch.mrp * total_qty),
-        })
+        batches = ProductBatch.objects.filter(
+            product__created_by=tenant,
+            expiry_date__isnull=False,
+            expiry_date__lte=cutoff,
+            is_active=True,
+        ).select_related('product').annotate(
+            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+        ).order_by('expiry_date')
 
-    return Response({
-        'count': len(results),
-        'days_window': days,
-        'total_value_at_risk': sum(r['value'] for r in results),
-        'results': results,
-    })
+        results = []
+        for batch in batches:
+            total_qty = batch.total_stock or 0
+            if total_qty <= 0:
+                continue
+            days_left = (batch.expiry_date - today).days
+            results.append({
+                'batch_id': str(batch.id),
+                'product_name': batch.product.name,
+                'batch_number': batch.batch_number,
+                'expiry_date': batch.expiry_date,
+                'days_until_expiry': days_left,
+                'status': 'expired' if days_left < 0 else ('critical' if days_left <= 30 else 'warning'),
+                'quantity': total_qty,
+                'mrp': float(batch.mrp),
+                'value': float(batch.mrp * total_qty),
+            })
+
+        return {
+            'count': len(results),
+            'days_window': days,
+            'total_value_at_risk': sum(r['value'] for r in results),
+            'results': results,
+        }
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_report))
 
 
 # =============================================================================
@@ -482,73 +502,87 @@ def warranty_report(request):
     from dateutil.relativedelta import relativedelta
 
     today = timezone.now().date()
+    search = request.query_params.get('search', '').strip().lower()
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('inventory', tenant.id, 'warranty-report', search or 'all')
 
-    # Find all sales invoice items where the product has a warranty > 0
-    items = SalesInvoiceItem.objects.filter(
-        sales_invoice__created_by=request.user.active_tenant,
-        product__warranty_months__gt=0,
-    ).select_related('sales_invoice', 'product').order_by('-sales_invoice__invoice_date')
+    def build_report():
+        # Find all sales invoice items where the product has a warranty > 0
+        items = SalesInvoiceItem.objects.filter(
+            sales_invoice__created_by=tenant,
+            product__warranty_months__gt=0,
+        ).select_related('sales_invoice__customer', 'product').order_by('-sales_invoice__invoice_date')
 
-    results = []
-    for item in items:
-        warranty_months = item.product.warranty_months
-        start_date = item.sales_invoice.invoice_date
-        end_date = start_date + relativedelta(months=warranty_months)
-        
-        delta = relativedelta(end_date, today)
-        
-        if end_date < today:
-            countdown = "Expired"
-            status = "expired"
-            days_left = (end_date - today).days
-        else:
-            days_left = (end_date - today).days
-            parts = []
-            if delta.years > 0:
-                parts.append(f"{delta.years} year{'s' if delta.years > 1 else ''}")
-            if delta.months > 0:
-                parts.append(f"{delta.months} month{'s' if delta.months > 1 else ''}")
-            if delta.days > 0:
-                parts.append(f"{delta.days} day{'s' if delta.days > 1 else ''}")
-            countdown = " ".join(parts) + " left" if parts else "Expiring today"
-            
-            if days_left <= 30:
-                status = "critical"
-            elif days_left <= 90:
-                status = "warning"
+        results = []
+        for item in items:
+            warranty_months = item.product.warranty_months
+            start_date = item.sales_invoice.invoice_date
+            end_date = start_date + relativedelta(months=warranty_months)
+
+            delta = relativedelta(end_date, today)
+
+            if end_date < today:
+                countdown = "Expired"
+                status = "expired"
+                days_left = (end_date - today).days
             else:
-                status = "active"
+                days_left = (end_date - today).days
+                parts = []
+                if delta.years > 0:
+                    parts.append(f"{delta.years} year{'s' if delta.years > 1 else ''}")
+                if delta.months > 0:
+                    parts.append(f"{delta.months} month{'s' if delta.months > 1 else ''}")
+                if delta.days > 0:
+                    parts.append(f"{delta.days} day{'s' if delta.days > 1 else ''}")
+                countdown = " ".join(parts) + " left" if parts else "Expiring today"
 
-        results.append({
-            'invoice_id': str(item.sales_invoice.id),
-            'invoice_number': item.sales_invoice.invoice_number,
-            'invoice_date': start_date,
-            'customer_name': item.sales_invoice.customer_name or (item.sales_invoice.customer.name if item.sales_invoice.customer else 'N/A'),
-            'product_id': str(item.product.id),
-            'product_name': item.product.name,
-            'quantity': item.quantity,
-            'warranty_months': warranty_months,
-            'warranty_start': start_date,
-            'warranty_end': end_date,
-            'days_left': days_left,
-            'countdown': countdown,
-            'status': status,
-        })
+                if days_left <= 30:
+                    status = "critical"
+                elif days_left <= 90:
+                    status = "warning"
+                else:
+                    status = "active"
 
-    # Stats
-    active_count = sum(1 for r in results if r['status'] == 'active')
-    warning_count = sum(1 for r in results if r['status'] == 'warning')
-    critical_count = sum(1 for r in results if r['status'] == 'critical')
-    expired_count = sum(1 for r in results if r['status'] == 'expired')
+            record = {
+                'invoice_id': str(item.sales_invoice.id),
+                'invoice_number': item.sales_invoice.invoice_number,
+                'invoice_date': start_date,
+                'customer_name': item.sales_invoice.customer_name or (item.sales_invoice.customer.name if item.sales_invoice.customer else 'N/A'),
+                'product_id': str(item.product.id),
+                'product_name': item.product.name,
+                'quantity': item.quantity,
+                'warranty_months': warranty_months,
+                'warranty_start': start_date,
+                'warranty_end': end_date,
+                'days_left': days_left,
+                'countdown': countdown,
+                'status': status,
+            }
 
-    return Response({
-        'count': len(results),
-        'active_count': active_count,
-        'warning_count': warning_count,
-        'critical_count': critical_count,
-        'expired_count': expired_count,
-        'results': results,
-    })
+            if search:
+                invoice_number = str(record['invoice_number']).lower()
+                customer_name = str(record['customer_name']).lower()
+                if search not in invoice_number and search not in customer_name:
+                    continue
+
+            results.append(record)
+
+        # Stats
+        active_count = sum(1 for r in results if r['status'] == 'active')
+        warning_count = sum(1 for r in results if r['status'] == 'warning')
+        critical_count = sum(1 for r in results if r['status'] == 'critical')
+        expired_count = sum(1 for r in results if r['status'] == 'expired')
+
+        return {
+            'count': len(results),
+            'active_count': active_count,
+            'warning_count': warning_count,
+            'critical_count': critical_count,
+            'expired_count': expired_count,
+            'results': results,
+        }
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_report))
 
 
 # =============================================================================
@@ -565,45 +599,53 @@ def expiry_dashboard_summary(request):
     """
     today = timezone.now().date()
     days = int(request.query_params.get('days', 30))
-    cutoff = today + timedelta(days=days)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('inventory', tenant.id, 'expiry-summary', f'days-{days}')
 
-    batches = ProductBatch.objects.filter(
-        product__created_by=request.user.active_tenant.active_tenant,
-        expiry_date__isnull=False,
-        expiry_date__lte=cutoff,
-        is_active=True,
-    ).select_related('product')
+    def build_summary():
+        cutoff = today + timedelta(days=days)
 
-    count = 0
-    total_value = 0
-    items = []
-    for batch in batches:
-        total_qty = batch.stock_points.aggregate(total=Sum('quantity'))['total'] or 0
-        if total_qty <= 0:
-            continue
-        days_left = (batch.expiry_date - today).days
-        value = float(batch.mrp * total_qty)
-        count += 1
-        total_value += value
-        items.append({
-            'batch_id': str(batch.id),
-            'product_name': batch.product.name,
-            'batch_number': batch.batch_number,
-            'expiry_date': batch.expiry_date,
-            'days_left': days_left,
-            'status': 'expired' if days_left < 0 else ('critical' if days_left <= 7 else 'warning'),
-            'quantity': total_qty,
-            'value': value,
-        })
+        batches = ProductBatch.objects.filter(
+            product__created_by=tenant,
+            expiry_date__isnull=False,
+            expiry_date__lte=cutoff,
+            is_active=True,
+        ).select_related('product').annotate(
+            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+        )
 
-    # Sort by days_left ascending (most urgent first)
-    items.sort(key=lambda x: x['days_left'])
+        count = 0
+        total_value = 0
+        items = []
+        for batch in batches:
+            total_qty = batch.total_stock or 0
+            if total_qty <= 0:
+                continue
+            days_left = (batch.expiry_date - today).days
+            value = float(batch.mrp * total_qty)
+            count += 1
+            total_value += value
+            items.append({
+                'batch_id': str(batch.id),
+                'product_name': batch.product.name,
+                'batch_number': batch.batch_number,
+                'expiry_date': batch.expiry_date,
+                'days_left': days_left,
+                'status': 'expired' if days_left < 0 else ('critical' if days_left <= 7 else 'warning'),
+                'quantity': total_qty,
+                'value': value,
+            })
 
-    return Response({
-        'count': count,
-        'total_value': round(total_value, 2),
-        'items': items,
-    })
+        # Sort by days_left ascending (most urgent first)
+        items.sort(key=lambda x: x['days_left'])
+
+        return {
+            'count': count,
+            'total_value': round(total_value, 2),
+            'items': items,
+        }
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_summary))
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions, status

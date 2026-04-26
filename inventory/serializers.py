@@ -5,8 +5,8 @@ from .serializers_sidecar import ProductMetaSerializer, BillOfMaterialSerializer
 
 class ProductSerializer(serializers.ModelSerializer):
     unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, required=False)
-    cost_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, required=False)
-    sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    cost_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, required=False, allow_null=True)
+    sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
     meta = ProductMetaSerializer(required=False)
     
     class Meta:
@@ -18,6 +18,20 @@ class ProductSerializer(serializers.ModelSerializer):
             'meta'
         ]
         read_only_fields = ['id', 'created_by', 'price']
+
+    def validate(self, attrs):
+        sale_price = attrs.get('sale_price')
+        if sale_price is None and self.instance is not None:
+            sale_price = self.instance.sale_price
+
+        if sale_price in (None, ''):
+            raise serializers.ValidationError({'sale_price': 'Sale price is required.'})
+
+        cost_price = attrs.get('price')
+        if cost_price is None:
+            attrs['price'] = self.instance.price if self.instance else 0
+
+        return attrs
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)

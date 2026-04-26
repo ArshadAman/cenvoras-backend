@@ -18,6 +18,12 @@ schema_view = get_schema_view(
    permission_classes=(permissions.AllowAny,),
 )
 
+schema_public = bool(getattr(settings, 'DEBUG', False))
+
+
+def docs_disabled_view(request):
+    return HttpResponse(status=404)
+
 def favicon_view(request):
     """Simple favicon response to avoid 404 errors"""
     return HttpResponse(status=204)  # No Content
@@ -34,8 +40,8 @@ urlpatterns = [
     path('api/reports/', include('reports.urls')),
     path('api/audit/', include('audit_log.urls')),
     path('api/ai/', include('ai_assistant.urls')),
-    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
-    path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0) if schema_public else docs_disabled_view, name='schema-swagger-ui'),
+    path('redoc/', schema_view.with_ui('redoc', cache_timeout=0) if schema_public else docs_disabled_view, name='schema-redoc'),
     
     # Handle favicon requests
     path('favicon.ico', favicon_view, name='favicon'),

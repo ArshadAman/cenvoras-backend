@@ -163,5 +163,5 @@ def vendor_update_delete(request, pk):
         except Exception as e:
             return Response({
                 "success": False,
-                "message": f"Failed to delete vendor: {str(e)}"
+                "message": "Failed to delete vendor. Please try again later."
             }, status=status.HTTP_400_BAD_REQUEST)

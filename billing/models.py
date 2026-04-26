@@ -138,6 +138,7 @@ class SalesInvoice(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True)
     customer_name = models.CharField(max_length=255, null=True, blank=True)  # Always store customer name as text
+    customer_address = models.TextField(blank=True, null=True)
     invoice_number = models.CharField(max_length=100)
     invoice_date = models.DateField()
     due_date = models.DateField(null=True, blank=True)

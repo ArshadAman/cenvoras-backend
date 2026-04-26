@@ -230,10 +230,9 @@ def subscription_entitlements(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def plan_catalog(request):
-	plans = Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
-	data = []
-	for plan in plans:
-		data.append({
+	cache_key = global_cache_key('subscription', 'plan-catalog')
+	data = cache_get_or_set(cache_key, CACHE_TTL_LONG, lambda: [
+		{
 			'id': str(plan.id),
 			'code': plan.code,
 			'name': plan.name,

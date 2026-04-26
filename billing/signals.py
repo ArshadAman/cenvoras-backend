@@ -83,29 +83,19 @@ def decrease_stock_on_sale(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def update_financials_on_sale_item(sender, instance, created, **kwargs):
-    if created and instance.sales_invoice and instance.sales_invoice.customer:
-        # Atomic increase: Invoice total
+    if created and instance.sales_invoice:
+        # Atomic increase: Invoice total remains item-driven.
         SalesInvoice.objects.filter(pk=instance.sales_invoice.pk).update(
             total_amount=F('total_amount') + instance.amount
         )
-        # Atomic increase: Customer balance (Udhaar)
-        Customer.objects.filter(pk=instance.sales_invoice.customer.pk).update(
-            current_balance=F('current_balance') + instance.amount
-        )
-        print(f"DEBUG: Atomically increased Udhaar by {instance.amount} for item {instance.id}")
 
 @receiver(post_delete, sender=SalesInvoiceItem)
 def revert_financials_on_sale_item_delete(sender, instance, **kwargs):
-    if instance.sales_invoice and instance.sales_invoice.customer:
+    if instance.sales_invoice:
         # Atomic revert: Invoice total
         SalesInvoice.objects.filter(pk=instance.sales_invoice.pk).update(
             total_amount=Greatest(F('total_amount') - instance.amount, 0)
         )
-        # Atomic revert: Customer balance (Udhaar)
-        Customer.objects.filter(pk=instance.sales_invoice.customer.pk).update(
-            current_balance=F('current_balance') - instance.amount
-        )
-        print(f"DEBUG: Atomically reverted Udhaar by {instance.amount} for deleted item")
 
 @receiver(post_delete, sender=PurchaseBillItem)
 def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
@@ -187,7 +177,9 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
                 amount=instance.amount,
                 description=instance.notes or f"Payment received - {instance.reference or ''}",
                 date=instance.date,
-                user=instance.created_by
+                user=instance.created_by,
+                invoice=instance.invoice,
+                payment_id=instance.id,
             )
         except Exception as e:
             print(f"ERROR creating ledger entries for payment: {e}")
@@ -219,19 +211,8 @@ def check_credit_limit_pre_save(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def create_sales_invoice_accounting_entries(sender, instance, created, **kwargs):
-    if created:
-        sales_invoice = instance.sales_invoice
-        from ledger.models import GeneralLedgerEntry
-        
-        existing_entries = GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice)
-        if existing_entries.exists():
-            existing_entries.delete()
-        
-        try:
-            from ledger.services import AccountingService
-            AccountingService.create_sales_invoice_entries(sales_invoice)
-        except Exception:
-            pass
+    # Ledger rebuild is now done once per invoice save in the serializer.
+    return
 
 @receiver(post_save, sender=SalesInvoice)
 def create_sales_invoice_accounting_entries_fallback(sender, instance, created, **kwargs):
@@ -240,33 +221,9 @@ def create_sales_invoice_accounting_entries_fallback(sender, instance, created, 
 
 @receiver(post_save, sender=PurchaseBillItem)
 def create_purchase_bill_accounting_entries(sender, instance, created, **kwargs):
-    if created:
-        purchase_bill = instance.purchase_bill
-        from ledger.models import GeneralLedgerEntry
-        
-        existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill)
-        if existing_entries.exists():
-            existing_entries.delete()
-        
-        try:
-            from ledger.services import AccountingService
-            AccountingService.create_purchase_bill_entries(purchase_bill)
-        except Exception:
-            pass
+    # Ledger rebuild is now done once per bill save in the serializer.
+    return
 
 @receiver(post_save, sender=PurchaseBill)  
 def create_purchase_bill_accounting_entries_fallback(sender, instance, created, **kwargs):
-    if created:
-        from django.db import transaction
-        def create_entries_after_commit():
-            from billing.models import PurchaseBillItem
-            from ledger.models import GeneralLedgerEntry
-            line_items = PurchaseBillItem.objects.filter(purchase_bill=instance)
-            existing_entries = GeneralLedgerEntry.objects.filter(purchase_bill=instance)
-            if not line_items.exists() and not existing_entries.exists():
-                try:
-                    from ledger.services import AccountingService
-                    AccountingService.create_purchase_bill_entries(instance)
-                except Exception:
-                    pass
-        transaction.on_commit(create_entries_after_commit)
+    return

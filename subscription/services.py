@@ -7,6 +7,13 @@ from decimal import Decimal
 from django.db.models import Count
 from django.utils import timezone
 
+from cenvoras.cache_utils import (
+    CACHE_TTL_SHORT,
+    cache_get_or_set,
+    cache_delete_many,
+    tenant_cache_key,
+)
+
 from billing.models import Customer, SalesInvoice
 from users.models import User
 from .models import BillingCycle
@@ -23,6 +30,7 @@ PLAN_CODE_ALIASES = {
 MODULE_FEATURES = {
     'inventory': 'inventory_core',
     'analytics': 'advanced_analytics',
+    'ai_copilot': 'ai_copilot',
     'integrations': 'integrations',
     'dashboard': 'dashboard_analytics',
     'reports': 'advanced_reports',
@@ -55,8 +63,72 @@ def get_tenant_subscription(user: User):
     return getattr(tenant, 'subscription', None)
 
 
-def get_tenant_plan(user: User):
+def _is_legacy_trial_active(tenant: User) -> bool:
+    status = (getattr(tenant, 'subscription_status', '') or '').lower()
+    if status != 'trial':
+        return False
+    trial_ends_at = getattr(tenant, 'trial_ends_at', None)
+    if not trial_ends_at:
+        return True
+    return timezone.now() < trial_ends_at
+
+
+def _sync_legacy_status_on_expiry(tenant: User) -> None:
+    current_status = (getattr(tenant, 'subscription_status', '') or '').lower()
+    if current_status in {'active', 'trial'}:
+        tenant.subscription_status = 'expired'
+        tenant.subscription_tier = 'FREE'
+        tenant.save(update_fields=['subscription_status', 'subscription_tier'])
+
+
+def get_active_tenant_subscription(user: User):
     subscription = get_tenant_subscription(user)
+    if not subscription:
+        return None
+
+    now = timezone.now()
+
+    # New billing rule: only Free can be scheduled without payment.
+    # Clean up any legacy paid pending plans created by older logic.
+    if subscription.pending_plan and normalize_plan_code(getattr(subscription.pending_plan, 'code', 'free')) != 'free':
+        subscription.pending_plan = None
+        subscription.pending_plan_starts_at = None
+        subscription.save(update_fields=['pending_plan', 'pending_plan_starts_at', 'updated_at'])
+
+    # Prepaid behavior: if a next plan was purchased earlier, activate it automatically
+    # when its start time arrives.
+    if subscription.pending_plan and subscription.pending_plan_starts_at and now >= subscription.pending_plan_starts_at:
+        start_time = subscription.pending_plan_starts_at
+        subscription.plan = subscription.pending_plan
+        subscription.status = 'active'
+        subscription.current_period_start = start_time
+        subscription.current_period_end = start_time + timedelta(days=30)
+        subscription.pending_plan = None
+        subscription.pending_plan_starts_at = None
+        subscription.cancel_at_period_end = False
+        subscription.save(update_fields=[
+            'plan',
+            'status',
+            'current_period_start',
+            'current_period_end',
+            'pending_plan',
+            'pending_plan_starts_at',
+            'cancel_at_period_end',
+            'updated_at',
+        ])
+
+    if not subscription.is_valid:
+        if subscription.status in {'active', 'trial'}:
+            subscription.status = 'past_due'
+            subscription.save(update_fields=['status', 'updated_at'])
+        _sync_legacy_status_on_expiry(get_tenant(user))
+        return None
+
+    return subscription
+
+
+def get_tenant_plan(user: User):
+    subscription = get_active_tenant_subscription(user)
     if subscription and subscription.plan:
         return subscription.plan
     return None
@@ -81,6 +153,11 @@ def get_effective_plan_code(user: User) -> str:
     if plan:
         return normalize_plan_code(plan.code)
     return normalize_plan_code(getattr(tenant, 'subscription_tier', 'FREE'))
+
+
+def invalidate_subscription_cache(user: User) -> None:
+    tenant = get_tenant(user)
+    cache_delete_many(tenant_cache_key('subscription', tenant.id, 'entitlements'))
 
 
 def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
@@ -120,6 +197,10 @@ def can_use_feature(user: User, feature_code: str) -> bool:
     if is_vip_user(user):
         return True
 
+    tenant = get_tenant(user)
+    if _is_legacy_trial_active(tenant):
+        return True
+
     plan_code = get_effective_plan_code(user)
     feature_code = (feature_code or '').strip().lower()
 
@@ -146,9 +227,14 @@ def can_use_feature(user: User, feature_code: str) -> bool:
     return feature_code in free_allowed
 
 
+def can_auto_create_inventory_product(user: User) -> bool:
+    if is_vip_user(user):
+        return True
+
+    return get_effective_plan_code(user) in {'pro', 'business'}
+
+
 def get_entitlements(user: User) -> dict[str, Any]:
-    plan = get_tenant_plan(user)
-    plan_code = get_effective_plan_code(user)
     tenant = get_tenant(user)
     vip = is_vip_user(user)
     usage = get_current_usage(user)
@@ -160,11 +246,47 @@ def get_entitlements(user: User) -> dict[str, Any]:
         'max_customers': -1,
     }
 
-    locked_modules = {}
-    for module_name, feature_code in MODULE_FEATURES.items():
-        locked_modules[module_name] = {
-            'feature_code': feature_code,
-            'enabled': can_use_feature(user, feature_code),
+        locked_modules = {}
+        for module_name, feature_code in MODULE_FEATURES.items():
+            locked_modules[module_name] = {
+                'feature_code': feature_code,
+                'enabled': can_use_feature(user, feature_code),
+            }
+
+        return {
+            'tenant_id': str(tenant.id),
+            'is_vip': vip,
+            'plan': {
+                'code': plan_code,
+                'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else ('Starter' if plan_code == 'starter' else plan_code.title())),
+                'status': getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
+                'current_period_end': getattr(subscription, 'current_period_end', None),
+                'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+                'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
+                'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
+                'cancel_at_period_end': getattr(subscription, 'cancel_at_period_end', False),
+                'next_plan_code': 'starter' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+                'next_plan_name': 'Starter' if getattr(subscription, 'cancel_at_period_end', False) and not getattr(subscription, 'pending_plan', None) else getattr(getattr(subscription, 'pending_plan', None), 'name', None),
+            },
+            'limits': limits,
+            'usage': usage,
+            'locked_modules': locked_modules,
+            'can': {
+                'inventory': can_use_feature(user, MODULE_FEATURES['inventory']),
+                'analytics': can_use_feature(user, MODULE_FEATURES['analytics']),
+                'ai_copilot': can_use_feature(user, MODULE_FEATURES['ai_copilot']),
+                'integrations': can_use_feature(user, MODULE_FEATURES['integrations']),
+                'dashboard': can_use_feature(user, MODULE_FEATURES['dashboard']),
+                'reports': can_use_feature(user, MODULE_FEATURES['reports']),
+                'forecast': can_use_feature(user, MODULE_FEATURES['forecast']),
+                'restock': can_use_feature(user, MODULE_FEATURES['restock']),
+                'warehouse': can_use_feature(user, MODULE_FEATURES['warehouse']),
+                'item_pnl': can_use_feature(user, MODULE_FEATURES['item_pnl']),
+                'stock_ledger': can_use_feature(user, MODULE_FEATURES['stock_ledger']),
+                'shortage_management': can_use_feature(user, MODULE_FEATURES['shortage_management']),
+                'priority_support': can_use_feature(user, MODULE_FEATURES['priority_support']),
+                'team': can_use_feature(user, MODULE_FEATURES['team']),
+            },
         }
 
     return {

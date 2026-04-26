@@ -46,8 +46,9 @@ class Command(BaseCommand):
         )
 
         folder = getattr(settings, "BACKUP_CLOUDINARY_FOLDER", "cenvoras/db_backups")
+        backup_type = str(getattr(settings, "BACKUP_CLOUDINARY_TYPE", "private") or "private").strip().lower()
         keep_count = int(getattr(settings, "DBBACKUP_CLEANUP_KEEP", 7))
-        result = resources(type="upload", resource_type="raw", prefix=f"{folder}/backup_", max_results=500)
+        result = resources(type=backup_type, resource_type="raw", prefix=f"{folder}/backup_", max_results=500)
         resources_list = result.get("resources", [])
 
         backups = sorted(

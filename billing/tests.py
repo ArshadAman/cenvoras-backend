@@ -3,7 +3,12 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from billing.models import SalesInvoice, PurchaseBill
+from billing.models_sidecar import Quotation
+from inventory.models import Product
 from datetime import date
+from datetime import timedelta
+from django.utils import timezone
+from subscription.models import Plan, TenantSubscription
 
 User = get_user_model()
 
@@ -17,6 +22,14 @@ class SalesInvoiceTests(TestCase):
             first_name="Test",
             last_name="Tenant"
         )
+        self.pro_plan = Plan.objects.create(code="pro", name="Pro", monthly_price=0)
+        self.starter_plan = Plan.objects.create(code="starter", name="Starter", monthly_price=0)
+        TenantSubscription.objects.create(
+            tenant=self.tenant,
+            plan=self.pro_plan,
+            status="active",
+            current_period_end=timezone.now() + timedelta(days=30),
+        )
         self.user = User.objects.create_user(
             username="test_user",
             email="test@test.com", 
@@ -26,6 +39,13 @@ class SalesInvoiceTests(TestCase):
             parent=self.tenant
         )
         self.client.force_authenticate(user=self.user)
+
+    def _set_plan(self, plan):
+        subscription = self.tenant.subscription
+        subscription.plan = plan
+        subscription.status = "active"
+        subscription.current_period_end = timezone.now() + timedelta(days=30)
+        subscription.save(update_fields=["plan", "status", "current_period_end", "updated_at"])
         
     def test_invoice_creation_success(self):
         data = {
@@ -82,6 +102,30 @@ class SalesInvoiceTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
         self.assertEqual(SalesInvoice.objects.get(invoice_number="INV-ABCD-003").status, "draft")
 
+    def test_starter_plan_cannot_autocreate_inventory_product(self):
+        self._set_plan(self.starter_plan)
+
+        data = {
+            "customer_name": "John Doe",
+            "invoice_number": "INV-ABCD-004",
+            "invoice_date": "2024-01-01",
+            "status": "final",
+            "total_amount": "100.00",
+            "items": [
+                {
+                    "product": "Starter Blocked Product",
+                    "quantity": 1,
+                    "price": "100.00",
+                    "amount": "100.00"
+                }
+            ]
+        }
+
+        res = self.client.post("/api/billing/sales-invoices/", data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("product", res.data)
+        self.assertFalse(Product.objects.filter(name__iexact="Starter Blocked Product", created_by=self.tenant).exists())
+
     def test_analytics_endpoint(self):
         SalesInvoice.objects.create(created_by=self.tenant, customer_name="Jane Doe", invoice_number="INV-1", invoice_date="2024-01-01", total_amount=100.00)
         SalesInvoice.objects.create(created_by=self.tenant, customer_name="Jane Doe", invoice_number="INV-2", invoice_date="2024-05-05", total_amount=200.00)
@@ -90,6 +134,70 @@ class SalesInvoiceTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['total_revenue'], 100.00)
         self.assertEqual(res.data['total_invoices'], 1)
+
+    def test_analytics_includes_non_draft_invoices(self):
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Alice",
+            invoice_number="INV-ND-001",
+            invoice_date="2024-01-10",
+            total_amount=150.00,
+            status="final",
+        )
+        # Legacy/edge-case non-draft status should still count in analytics totals.
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Bob",
+            invoice_number="INV-ND-002",
+            invoice_date="2024-01-10",
+            total_amount=250.00,
+            status="pending",
+        )
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Charlie",
+            invoice_number="INV-ND-003",
+            invoice_date="2024-01-10",
+            total_amount=500.00,
+            status="draft",
+        )
+
+        res = self.client.get("/api/billing/sales-invoices/analytics/?start_date=2024-01-01&end_date=2024-01-31")
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['total_invoices'], 2)
+        self.assertEqual(float(res.data['total_revenue']), 400.00)
+
+    def test_overdue_report_excludes_drafts_and_returns_invoice_rows(self):
+        due_date = date.today() - timedelta(days=3)
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Overdue Final",
+            invoice_number="INV-OD-001",
+            invoice_date=date.today(),
+            due_date=due_date,
+            total_amount=300.00,
+            amount_paid=0,
+            payment_status="pending",
+            status="final",
+        )
+        SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer_name="Overdue Draft",
+            invoice_number="INV-OD-002",
+            invoice_date=date.today(),
+            due_date=due_date,
+            total_amount=400.00,
+            amount_paid=0,
+            payment_status="pending",
+            status="draft",
+        )
+
+        res = self.client.get("/api/billing/reports/overdue-bills/")
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['count'], 1)
+        self.assertEqual(res.data['results'][0]['invoice_number'], "INV-OD-001")
 
     def test_partial_paid_invoice_blocks_immutable_field_edit(self):
         invoice = SalesInvoice.objects.create(
@@ -165,6 +273,93 @@ class PurchaseBillValidationTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(res.data.get("success", True))
         self.assertIn("errors", res.data)
+
+
+class QuotationProductAutocreateTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.tenant = User.objects.create_user(
+            username="tenant_user_qt",
+            email="tenant.qt@test.com",
+            password="testpassword",
+            first_name="Tenant",
+            last_name="QT"
+        )
+        self.pro_plan = Plan.objects.create(code="pro", name="Pro", monthly_price=0)
+        self.starter_plan = Plan.objects.create(code="starter", name="Starter", monthly_price=0)
+        TenantSubscription.objects.create(
+            tenant=self.tenant,
+            plan=self.pro_plan,
+            status="active",
+            current_period_end=timezone.now() + timedelta(days=30),
+        )
+        self.user = User.objects.create_user(
+            username="test_user_qt",
+            email="test.qt@test.com",
+            password="testpassword",
+            first_name="Test",
+            last_name="QT",
+            parent=self.tenant
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _set_plan(self, plan):
+        subscription = self.tenant.subscription
+        subscription.plan = plan
+        subscription.status = "active"
+        subscription.current_period_end = timezone.now() + timedelta(days=30)
+        subscription.save(update_fields=["plan", "status", "current_period_end", "updated_at"])
+
+    def test_quotation_create_autocreates_missing_product(self):
+        payload = {
+            "customer_name": "Walk-in Customer",
+            "status": "draft",
+            "items": [
+                {
+                    "product": "Brand New Item",
+                    "quantity": 2,
+                    "price": "120.00",
+                    "tax": "18.00",
+                    "amount": "240.00",
+                    "unit": "pcs",
+                    "hsn_sac_code": "9983"
+                }
+            ]
+        }
+
+        response = self.client.post("/api/billing/quotations/", payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Quotation.objects.filter(created_by=self.tenant).count(), 1)
+
+        created_product = Product.objects.filter(name__iexact="Brand New Item", created_by=self.tenant).first()
+        self.assertIsNotNone(created_product)
+        self.assertEqual(str(created_product.unit), "pcs")
+
+    def test_quotation_starter_plan_cannot_autocreate_inventory_product(self):
+        self._set_plan(self.starter_plan)
+
+        payload = {
+            "customer_name": "Walk-in Customer",
+            "status": "draft",
+            "items": [
+                {
+                    "product": "Starter Blocked Quote Item",
+                    "quantity": 2,
+                    "price": "120.00",
+                    "tax": "18.00",
+                    "amount": "240.00",
+                    "unit": "pcs",
+                    "hsn_sac_code": "9983"
+                }
+            ]
+        }
+
+        response = self.client.post("/api/billing/quotations/", payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("product", response.data)
+        self.assertFalse(Product.objects.filter(name__iexact="Starter Blocked Quote Item", created_by=self.tenant).exists())
 
 
 class PaymentStatusTests(TestCase):

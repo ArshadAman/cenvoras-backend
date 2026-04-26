@@ -2,7 +2,10 @@ from django.urls import path
 from .views import (
     purchase_bill_detail, purchase_bill_update_delete,
     sales_invoice_detail, sales_invoice_list_create, sales_invoice_update_delete, purchase_bill_list_create,
-    vendor_products, get_next_invoice_number, sales_summary_analytics
+    vendor_products, get_next_invoice_number, sales_summary_analytics, recalculate_invoice_totals
+)
+from .csv_views import (
+    upload_sales_invoices_csv, export_sales_invoices_csv, sales_csv_job_status, download_sales_csv
 )
 from . import customer_views
 from . import vendor_views
@@ -21,8 +24,12 @@ urlpatterns = [
     path('sales-invoices/', sales_invoice_list_create, name='sales_invoice_list_create'),
     path('sales-invoices/next-number/', get_next_invoice_number, name='get_next_invoice_number'),
     path('sales-invoices/analytics/', sales_summary_analytics, name='sales_summary_analytics'),
+    path('sales-invoices/export-csv/', export_sales_invoices_csv, name='export_sales_invoices_csv'),
+    path('sales-invoices/csv-jobs/<str:task_id>/', sales_csv_job_status, name='sales_csv_job_status'),
+    path('sales-invoices/csv-jobs/<str:task_id>/download/', download_sales_csv, name='download_sales_csv'),
     path('sales-invoices/<uuid:pk>/', sales_invoice_detail, name='sales_invoice_detail'),
     path('sales-invoices/<uuid:pk>/edit/', sales_invoice_update_delete, name='sales_invoice_update_delete'),
+    path('upload-sales-invoices-csv/', upload_sales_invoices_csv, name='upload_sales_invoices_csv'),
     path('customers/', customer_views.customer_list_create, name='customer_list_create'),
     path('customers/<uuid:pk>/', customer_views.customer_detail, name='customer_detail'),
     path('customers/<uuid:pk>/edit/', customer_views.customer_update_delete, name='customer_update_delete'),
@@ -37,9 +44,15 @@ urlpatterns = [
     
     # Reports
     path('reports/overdue-bills/', report_views.overdue_bills_report, name='overdue_bills_report'),
+    path('reports/customer-balance-reconciliation/', report_views.customer_balance_reconciliation, name='customer_balance_reconciliation'),
     path('reports/item-pl/', report_views.item_wise_pl_report, name='item_wise_pl_report'),
 
     # Sidecar Features (Sales Orders, Challans, Settings)
+    path('quotations/', views_sidecar.quotation_list_create, name='quotation_list_create'),
+    path('quotations/next-number/', views_sidecar.quotation_next_number, name='quotation_next_number'),
+    path('quotations/<uuid:pk>/', views_sidecar.quotation_detail, name='quotation_detail'),
+    path('quotations/<uuid:pk>/convert-to-sales-order/', views_sidecar.quotation_convert_to_sales_order, name='quotation_convert_to_sales_order'),
+
     path('sales-orders/', views_sidecar.sales_order_list_create, name='sales_order_list_create'),
     path('sales-orders/<uuid:pk>/', views_sidecar.sales_order_detail, name='sales_order_detail'),
     path('sales-orders/<uuid:pk>/convert_to_invoice/', views_sidecar.convert_order_to_invoice, name='convert_order_to_invoice'),
@@ -63,5 +76,5 @@ urlpatterns = [
     path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
     # Fix endpoints
-    path('sales-invoices/recalculate-totals/', views.recalculate_invoice_totals, name='recalculate_invoice_totals'),
+    path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),
 ]

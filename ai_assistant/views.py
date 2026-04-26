@@ -11,6 +11,7 @@ from django.db.models import Sum, Count, F, Q
 from datetime import timedelta
 import json
 import logging
+from subscription.services import can_use_feature
 
 logger = logging.getLogger(__name__)
 
@@ -328,10 +329,10 @@ def call_gemini(question, business_context, user):
     except requests.exceptions.HTTPError as e:
         error_msg = f"HTTP Error: {e}\nResponse: {e.response.text}"
         logger.error(error_msg)
-        return f"⚠️ AI service unavailable. Detailed Error: {e.response.text[:200]}"
+        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
     except requests.exceptions.RequestException as e:
         logger.error(f"Gemini API error: {e}")
-        return f"⚠️ AI service unavailable. Error: {str(e)[:100]}"
+        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
 
 
 class AIChatView(APIView):
@@ -344,6 +345,11 @@ class AIChatView(APIView):
     def post(self, request):
         question = request.data.get('question', '').strip()
         user = request.user
+
+        if not can_use_feature(user, 'ai_copilot'):
+            return Response({
+                "detail": "Gemini chat is available only on the Business plan.",
+            }, status=403)
 
         if not question:
             return Response({

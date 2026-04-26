@@ -1,7 +1,8 @@
 from django.urls import path
 from .views import (
     quick_signup_view, CustomTokenObtainPairView, view_profile, update_profile,
-    profile_setup_view, password_reset_request_view, password_reset_confirm_view
+    profile_setup_view, password_reset_request_view, password_reset_confirm_view,
+    password_reset_otp_confirm_view
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
@@ -23,6 +24,7 @@ urlpatterns = [
     
     # Password Management
     path('password-reset/', password_reset_request_view, name='password_reset_request'),
+    path('password-reset-otp-confirm/', password_reset_otp_confirm_view, name='password_reset_otp_confirm'),
     path('password-reset-confirm/<uidb64>/<token>/', password_reset_confirm_view, name='password_reset_confirm'),
     
     # Backward compatibility (optional - can remove later)

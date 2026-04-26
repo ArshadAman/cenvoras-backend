@@ -18,6 +18,8 @@ class User(AbstractUser):
     
     # Optional fields (can be added later)
     gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional)")
+    gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")
+    dl_number = models.CharField(max_length=50, blank=True, null=True, help_text="DL number (optional)")
     business_address = models.TextField(blank=True, null=True, help_text="Complete business address for invoices")
     
     from cenvoras.constants import IndianStates

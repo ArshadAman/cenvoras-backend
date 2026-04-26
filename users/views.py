@@ -11,19 +11,75 @@ from .serializers import (
 )
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.utils import timezone
+from datetime import timedelta
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth import get_user_model
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
-from django.core.mail import send_mail
 from django.conf import settings
 from .tasks import send_async_email
+from django.core.cache import cache
+from django.contrib.auth.hashers import make_password
+import secrets
+import hashlib
+import hmac
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from subscription.services import get_effective_limit, get_limit_exceeded_reason
 
 class RegisterRateThrottle(AnonRateThrottle):
     rate = '5/min'  # Limit registration attempts
+
+
+class OtpRateThrottle(AnonRateThrottle):
+    rate = '10/min'
+
+
+SIGNUP_OTP_TTL_SECONDS = 10 * 60
+FORGOT_OTP_TTL_SECONDS = 10 * 60
+
+
+def _normalize_email(value: str) -> str:
+    return str(value or '').strip().lower()
+
+
+def _otp_hash(email: str, purpose: str, otp: str) -> str:
+    base = f"{purpose}:{_normalize_email(email)}:{otp}:{settings.SECRET_KEY}"
+    return hashlib.sha256(base.encode('utf-8')).hexdigest()
+
+
+def _generate_otp() -> str:
+    return f"{secrets.randbelow(900000) + 100000:06d}"
+
+
+def _signup_pending_key(email: str) -> str:
+    return f"auth:signup:pending:{_normalize_email(email)}"
+
+
+def _signup_otp_key(email: str) -> str:
+    return f"auth:signup:otp:{_normalize_email(email)}"
+
+
+def _forgot_otp_key(email: str) -> str:
+    return f"auth:forgot:otp:{_normalize_email(email)}"
+
+
+def _send_otp_email(email: str, otp: str, subject: str, intro: str) -> None:
+    body = (
+        f"Hello,\n\n"
+        f"{intro}\n\n"
+        f"Your OTP is: {otp}\n"
+        f"This OTP is valid for 10 minutes.\n"
+        f"If you did not request this, please ignore this email.\n\n"
+        f"Regards,\n"
+        f"Cenvora Team"
+    )
+    send_async_email.delay(
+        subject=subject,
+        message=body,
+        recipient_list=[email],
+        force_cenvora_branding=True,
+    )
 
 # Create your views here.
 
@@ -74,44 +130,124 @@ def quick_signup_view(request):
     
     Everything else can be completed later in profile setup!
     """
-    serializer = QuickSignupSerializer(data=request.data)
-    if serializer.is_valid():
-        try:
-            with transaction.atomic():
-                user = serializer.save()
-                user.last_login_at = timezone.now()
-                user.save(update_fields=['last_login_at'])
-                
-                # Return user info for immediate use
-                user_data = UserProfileSerializer(user).data
-                
-                return Response({
-                    'success': True,
-                    'message': 'Account created successfully! Welcome to Cenvoras.',
-                    'user': user_data,
-                    'next_step': 'Complete your profile to start creating GST-compliant invoices',
-                    'trial_info': {
-                        'trial_active': user.is_trial_active,
-                        'trial_ends_at': user.trial_ends_at,
-                        'days_remaining': (user.trial_ends_at - timezone.now()).days if user.trial_ends_at else 30
-                    }
-                }, status=status.HTTP_201_CREATED)
-                
-        except IntegrityError:
+    otp = str(request.data.get('otp', '')).strip()
+    email = _normalize_email(request.data.get('email'))
+
+    # Step 1: request OTP
+    if not otp:
+        serializer = QuickSignupSerializer(data=request.data)
+        if not serializer.is_valid():
             return Response({
                 'success': False,
-                'error': 'A user with this email or phone already exists.'
+                'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
+
+        validated = serializer.validated_data
+        normalized_email = _normalize_email(validated['email'])
+        generated_otp = _generate_otp()
+
+        pending_payload = {
+            'email': normalized_email,
+            'username': normalized_email,
+            'phone': validated['phone'],
+            'business_name': validated['business_name'],
+            'gstin': validated.get('gstin', ''),
+            'password_hash': make_password(validated['password']),
+            'requested_at': timezone.now().isoformat(),
+        }
+
+        cache.set(_signup_pending_key(normalized_email), pending_payload, timeout=SIGNUP_OTP_TTL_SECONDS)
+        cache.set(
+            _signup_otp_key(normalized_email),
+            {
+                'hash': _otp_hash(normalized_email, 'signup', generated_otp),
+                'attempts': 0,
+            },
+            timeout=SIGNUP_OTP_TTL_SECONDS,
+        )
+
+        _send_otp_email(
+            normalized_email,
+            generated_otp,
+            subject='Verify your Cenvora signup OTP',
+            intro='Use the OTP below to complete your Cenvora account signup.',
+        )
+
+        return Response({
+            'success': True,
+            'otp_required': True,
+            'message': 'OTP sent to your email. Please verify to complete signup.',
+            'expires_in_seconds': SIGNUP_OTP_TTL_SECONDS,
+        }, status=status.HTTP_200_OK)
+
+    # Step 2: verify OTP + create account
+    if not email:
+        return Response({'success': False, 'error': 'Email is required with OTP verification.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    otp_record = cache.get(_signup_otp_key(email)) or {}
+    pending = cache.get(_signup_pending_key(email))
+    if not otp_record or not pending:
+        return Response({'success': False, 'error': 'OTP expired or invalid. Please request a new OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    attempts = int(otp_record.get('attempts', 0))
+    if attempts >= 5:
+        cache.delete(_signup_otp_key(email))
+        cache.delete(_signup_pending_key(email))
+        return Response({'success': False, 'error': 'Too many invalid attempts. Please request a new OTP.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+    expected_hash = str(otp_record.get('hash', ''))
+    provided_hash = _otp_hash(email, 'signup', otp)
+    if not expected_hash or not hmac.compare_digest(expected_hash, provided_hash):
+        otp_record['attempts'] = attempts + 1
+        cache.set(_signup_otp_key(email), otp_record, timeout=SIGNUP_OTP_TTL_SECONDS)
+        return Response({'success': False, 'error': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        with transaction.atomic():
+            User = get_user_model()
+            if User.objects.filter(email=email).exists() or User.objects.filter(phone=pending.get('phone')).exists():
+                return Response({
+                    'success': False,
+                    'error': 'A user with this email or phone already exists.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            trial_end = timezone.now() + timedelta(days=14)
+            user = User.objects.create(
+                username=pending['username'],
+                email=pending['email'],
+                phone=pending['phone'],
+                business_name=pending['business_name'],
+                gstin=pending.get('gstin', ''),
+                trial_ends_at=trial_end,
+                password=pending['password_hash'],
+                last_login_at=timezone.now(),
+            )
+
+            cache.delete(_signup_otp_key(email))
+            cache.delete(_signup_pending_key(email))
+
+            user_data = UserProfileSerializer(user).data
             return Response({
-                'success': False,
-                'error': 'Registration failed. Please try again later.'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    return Response({
-        'success': False,
-        'errors': serializer.errors
-    }, status=status.HTTP_400_BAD_REQUEST)
+                'success': True,
+                'message': 'Account created successfully! Welcome to Cenvoras.',
+                'user': user_data,
+                'next_step': 'Complete your profile to start creating GST-compliant invoices',
+                'trial_info': {
+                    'trial_active': user.is_trial_active,
+                    'trial_ends_at': user.trial_ends_at,
+                    'days_remaining': (user.trial_ends_at - timezone.now()).days if user.trial_ends_at else 14
+                }
+            }, status=status.HTTP_201_CREATED)
+    except IntegrityError:
+        return Response({
+            'success': False,
+            'error': 'A user with this email or phone already exists.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception:
+        return Response({
+            'success': False,
+            'error': 'Registration failed. Please try again later.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -288,10 +424,13 @@ def update_profile(request):
         'first_name': user.first_name,
         'last_name': user.last_name,
         'business_address': user.business_address,
-        'gstin': user.gstin
+        'gstin': user.gstin,
+        'gem_id': user.gem_id,
+        'dl_number': user.dl_number,
     }
     
-    serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method == 'PATCH'))
+    # Treat PUT as partial as well, since frontend sends only editable fields.
+    serializer = ProfileUpdateSerializer(user, data=request.data, partial=(request.method in ['PATCH', 'PUT']))
     
     if serializer.is_valid():
         updated_user = serializer.save()
@@ -306,7 +445,9 @@ def update_profile(request):
             'first_name': updated_user.first_name,
             'last_name': updated_user.last_name,
             'business_address': updated_user.business_address,
-            'gstin': updated_user.gstin
+            'gstin': updated_user.gstin,
+            'gem_id': updated_user.gem_id,
+            'dl_number': updated_user.dl_number,
         }
         
         for field, old_value in original_data.items():
@@ -341,6 +482,7 @@ def update_profile(request):
     
     return Response({
         'success': False,
+        'message': 'Profile update validation failed',
         'errors': serializer.errors
     }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -444,28 +586,74 @@ def _get_profile_next_steps(user):
 )
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([OtpRateThrottle])
 def password_reset_request_view(request):
-    email = request.data.get('email')
+    email = _normalize_email(request.data.get('email'))
     if not email:
         return Response({'error': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
     User = get_user_model()
+
+    otp = _generate_otp()
+    cache.set(
+        _forgot_otp_key(email),
+        {
+            'hash': _otp_hash(email, 'forgot', otp),
+            'attempts': 0,
+        },
+        timeout=FORGOT_OTP_TTL_SECONDS,
+    )
+
     try:
         user = User.objects.get(email=email)
-        uid = urlsafe_base64_encode(force_bytes(user.pk))
-        token = default_token_generator.make_token(user)
-        reset_link = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
-        
-        # Dispatch email asynchronously via Celery
-        send_async_email.delay(
-            subject="Password Reset Request",
-            message=f"Click the link to reset your password: {reset_link}",
-            recipient_list=[email]
+        _send_otp_email(
+            email,
+            otp,
+            subject='Cenvora password reset OTP',
+            intro='Use the OTP below to reset your Cenvora account password.',
         )
         
-        return Response({'message': 'Password reset link sent.'})
+        return Response({'message': 'Password reset OTP sent.'})
     except User.DoesNotExist:
         # Do not reveal if email exists for security
-        return Response({'message': 'Password reset link sent.'})
+        return Response({'message': 'Password reset OTP sent.'})
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([OtpRateThrottle])
+def password_reset_otp_confirm_view(request):
+    email = _normalize_email(request.data.get('email'))
+    otp = str(request.data.get('otp', '')).strip()
+    password = request.data.get('password')
+
+    if not email or not otp or not password:
+        return Response({'error': 'email, otp and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    otp_record = cache.get(_forgot_otp_key(email)) or {}
+    if not otp_record:
+        return Response({'error': 'OTP expired or invalid. Please request a new OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    attempts = int(otp_record.get('attempts', 0))
+    if attempts >= 5:
+        cache.delete(_forgot_otp_key(email))
+        return Response({'error': 'Too many invalid attempts. Please request a new OTP.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+    expected_hash = str(otp_record.get('hash', ''))
+    provided_hash = _otp_hash(email, 'forgot', otp)
+    if not expected_hash or not hmac.compare_digest(expected_hash, provided_hash):
+        otp_record['attempts'] = attempts + 1
+        cache.set(_forgot_otp_key(email), otp_record, timeout=FORGOT_OTP_TTL_SECONDS)
+        return Response({'error': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    User = get_user_model()
+    try:
+        user = User.objects.get(email=email)
+        user.set_password(password)
+        user.save(update_fields=['password'])
+        cache.delete(_forgot_otp_key(email))
+        return Response({'message': 'Password has been reset.'})
+    except User.DoesNotExist:
+        return Response({'error': 'Invalid request.'}, status=status.HTTP_400_BAD_REQUEST)
 
 @swagger_auto_schema(
     method='post',

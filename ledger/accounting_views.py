@@ -9,7 +9,7 @@ from .models import Account, GeneralLedgerEntry, AccountType
 from .serializers import AccountSerializer, AccountBalanceSerializer
 from .services import AccountingService
 import logging
-from django.db.models import Sum, Avg, Max, Count
+from django.db.models import Sum, Avg, Max, Count, F
 from django.utils import timezone
 from datetime import timedelta
 import decimal
@@ -187,7 +187,7 @@ def account_detail(request, account_id):
             logger.error(f"Error deleting account {account.name} (ID: {account_id}): {str(e)}")
             return Response({
                 'success': False,
-                'error': f'Error deleting account: {str(e)}'
+                'error': 'Unable to delete account right now. Please try again later.'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -303,7 +303,7 @@ def setup_default_accounts(request):
     except Exception as e:
         return Response({
             'success': False,
-            'error': f'Failed to create default accounts: {str(e)}'
+            'error': 'Failed to create default accounts. Please try again later.'
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -572,7 +572,7 @@ def create_sales_invoice_ledger_entries(request):
         logger.error(f"Error creating sales invoice ledger entries: {str(e)}")
         return Response({
             'success': False,
-            'error': f'Internal server error: {str(e)}'
+            'error': 'Internal server error while creating sales invoice ledger entries.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -580,7 +580,7 @@ def create_sales_invoice_ledger_entries(request):
 @permission_classes([IsAuthenticated])
 def get_ledger_stats(request):
     """Get ledger statistics for the dashboard"""
-    user = request.user
+    user = getattr(request.user, 'active_tenant', request.user)
     
     # Date range filters
     date_from_str = request.query_params.get('date_from')
@@ -603,13 +603,39 @@ def get_ledger_stats(request):
     net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
     
     # Customer specific logic
-    from billing.models import Customer
+    from billing.models import Customer, SalesInvoice, BillPaymentStatus
     customers_query = Customer.objects.filter(created_by=user)
     if customer_id:
         customers_query = customers_query.filter(id=customer_id)
         
     total_customers = customers_query.count()
     outstanding_balance = customers_query.aggregate(total=Sum('current_balance'))['total'] or 0
+
+    # Overdue invoice stats
+    overdue_query = SalesInvoice.objects.filter(
+        created_by=user,
+        due_date__lt=timezone.now().date(),
+        payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID]
+    )
+    if customer_id:
+        overdue_query = overdue_query.filter(customer_id=customer_id)
+
+    overdue_stats = overdue_query.aggregate(
+        overdue_count=Count('id'),
+        overdue_total=Sum(F('total_amount') - F('amount_paid'))
+    )
+
+    # Reconciliation stats: compare customer balance with invoice-level outstanding
+    invoice_outstanding = SalesInvoice.objects.filter(created_by=user)
+    if customer_id:
+        invoice_outstanding = invoice_outstanding.filter(customer_id=customer_id)
+
+    invoice_outstanding_total = invoice_outstanding.aggregate(
+        total=Sum(F('total_amount') - F('amount_paid'))
+    )['total'] or 0
+
+    unapplied_credits = max(float(invoice_outstanding_total) - float(outstanding_balance), 0.0)
+    unmapped_outstanding = max(float(outstanding_balance) - float(invoice_outstanding_total), 0.0)
     
     # Recent transactions (last 30 days)
     thirty_days_ago = timezone.now().date() - timedelta(days=30)
@@ -629,7 +655,13 @@ def get_ledger_stats(request):
         'recent_transactions': recent_count,
         'average_payment': float(payment_stats['avg'] or 0),
         'largest_payment': float(payment_stats['max'] or 0),
-        'outstanding_balance': float(outstanding_balance)
+        'outstanding_balance': float(outstanding_balance),
+        'overdue_invoices_count': overdue_stats['overdue_count'] or 0,
+        'overdue_amount': float(overdue_stats['overdue_total'] or 0),
+        'invoice_outstanding_total': float(invoice_outstanding_total or 0),
+        'unapplied_credits': unapplied_credits,
+        'unmapped_outstanding': unmapped_outstanding,
+        'reconciliation_gap': float(outstanding_balance) - float(invoice_outstanding_total or 0),
     })
 
 
@@ -751,5 +783,100 @@ def create_purchase_bill_ledger_entries(request):
         logger.error(f"Error creating purchase bill ledger entries: {str(e)}")
         return Response({
             'success': False,
-            'error': f'Internal server error: {str(e)}'
+            'error': 'Internal server error while creating purchase bill ledger entries.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@swagger_auto_schema(
+    method='post',
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description='Date of journal entry'),
+            'description': openapi.Schema(type=openapi.TYPE_STRING, description='Global description'),
+            'reference': openapi.Schema(type=openapi.TYPE_STRING, description='Reference number'),
+            'entries': openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'account_id': openapi.Schema(type=openapi.TYPE_STRING),
+                        'debit': openapi.Schema(type=openapi.TYPE_NUMBER),
+                        'credit': openapi.Schema(type=openapi.TYPE_NUMBER),
+                    }
+                )
+            ),
+        },
+        required=['date', 'description', 'entries']
+    ),
+    responses={
+        201: openapi.Response(description="Manual journal entries created successfully")
+    }
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_manual_journal_entry(request):
+    """Manually create balancing journal entries (both debits and credits)"""
+    try:
+        from django.db import transaction
+        from decimal import Decimal
+
+        date = request.data.get('date')
+        description = request.data.get('description')
+        reference = request.data.get('reference', '')
+        entries_data = request.data.get('entries', [])
+
+        if not all([date, description, entries_data]):
+            return Response({'success': False, 'error': 'date, description, and entries are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        total_debit = Decimal('0')
+        total_credit = Decimal('0')
+
+        # Validate entries and sum debits/credits
+        for item in entries_data:
+            total_debit += Decimal(str(item.get('debit') or 0))
+            total_credit += Decimal(str(item.get('credit') or 0))
+
+        if total_debit != total_credit:
+            return Response({'success': False, 'error': f'Debits ({total_debit}) must equal Credits ({total_credit})'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if total_debit == 0:
+            return Response({'success': False, 'error': 'Journal entry requires at least a non-zero debit and credit amount'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            created_entries = []
+            for item in entries_data:
+                try:
+                    account = Account.objects.get(id=item.get('account_id'), created_by=request.user)
+                except Account.DoesNotExist:
+                    raise ValueError(f"Account setup issue: {item.get('account_id')} not found")
+
+                debit = Decimal(str(item.get('debit') or 0))
+                credit = Decimal(str(item.get('credit') or 0))
+
+                # Do not insert empty 0 / 0 rows unless absolutely needed
+                if debit == 0 and credit == 0:
+                    continue
+
+                entry = GeneralLedgerEntry.objects.create(
+                    date=date,
+                    account=account,
+                    debit=debit,
+                    credit=credit,
+                    description=description,
+                    reference=reference,
+                    created_by=request.user
+                )
+                created_entries.append(entry)
+
+        return Response({
+            'success': True,
+            'message': 'Journal entry created successfully',
+            'entries_created': len(created_entries)
+        }, status=status.HTTP_201_CREATED)
+
+    except ValueError as ve:
+        return Response({'success': False, 'error': str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"Error creating manual journal entry: {str(e)}")
+        return Response({'success': False, 'error': 'Internal server error while creating manual entries.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

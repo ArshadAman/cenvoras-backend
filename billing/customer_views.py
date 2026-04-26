@@ -7,6 +7,7 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.db import models
 from .models import Customer
+from .balance_sync import recompute_customer_balances_for_customers
 from cenvoras.pagination import StandardResultsSetPagination
 
 
@@ -84,13 +85,15 @@ from cenvoras.pagination import StandardResultsSetPagination
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def customer_list_create(request):
+    tenant = getattr(request.user, 'active_tenant', request.user)
+
     if request.method == 'GET':
         # Get query parameters
         search = request.query_params.get('search', '')
         ordering = request.query_params.get('ordering', '-created_at')
         
         # Filter customers for the authenticated user
-        customers = Customer.objects.filter(created_by=request.user)
+        customers = Customer.objects.filter(created_by=tenant)
         
         # Apply search filter
         if search:
@@ -106,10 +109,13 @@ def customer_list_create(request):
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(customers, request)
         if page is not None:
+            recompute_customer_balances_for_customers(page, tenant)
             serializer = CustomerSerializer(page, many=True)
             return paginator.get_paginated_response(serializer.data)
-        
-        serializer = CustomerSerializer(customers, many=True)
+
+        customers_list = list(customers)
+        recompute_customer_balances_for_customers(customers_list, tenant)
+        serializer = CustomerSerializer(customers_list, many=True)
         return Response(serializer.data)
     
     elif request.method == 'POST':
@@ -148,13 +154,16 @@ def customer_list_create(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def customer_detail(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=request.user)
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
     except Customer.DoesNotExist:
         return Response({
             "success": False,
             "message": "Customer not found."
         }, status=status.HTTP_404_NOT_FOUND)
+
+    recompute_customer_balances_for_customers([customer], tenant)
     
     serializer = CustomerSerializer(customer)
     return Response(serializer.data)
@@ -198,8 +207,9 @@ def customer_detail(request, pk):
 @api_view(['PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def customer_update_delete(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=request.user)
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
     except Customer.DoesNotExist:
         return Response({
             "success": False,
@@ -242,5 +252,5 @@ def customer_update_delete(request, pk):
         except Exception as e:
             return Response({
                 "success": False,
-                "message": f"Failed to delete customer: {str(e)}"
+                "message": "Failed to delete customer. Please try again later."
             }, status=status.HTTP_400_BAD_REQUEST)

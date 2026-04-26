@@ -5,6 +5,9 @@ from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, Deliver
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 from cenvoras.constants import IndianStates
+from subscription.services import can_auto_create_inventory_product
+from django.db import transaction
+from django.db.models import F, Sum
 import uuid
 from decimal import Decimal
 
@@ -70,6 +73,22 @@ def normalize_indian_state_choice(value):
         return upper
 
     return raw
+
+
+def _rebuild_sales_invoice_ledger(invoice_id):
+    from ledger.models import GeneralLedgerEntry
+    from ledger.services import AccountingService
+    sales_invoice = SalesInvoice.objects.select_related('customer').get(pk=invoice_id)
+    GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice).delete()
+    AccountingService.create_sales_invoice_entries(sales_invoice)
+
+
+def _rebuild_purchase_bill_ledger(bill_id):
+    from ledger.models import GeneralLedgerEntry
+    from ledger.services import AccountingService
+    purchase_bill = PurchaseBill.objects.select_related('vendor').get(pk=bill_id)
+    GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill).delete()
+    AccountingService.create_purchase_bill_entries(purchase_bill)
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):
@@ -233,6 +252,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+
+        transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         return purchase_bill
 
     def update(self, instance, validated_data):
@@ -287,6 +308,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
             instance.refresh_payment_status(save=False)
             instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+
+        transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
         
         return instance
 
@@ -333,8 +356,9 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             error_msg = 'Authentication required.'
             print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
             raise serializers.ValidationError({'product': error_msg})
-        user = request.user
+        user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceItemSerializer: User:", user)
+        can_auto_create_inventory = can_auto_create_inventory_product(user)
 
         try:
             # Try to find product by UUID first
@@ -342,7 +366,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             uuid_obj = uuid.UUID(str(product_value))
             print("DEBUG SalesInvoiceItemSerializer: Valid UUID, looking for product:", uuid_obj)
             try:
-                product = Product.objects.get(id=uuid_obj)
+                product = Product.objects.get(id=uuid_obj, created_by=user)
                 print("DEBUG SalesInvoiceItemSerializer: Found existing product by UUID:", product.name)
                 # Update product fields if present in data
                 updated = False
@@ -373,6 +397,10 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     print("DEBUG SalesInvoiceItemSerializer: Updating existing product fields")
                     product.save()
             except Product.DoesNotExist:
+                if not can_auto_create_inventory:
+                    error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
+                    print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
+                    raise serializers.ValidationError({'product': error_msg})
                 # Create new product
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)
                 try:
@@ -439,11 +467,12 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesInvoiceItemSerializer(many=True, required=False)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    customer_details = serializers.SerializerMethodField(read_only=True)
     customer_name = serializers.CharField(required=False, allow_blank=True)  # Name to display, optional for draft
     status = serializers.CharField(required=False, default='final')
     customer_email = serializers.EmailField(write_only=True, required=False)
     customer_phone = serializers.CharField(write_only=True, required=False)
-    customer_address = serializers.CharField(write_only=True, required=False)
+    customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     invoice_date = serializers.DateField(required=False, allow_null=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
@@ -453,16 +482,31 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
-        fields = ['id', 'customer_name', 'customer_email', 'customer_phone', 'customer_address', 
+        fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
                   'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta']
+
+    def get_customer_details(self, instance):
+        customer = getattr(instance, 'customer', None)
+        if not customer:
+            return None
+
+        return {
+            'id': str(customer.id) if getattr(customer, 'id', None) else None,
+            'name': getattr(customer, 'name', None),
+            'email': getattr(customer, 'email', None),
+            'phone': getattr(customer, 'phone', None),
+            'address': getattr(customer, 'address', None),
+            'gstin': getattr(customer, 'gstin', None),
+            'state': getattr(customer, 'state', None),
+        }
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         customer = getattr(instance, 'customer', None)
         data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
-        data['customer_address'] = getattr(customer, 'address', None) if customer else data.get('customer_address')
+        data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))
         return data
 
     @staticmethod
@@ -570,7 +614,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             error_msg = 'Authentication required.'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
             raise serializers.ValidationError({'customer_name': error_msg})
-        user = request.user
+        user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
         customer_obj = getattr(self.instance, 'customer', None) if self.instance else None
@@ -628,6 +672,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         address=customer_address or None,
                         created_by=user,
                     )
+
+        if not customer_address:
+            if self.instance and getattr(self.instance, 'customer_address', None):
+                customer_address = self.instance.customer_address or ''
+            elif customer_obj:
+                customer_address = customer_obj.address or ''
             
         # Store customer object separately - don't pass to parent validation
         self._customer_obj = customer_obj  # Store for use in create method
@@ -635,11 +685,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Remove customer fields that aren't in Meta.fields
         temp_data = data.copy()
         temp_data['customer_name'] = customer_name
+        temp_data['customer_address'] = customer_address
         if 'place_of_supply' in temp_data:
             temp_data['place_of_supply'] = normalize_indian_state_choice(temp_data.get('place_of_supply'))
         temp_data.pop('customer_email', None)
         temp_data.pop('customer_phone', None) 
-        temp_data.pop('customer_address', None)
         # Don't set customer field since it's not in Meta.fields anymore
         
         print("DEBUG SalesInvoiceSerializer: Customer processing completed, calling super()")
@@ -712,6 +762,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         print(f"DEBUG: Accrued {points_earned} loyalty points for {customer_obj.name}")
                 except Exception as e:
                      print(f"DEBUG: Failed to accrue loyalty points: {e}")
+
+            if sales_invoice.status == 'final' and sales_invoice.customer_id:
+                Customer.objects.filter(pk=sales_invoice.customer_id).update(
+                    current_balance=F('current_balance') + sales_invoice.total_amount
+                )
+
+            transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
                 
             return sales_invoice
         except Exception as e:
@@ -724,11 +781,38 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
+        old_customer_id = instance.customer_id
+        old_status = instance.status
+        old_total_amount = Decimal(str(instance.total_amount or 0))
+        resolved_customer = getattr(self, '_customer_obj', None)
         
         # Update the sales invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        if resolved_customer is not None:
+            instance.customer = resolved_customer
         instance.save()
+
+        # Keep linked payments in sync when invoice customer changes.
+        if old_customer_id != instance.customer_id and instance.customer_id:
+            linked_payments = Payment.objects.filter(invoice=instance)
+            total_paid = linked_payments.aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+            if old_customer_id and total_paid > 0:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') + total_paid
+                )
+            if total_paid > 0:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') - total_paid
+                )
+
+            linked_payments.update(customer=instance.customer)
+            try:
+                from ledger.models import GeneralLedgerEntry
+                GeneralLedgerEntry.objects.filter(sales_invoice=instance).update(customer=instance.customer)
+            except Exception:
+                pass
 
         # Delete existing items and create new ones when provided
         if items_data:
@@ -753,6 +837,36 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             for attr, value in meta_data.items():
                 setattr(meta, attr, value)
             meta.save()
+
+        new_total_amount = Decimal(str(instance.total_amount or 0))
+        new_status = instance.status
+
+        if old_customer_id != instance.customer_id:
+            if old_status == 'final' and old_customer_id:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') - old_total_amount
+                )
+            if new_status == 'final' and instance.customer_id:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') + new_total_amount
+                )
+        else:
+            if old_status == 'final' and new_status == 'final' and instance.customer_id:
+                balance_delta = new_total_amount - old_total_amount
+                if balance_delta != 0:
+                    Customer.objects.filter(pk=instance.customer_id).update(
+                        current_balance=F('current_balance') + balance_delta
+                    )
+            elif old_status != 'final' and new_status == 'final' and instance.customer_id:
+                Customer.objects.filter(pk=instance.customer_id).update(
+                    current_balance=F('current_balance') + new_total_amount
+                )
+            elif old_status == 'final' and new_status != 'final' and old_customer_id:
+                Customer.objects.filter(pk=old_customer_id).update(
+                    current_balance=F('current_balance') - old_total_amount
+                )
+
+        transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
 
         return instance
 
@@ -822,7 +936,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'credit_limit', 'current_balance', 'allow_credit',
             'created_by', 'created_at', 'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance']
 
     def validate_email(self, value):
         if value:
@@ -886,6 +1000,9 @@ class PaymentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'amount': 'Amount must be greater than 0.'})
 
         if invoice:
+            if getattr(invoice, 'status', None) == 'draft':
+                raise serializers.ValidationError({'invoice': 'Payments cannot be linked to draft invoices.'})
+
             if customer and invoice.customer_id != customer.id:
                 raise serializers.ValidationError({'invoice': 'Selected invoice does not belong to the selected customer.'})
 
@@ -898,9 +1015,12 @@ class PaymentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'amount': f'Amount exceeds invoice outstanding (max {outstanding:.2f}).'
                 })
+        elif not customer:
+            raise serializers.ValidationError({'customer': 'Customer is required.'})
 
         return attrs
 
     def create(self, validated_data):
-        validated_data['created_by'] = self.context['request'].user
+        user = self.context['request'].user
+        validated_data['created_by'] = getattr(user, 'active_tenant', user)
         return super().create(validated_data)

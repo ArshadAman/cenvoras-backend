@@ -193,6 +193,18 @@ def balance_sheet(request):
     total_equity += retained_earnings
 
     is_balanced = abs(total_assets - (total_liabilities + total_equity)) < Decimal('0.01')
+    difference = total_assets - (total_liabilities + total_equity)
+
+    if not is_balanced:
+        # Append Virtual Suspense Account to Equity so the totals balance mathematically
+        equity_items.append({
+            'id': 'suspense',
+            'code': 'SUSP',
+            'name': 'Suspense Account (Action Required)',
+            'amount': float(difference),
+            'is_suspense': True,
+        })
+        total_equity += difference
 
     return Response({
         'as_of': as_of or 'current',
@@ -210,7 +222,7 @@ def balance_sheet(request):
             'total': float(total_equity),
         },
         'is_balanced': is_balanced,
-        'difference': float(total_assets - (total_liabilities + total_equity)),
+        'difference': float(difference),
     })
 
 
@@ -353,4 +365,61 @@ def cashbook(request):
         'total_payments': float(total_payments),
         'count': len(results),
         'entries': results,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def balance_sheet_diagnostics(request):
+    """Detailed diagnostics to trace balance-sheet and trial-balance differences."""
+    user = request.user
+    as_of = request.query_params.get('as_of')
+
+    trial_data = AccountingService.get_trial_balance(user)
+    total_debits = Decimal(str(trial_data.get('total_debits', 0) or 0))
+    total_credits = Decimal(str(trial_data.get('total_credits', 0) or 0))
+    trial_difference = total_debits - total_credits
+
+    sheet_data = balance_sheet(request).data
+    sheet_difference = Decimal(str(sheet_data.get('difference', 0) or 0))
+
+    suspect_accounts = []
+    for account_info in trial_data.get('accounts', []):
+        debit_total = Decimal(str(account_info.get('debit_total', 0) or 0))
+        credit_total = Decimal(str(account_info.get('credit_total', 0) or 0))
+        if debit_total != credit_total:
+            suspect_accounts.append({
+                'account_id': str(account_info['account'].id),
+                'account_code': account_info['account'].code,
+                'account_name': account_info['account'].name,
+                'account_type': account_info['account'].account_type,
+                'debit_total': float(debit_total),
+                'credit_total': float(credit_total),
+                'net': float(debit_total - credit_total),
+            })
+
+    suspect_accounts.sort(key=lambda item: abs(item['net']), reverse=True)
+
+    suggestion = None
+    if abs(sheet_difference) > Decimal('0') and abs(sheet_difference) <= Decimal('1'):
+        suggestion = {
+            'type': 'rounding_adjustment_review',
+            'recommended_amount': float(-sheet_difference),
+            'message': 'Small residual detected. Review round-off entries and decimal precision on invoices/payments.',
+        }
+
+    return Response({
+        'as_of': as_of or 'current',
+        'trial_balance': {
+            'total_debits': float(total_debits),
+            'total_credits': float(total_credits),
+            'difference': float(trial_difference),
+            'is_balanced': abs(trial_difference) < Decimal('0.01'),
+        },
+        'balance_sheet': {
+            'difference': float(sheet_difference),
+            'is_balanced': abs(sheet_difference) < Decimal('0.01'),
+        },
+        'top_accounts_by_net_movement': suspect_accounts[:20],
+        'suggestion': suggestion,
     })

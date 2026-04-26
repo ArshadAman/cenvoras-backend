@@ -14,11 +14,17 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-local-dev-fall
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes', 'on')
 
+if not DEBUG and SECRET_KEY == 'django-insecure-local-dev-fallback':
+    raise ValueError('DJANGO_SECRET_KEY must be set in production.')
+
 raw_allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
 if raw_allowed_hosts.strip():
     ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
 else:
     ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
+
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ValueError('DJANGO_ALLOWED_HOSTS must be set in production.')
 
 
 # Application definition
@@ -71,6 +77,16 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 CSRF_COOKIE_HTTPONLY = True
 SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = os.environ.get('CSRF_COOKIE_SAMESITE', 'Lax')
+SESSION_COOKIE_SAMESITE = os.environ.get('SESSION_COOKIE_SAMESITE', 'Lax')
+SECURE_REFERRER_POLICY = os.environ.get('SECURE_REFERRER_POLICY', 'strict-origin-when-cross-origin')
+
+# Keep browsable API disabled by default to reduce accidental data exposure.
+REST_FRAMEWORK_DEFAULT_RENDERERS = [
+    'rest_framework.renderers.JSONRenderer',
+]
+if DEBUG:
+    REST_FRAMEWORK_DEFAULT_RENDERERS.append('rest_framework.renderers.BrowsableAPIRenderer')
 
 ROOT_URLCONF = 'cenvoras.urls'
 
@@ -157,7 +173,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = os.environ.get('TIME_ZONE', 'Asia/Kolkata')
 
 USE_I18N = True
 
@@ -195,10 +211,21 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'cenvoras.pagination.StandardResultsSetPagination',
     'PAGE_SIZE': 15,
+    'DEFAULT_RENDERER_CLASSES': REST_FRAMEWORK_DEFAULT_RENDERERS,
+    'EXCEPTION_HANDLER': 'cenvoras.exceptions.custom_exception_handler',
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': os.environ.get('DRF_THROTTLE_ANON', '120/minute'),
+        'user': os.environ.get('DRF_THROTTLE_USER', '600/minute'),
+    },
 }
 
 # CORS configuration (allow all for development, restrict in production)
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('1', 'true', 'yes', 'on')
+CORS_ALLOW_CREDENTIALS = os.environ.get('CORS_ALLOW_CREDENTIALS', 'False').lower() in ('1', 'true', 'yes', 'on')
 raw_cors_allowed = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
 cors_origins = [origin.strip() for origin in raw_cors_allowed.split(',') if origin.strip()]
 for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
@@ -213,6 +240,9 @@ for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
         csrf_trusted_origins.append(required_origin)
 CSRF_TRUSTED_ORIGINS = csrf_trusted_origins
 
+if not DEBUG and CORS_ALLOW_ALL_ORIGINS:
+    raise ValueError('CORS_ALLOW_ALL_ORIGINS must be false in production.')
+
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 if not DEBUG:
@@ -222,6 +252,7 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', 31536000))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+    SECURE_CROSS_ORIGIN_OPENER_POLICY = os.environ.get('SECURE_CROSS_ORIGIN_OPENER_POLICY', 'same-origin')
 
 # Custom user model (if you implement one)
 AUTH_USER_MODEL = 'users.User'
@@ -247,6 +278,25 @@ WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 # Gemini AI (load from environment variables)
 GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
 
+# Cashfree Payments
+CASHFREE_CLIENT_ID = os.environ.get('CASHFREE_CLIENT_ID', '')
+CASHFREE_CLIENT_SECRET = os.environ.get('CASHFREE_CLIENT_SECRET', '')
+CASHFREE_ENV = os.environ.get('CASHFREE_ENV', 'sandbox')  # sandbox | production
+CASHFREE_API_VERSION = os.environ.get('CASHFREE_API_VERSION', '2023-08-01')
+CASHFREE_RETURN_URL = os.environ.get('CASHFREE_RETURN_URL', 'https://cenvora.app/profile')
+CASHFREE_WEBHOOK_URL = os.environ.get('CASHFREE_WEBHOOK_URL', 'https://api.cenvora.app/api/subscription/webhooks/cashfree/')
+# Cashfree SDK webhook verification typically uses PG client secret.
+# Keep webhook secret override for flexibility, but fallback to client secret by default.
+CASHFREE_WEBHOOK_SECRET = os.environ.get('CASHFREE_WEBHOOK_SECRET', CASHFREE_CLIENT_SECRET)
+CASHFREE_WEBHOOK_MAX_SKEW_MS = int(os.environ.get('CASHFREE_WEBHOOK_MAX_SKEW_MS', 600000))
+CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS = int(os.environ.get('CASHFREE_PAYMENT_ORDER_REUSE_WINDOW_SECONDS', 1800))
+CASHFREE_REQUIRE_WEBHOOK_SIGNATURE = (
+    os.environ.get('CASHFREE_REQUIRE_WEBHOOK_SIGNATURE', 'true').strip().lower() == 'true'
+)
+CASHFREE_ALLOW_UNSIGNED_WEBHOOKS = (
+    os.environ.get('CASHFREE_ALLOW_UNSIGNED_WEBHOOKS', 'false').strip().lower() == 'true'
+)
+
 # =============================================================================
 # BACKUP & STORAGE SETTINGS (Cloudinary)
 # =============================================================================
@@ -265,6 +315,7 @@ DBBACKUP_EXTENSION = 'backup'  # Cloudinary blocks .bin, 'backup' is safer for R
 
 # Resilient backup scheduler configuration
 BACKUP_CLOUDINARY_FOLDER = os.environ.get('BACKUP_CLOUDINARY_FOLDER', 'cenvoras/db_backups')
+BACKUP_CLOUDINARY_TYPE = os.environ.get('BACKUP_CLOUDINARY_TYPE', 'private').strip().lower()
 BACKUP_SCHEDULE_MINUTE = int(os.environ.get('BACKUP_SCHEDULE_MINUTE', 15))
 BACKUP_MAX_ATTEMPTS = int(os.environ.get('BACKUP_MAX_ATTEMPTS', 3))
 BACKUP_CIRCUIT_OPEN_SECONDS = int(os.environ.get('BACKUP_CIRCUIT_OPEN_SECONDS', 21600))

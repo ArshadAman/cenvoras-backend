@@ -8,6 +8,15 @@ from .views import (
     plan_change_quote,
     schedule_plan_change,
     subscription_entitlements,
+from .views import (
+    plan_catalog,
+    subscription_entitlements,
+    plan_change_quote,
+    schedule_plan_change,
+    create_plan_payment_order,
+    confirm_plan_payment,
+    latest_payment_status,
+    cashfree_webhook,
 )
 
 urlpatterns = [
@@ -18,4 +27,5 @@ urlpatterns = [
     path('payments/create-order/', create_plan_payment_order, name='create_plan_payment_order'),
     path('payments/confirm/', confirm_plan_payment, name='confirm_plan_payment'),
     path('payments/latest-status/', latest_payment_status, name='latest_payment_status'),
+    path('webhooks/cashfree/', cashfree_webhook, name='cashfree_webhook'),
 ]

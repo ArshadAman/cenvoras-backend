@@ -4,6 +4,9 @@ from celery import Celery
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cenvoras.settings')
 
+from celery.signals import task_postrun, task_prerun, worker_process_init
+from django.db import connections, close_old_connections
+
 # Monkeypatch django-dbbackup to prevent it from appending .bin
 # Cloudinary Raw Media Storage strictly rejects .bin files for security.
 try:
@@ -43,4 +46,34 @@ app.conf.beat_schedule = {
         # Run daily within 2AM-3AM IST window.
         'schedule': crontab(minute=int(os.environ.get('BACKUP_SCHEDULE_MINUTE', '15')), hour=2),
     },
+    'subscription-expiry-notification-check': {
+        'task': 'subscription.tasks.notify_subscription_expiry_windows',
+        # Run every 15 minutes to catch 24h reminder and exact expiry windows reliably.
+        'schedule': crontab(minute='*/15'),
+    },
+    'subscription-payment-pending-reconciliation': {
+        'task': 'subscription.tasks.reconcile_pending_subscription_payments',
+        # Run every 5 minutes to heal missed/delayed success webhooks.
+        'schedule': crontab(minute='*/5'),
+    },
 }
+
+
+def _reset_celery_db_connections():
+    close_old_connections()
+    connections.close_all()
+
+
+@worker_process_init.connect
+def _on_worker_process_init(**kwargs):
+    _reset_celery_db_connections()
+
+
+@task_prerun.connect
+def _on_task_prerun(**kwargs):
+    _reset_celery_db_connections()
+
+
+@task_postrun.connect
+def _on_task_postrun(**kwargs):
+    _reset_celery_db_connections()

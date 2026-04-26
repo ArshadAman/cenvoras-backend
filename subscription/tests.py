@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch
 
 from .middleware import SubscriptionAccessMiddleware
+from . import tasks
 
 
 class _UserStub:
@@ -57,6 +58,13 @@ class TestSubscriptionAccessMiddleware(SimpleTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self._json(response).get('code'), 'plan_locked')
 
+    @patch('subscription.middleware.get_effective_plan_code', return_value='free')
+    @patch('subscription.middleware.can_use_feature', return_value=True)
+    def test_free_plan_blocks_quotation_routes(self, _can_use_feature, _get_plan):
+        response = self._request('/api/billing/quotations/', self.free_user)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self._json(response).get('code'), 'plan_locked')
+
     @patch('subscription.middleware.get_effective_plan_code', return_value='pro')
     @patch('subscription.middleware.can_use_feature', side_effect=lambda _user, feature: feature != 'multi_warehouse')
     def test_pro_plan_allows_inventory_but_blocks_warehouse(self, _can_use_feature, _get_plan):
@@ -85,3 +93,28 @@ class TestSubscriptionAccessMiddleware(SimpleTestCase):
     def test_vip_user_bypasses_feature_lock(self, _can_use_feature, _get_plan):
         response = self._request('/api/analytics/ml-predictions/', self.vip_user)
         self.assertEqual(response.status_code, 200)
+
+
+class TestSubscriptionWebhookFollowup(SimpleTestCase):
+    @patch('subscription.tasks._handle_payment_failed', return_value={'status': 'failed'})
+    @patch('subscription.tasks._handle_payment_success', return_value={'status': 'success'})
+    @patch('subscription.tasks._fetch_payment_attempts')
+    @patch('subscription.tasks.SubscriptionPayment.objects.select_related')
+    def test_pending_followup_marks_failed_on_terminal_failure(
+        self,
+        mock_select_related,
+        mock_fetch_attempts,
+        _mock_success,
+        mock_failed,
+    ):
+        payment = type('PaymentStub', (), {'status': 'pending'})()
+        mock_select_related.return_value.get.return_value = payment
+        mock_fetch_attempts.return_value = [
+            {'payment_status': 'PENDING'},
+            {'payment_status': 'FAILED'},
+        ]
+
+        result = tasks.verify_pending_payment_from_webhook.run(order_id='order-123')
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(mock_failed.called)

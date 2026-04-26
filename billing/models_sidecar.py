@@ -199,6 +199,67 @@ class PurchaseIndentItem(models.Model):
     required_quantity = models.PositiveIntegerField()
 
 
+class Quotation(models.Model):
+    """
+    Separate entity from SalesInvoice.
+    Used before SalesOrder conversion workflow.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True)
+    customer_name = models.CharField(max_length=255, null=True, blank=True)
+    customer_address = models.TextField(blank=True, null=True)
+    quotation_number = models.CharField(max_length=100)
+    quotation_date = models.DateField()
+    due_date = models.DateField(null=True, blank=True)
+    po_number = models.CharField(max_length=100, blank=True, null=True)
+    po_date = models.DateField(null=True, blank=True)
+    delivery_address = models.TextField(blank=True, null=True)
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('partially_converted', 'Partially Converted'),
+        ('converted', 'Converted'),
+    ]
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='draft')
+
+    place_of_supply = models.CharField(max_length=2, blank=True, null=True)
+    gst_treatment = models.CharField(max_length=50, blank=True, null=True)
+    journal = models.CharField(max_length=50, default='Quotation')
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"QT: {self.quotation_number} ({self.customer_name or 'Unknown'})"
+
+
+class QuotationItem(models.Model):
+    quotation = models.ForeignKey(Quotation, related_name='items', on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    quantity = models.PositiveIntegerField()
+    free_quantity = models.PositiveIntegerField(default=0)
+    unit = models.CharField(max_length=20, blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
+    batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
+
+    approval_status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected')],
+        default='approved'
+    )
+    converted_to_order = models.BooleanField(default=False)
+
+
 # =============================================================================
 # E-WAY BILL & E-INVOICE (Stubs — requires NIC API credentials for production)
 # =============================================================================

@@ -13,8 +13,16 @@ class PlanAdmin(admin.ModelAdmin):
 
 @admin.register(TenantSubscription)
 class TenantSubscriptionAdmin(admin.ModelAdmin):
-    list_display = ('tenant', 'plan', 'status', 'current_period_end')
-    list_filter = ('status', 'plan')
+    list_display = (
+        'tenant',
+        'plan',
+        'status',
+        'current_period_end',
+        'cancel_at_period_end',
+        'pending_plan',
+        'pending_plan_starts_at',
+    )
+    list_filter = ('status', 'plan', 'cancel_at_period_end')
     search_fields = ('tenant__email', 'tenant__business_name')
 
 

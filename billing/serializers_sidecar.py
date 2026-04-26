@@ -1,5 +1,22 @@
+from datetime import date
+from decimal import Decimal
+from uuid import UUID
+
 from rest_framework import serializers
-from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem, InvoiceSettings
+from subscription.services import can_auto_create_inventory_product
+from .models_sidecar import (
+    TransactionMeta,
+    SalesOrder,
+    SalesOrderItem,
+    DeliveryChallan,
+    DeliveryChallanItem,
+    PurchaseIndent,
+    PurchaseIndentItem,
+    InvoiceSettings,
+    Quotation,
+    QuotationItem,
+)
+from inventory.models import Product
 
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -167,3 +184,263 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
             PurchaseIndentItem.objects.create(indent=indent, **item_data)
             
         return indent
+
+
+class QuotationItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    class Meta:
+        model = QuotationItem
+        fields = [
+            'id',
+            'product',
+            'product_name',
+            'quantity',
+            'free_quantity',
+            'unit',
+            'price',
+            'discount',
+            'tax',
+            'amount',
+            'hsn_sac_code',
+            'batch',
+            'approval_status',
+            'converted_to_order',
+        ]
+        read_only_fields = ['converted_to_order']
+
+    def _get_tenant(self):
+        request = self.context.get('request')
+        if not request or not hasattr(request, 'user'):
+            raise serializers.ValidationError({'product': 'Authentication required.'})
+        return getattr(request.user, 'active_tenant', request.user)
+
+    def to_internal_value(self, data):
+        mutable = dict(data)
+        product_value = mutable.get('product')
+        if not product_value or not str(product_value).strip():
+            raise serializers.ValidationError({'product': 'Product is required.'})
+
+        tenant = self._get_tenant()
+        can_auto_create_inventory = can_auto_create_inventory_product(tenant)
+        product_obj = None
+
+        if isinstance(product_value, str):
+            product_value = product_value.strip()
+
+        try:
+            product_uuid = UUID(str(product_value))
+            product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
+            if not product_obj:
+                raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
+        except (ValueError, TypeError):
+            product_name = str(product_value).strip()
+            product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
+
+            if product_obj:
+                updated_fields = []
+                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                    field_value = mutable.get(field)
+                    if field_value is None:
+                        continue
+                    if isinstance(field_value, str) and not field_value.strip():
+                        continue
+                    setattr(product_obj, field, field_value)
+                    updated_fields.append(field)
+                if updated_fields:
+                    product_obj.save(update_fields=updated_fields)
+            else:
+                if not can_auto_create_inventory:
+                    raise serializers.ValidationError({
+                        'product': 'Only Pro and above plans can create new inventory products from quotation forms.'
+                    })
+                product_obj = Product.objects.create(
+                    name=product_name,
+                    hsn_sac_code=mutable.get('hsn_sac_code') or '',
+                    unit=mutable.get('unit') or 'pcs',
+                    price=mutable.get('price') or 0,
+                    tax=mutable.get('tax') or 0,
+                    created_by=tenant,
+                )
+
+        mutable['product'] = str(product_obj.id)
+        return super().to_internal_value(mutable)
+
+
+class QuotationSerializer(serializers.ModelSerializer):
+    items = QuotationItemSerializer(many=True, required=False)
+    customer_name = serializers.CharField(required=False, allow_blank=True)
+    customer_email = serializers.EmailField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_gstin = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_details = serializers.SerializerMethodField(read_only=True)
+
+    quotation_number = serializers.CharField(required=False, allow_blank=True)
+    quotation_date = serializers.DateField(required=False, allow_null=True)
+
+    # Compatibility aliases to keep the existing UI payload working.
+    invoice_number = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    invoice_date = serializers.DateField(write_only=True, required=False, allow_null=True)
+    challan_number = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    challan_date = serializers.DateField(write_only=True, required=False, allow_null=True)
+
+    class Meta:
+        model = Quotation
+        fields = [
+            'id',
+            'customer',
+            'customer_name',
+            'customer_details',
+            'customer_email',
+            'customer_phone',
+            'customer_gstin',
+            'customer_address',
+            'quotation_number',
+            'quotation_date',
+            'invoice_number',
+            'invoice_date',
+            'challan_number',
+            'challan_date',
+            'due_date',
+            'po_number',
+            'po_date',
+            'delivery_address',
+            'status',
+            'place_of_supply',
+            'gst_treatment',
+            'journal',
+            'warehouse',
+            'total_amount',
+            'round_off',
+            'items',
+            'created_by',
+            'created_at',
+        ]
+        read_only_fields = ['created_by', 'created_at']
+
+    def to_internal_value(self, data):
+        # Shared forms can send extra invoice-only keys; ignore unknown fields.
+        if hasattr(data, 'copy'):
+            mutable = data.copy()
+            allowed = set(self.fields.keys())
+            for key in list(mutable.keys()):
+                if key not in allowed:
+                    mutable.pop(key, None)
+            data = mutable
+        return super().to_internal_value(data)
+
+    def get_customer_details(self, obj):
+        if not obj.customer:
+            return None
+        return {
+            'id': str(obj.customer.id),
+            'name': obj.customer.name,
+            'email': obj.customer.email,
+            'phone': obj.customer.phone,
+            'address': obj.customer.address,
+            'gstin': obj.customer.gstin,
+            'state': obj.customer.state,
+        }
+
+    def validate(self, attrs):
+        # Map invoice aliases to quotation fields for compatibility.
+        if attrs.get('invoice_number') and not attrs.get('quotation_number'):
+            attrs['quotation_number'] = attrs.pop('invoice_number')
+        else:
+            attrs.pop('invoice_number', None)
+
+        if attrs.get('invoice_date') and not attrs.get('quotation_date'):
+            attrs['quotation_date'] = attrs.pop('invoice_date')
+        else:
+            attrs.pop('invoice_date', None)
+
+        # Ignore sales-invoice-only fields sent by the shared form.
+        attrs.pop('challan_number', None)
+        attrs.pop('challan_date', None)
+
+        # Provide safe defaults so shared form edge-cases do not hard-fail create.
+        if self.instance is None:
+            if not attrs.get('quotation_number'):
+                attrs['quotation_number'] = f"QT-{date.today().strftime('%Y%m%d')}-AUTO"
+            if not attrs.get('quotation_date'):
+                attrs['quotation_date'] = date.today()
+
+        return attrs
+
+    def _resolve_customer(self, validated_data):
+        from .models import Customer
+
+        user = self.context['request'].user.active_tenant
+        customer_name = validated_data.get('customer_name')
+        customer_email = validated_data.pop('customer_email', None)
+        customer_phone = validated_data.pop('customer_phone', None)
+        customer_gstin = validated_data.pop('customer_gstin', None)
+
+        if not customer_name:
+            return None
+
+        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+        if customer:
+            updated = False
+            if customer_email and not customer.email:
+                customer.email = customer_email
+                updated = True
+            if customer_phone and not customer.phone:
+                customer.phone = customer_phone
+                updated = True
+            if validated_data.get('customer_address') and not customer.address:
+                customer.address = validated_data.get('customer_address')
+                updated = True
+            if customer_gstin and not customer.gstin:
+                customer.gstin = customer_gstin
+                updated = True
+            if updated:
+                customer.save()
+            return customer
+
+        return Customer.objects.create(
+            name=customer_name,
+            email=customer_email or None,
+            phone=customer_phone or None,
+            address=validated_data.get('customer_address') or None,
+            gstin=customer_gstin or None,
+            created_by=user,
+        )
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        customer = self._resolve_customer(validated_data)
+        validated_data['customer'] = customer
+        validated_data['created_by'] = self.context['request'].user.active_tenant
+
+        quotation = Quotation.objects.create(**validated_data)
+        for item_data in items_data:
+            QuotationItem.objects.create(quotation=quotation, **item_data)
+
+        if items_data:
+            total = sum(Decimal(str(item.amount)) for item in quotation.items.all())
+            quotation.total_amount = total + Decimal(str(quotation.round_off or 0))
+            quotation.save(update_fields=['total_amount'])
+
+        return quotation
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        customer = self._resolve_customer(validated_data)
+        if customer:
+            instance.customer = customer
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if items_data is not None:
+            instance.items.all().delete()
+            for item_data in items_data:
+                QuotationItem.objects.create(quotation=instance, **item_data)
+
+            total = sum(Decimal(str(item.amount)) for item in instance.items.all())
+            instance.total_amount = total + Decimal(str(instance.round_off or 0))
+            instance.save(update_fields=['total_amount'])
+
+        return instance

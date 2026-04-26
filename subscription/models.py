@@ -23,6 +23,7 @@ class Plan(models.Model):
     description = models.TextField(blank=True)
     
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     
     # Hard Limits built-in for fast access
@@ -54,11 +55,32 @@ class Plan(models.Model):
     def is_business(self):
         return self.code in {'business', 'enterprise'}
 
+    def get_price_for_cycle(self, cycle: str) -> Decimal:
+        from decimal import Decimal, ROUND_HALF_UP
+        if cycle == BillingCycle.QUARTERLY:
+            if self.quarterly_price > 0:
+                return self.quarterly_price
+            # Default logic: Rate * 3 - 15%
+            amount = self.monthly_price * Decimal('3') * Decimal('0.85')
+            return amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif cycle == BillingCycle.YEARLY:
+            if self.yearly_price > 0:
+                return self.yearly_price
+            # Default logic: Rate * 12 - 30%
+            amount = self.monthly_price * Decimal('12') * Decimal('0.70')
+            return amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return self.monthly_price
+
 class SubscriptionStatus(models.TextChoices):
     TRIAL = 'trial', 'Trial'
     ACTIVE = 'active', 'Active'
     PAST_DUE = 'past_due', 'Past Due'
     CANCELLED = 'cancelled', 'Cancelled'
+
+class BillingCycle(models.TextChoices):
+    MONTHLY = 'monthly', 'Monthly'
+    QUARTERLY = 'quarterly', 'Quarterly'
+    YEARLY = 'yearly', 'Yearly'
 
 
 class SubscriptionPaymentStatus(models.TextChoices):
@@ -78,6 +100,11 @@ class TenantSubscription(models.Model):
     """
     tenant = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscription')
     plan = models.ForeignKey(Plan, on_delete=models.PROTECT)
+    billing_cycle = models.CharField(
+        max_length=20,
+        choices=BillingCycle.choices,
+        default=BillingCycle.MONTHLY
+    )
     
     status = models.CharField(
         max_length=20, 
@@ -127,6 +154,7 @@ class SubscriptionPayment(models.Model):
     currency = models.CharField(max_length=10, default='INR')
     status = models.CharField(max_length=20, choices=SubscriptionPaymentStatus.choices, default=SubscriptionPaymentStatus.PENDING)
     action = models.CharField(max_length=20, choices=SubscriptionPaymentAction.choices, default=SubscriptionPaymentAction.ACTIVATE)
+    billing_cycle = models.CharField(max_length=20, choices=BillingCycle.choices, default=BillingCycle.MONTHLY)
     source_plan_code = models.CharField(max_length=50, blank=True, null=True)
     billing_details = models.JSONField(default=dict, blank=True)
 

@@ -67,22 +67,32 @@ class Plan(models.Model):
     def __str__(self):
         return f"{self.name} (₹{self.monthly_price}/mo)"
 
+    def get_base_monthly_price(self):
+        """Helper to return the correct base price even if DB is out of sync."""
+        code = str(self.code).lower()
+        if code == 'pro':
+            return Decimal('1599.00')
+        if code == 'business':
+            return Decimal('1999.00')
+        return self.monthly_price
+
     def price_for_cycle(self, cycle: str):
         normalized = str(cycle or BillingCycle.MONTHLY).lower()
+        base = self.get_base_monthly_price()
         if normalized == BillingCycle.YEARLY:
-            return money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
+            return money(base * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
         if normalized == BillingCycle.QUARTERLY:
-            return money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
-        return self.monthly_price
+            return money(base * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
+        return base
 
     def original_price_for_cycle(self, cycle: str):
         normalized = str(cycle or BillingCycle.MONTHLY).lower()
-        base_original = self.original_monthly_price or self.monthly_price
+        base = self.get_base_monthly_price()
         if normalized == BillingCycle.YEARLY:
-            return money(base_original * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
+            return money(base * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
         if normalized == BillingCycle.QUARTERLY:
-            return money(base_original * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
-        return base_original
+            return money(base * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
+        return base
 
     @property
     def effective_team_limit(self):

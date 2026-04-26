@@ -101,7 +101,14 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 		if amount > Decimal('0.00') and amount < Decimal('1.00'):
 			amount = Decimal('1.00')
 
-	base_price_before_discount = target_plan.original_price_for_cycle(billing_cycle)
+	base_price_before_discount = target_plan.original_price_for_cycle(target_cycle)
+
+	summary = ""
+	if payment_required:
+		if credit > Decimal('0.00'):
+			summary = f"Upgrade to {target_plan.name}. Credit of INR {credit} for {days_remaining} unused days applied. Pay INR {amount}."
+		else:
+			summary = f"Upgrade to {target_plan.name}. Pay INR {amount}."
 
 	return {
 		'action': action,
@@ -271,17 +278,12 @@ def plan_change_quote(request):
 	if quote_data['payment_required']:
 		if quote_data['credit'] > Decimal('0.00'):
 			summary = (
-				f"Upgrade now to {target_plan.name}. "
-				f"Credit of INR {quote_data['credit']} for {quote_data['days_remaining']} unused day(s) on {subscription.plan.name}. "
-				f"Pay INR {quote_data['amount']}."
-			)
-		elif quote_data['action'] == 'renewal':
-			summary = (
-				f"Renew {target_plan.name} ({billing_cycle}) for INR {quote_data['amount']}. "
-				f"Extends from current period end."
+				f"Upgrade to {target_plan.name}. "
+				f"Credit of INR {quote_data['credit']} applied for unused days. "
+				f"Final payment: INR {quote_data['amount']}."
 			)
 		else:
-			summary = f"Upgrade now to {target_plan.name}. Remaining-cycle prorated charge applies."
+			summary = f"Upgrade to {target_plan.name}. Total: INR {quote_data['amount']}."
 	else:
 		summary = f"{target_plan.name} — no payment required."
 

@@ -84,14 +84,14 @@ def audit_log_save(sender, instance, created, **kwargs):
     except:
         changes = {}
 
+    # Resolve tenant: prioritize the object's tenant, fallback to user's tenant
     tenant = None
-    if user and getattr(user, 'is_authenticated', False):
-        # active_tenant is the business owner
-        tenant = getattr(user, 'active_tenant', user)
-    elif hasattr(instance, 'tenant'):
+    if hasattr(instance, 'tenant') and instance.tenant:
         tenant = instance.tenant
-    elif hasattr(instance, 'user'):
+    elif hasattr(instance, 'user') and instance.user:
         tenant = getattr(instance.user, 'active_tenant', instance.user)
+    elif user and getattr(user, 'is_authenticated', False):
+        tenant = getattr(user, 'active_tenant', user)
 
     AuditLog.objects.create(
         user=user if user and getattr(user, 'is_authenticated', False) else None,
@@ -113,8 +113,13 @@ def audit_log_delete(sender, instance, **kwargs):
     user = get_current_user()
     request = get_current_request()
 
+    # Resolve tenant: prioritize the object's tenant, fallback to user's tenant
     tenant = None
-    if user and getattr(user, 'is_authenticated', False):
+    if hasattr(instance, 'tenant') and instance.tenant:
+        tenant = instance.tenant
+    elif hasattr(instance, 'user') and instance.user:
+        tenant = getattr(instance.user, 'active_tenant', instance.user)
+    elif user and getattr(user, 'is_authenticated', False):
         tenant = getattr(user, 'active_tenant', user)
 
     # Capture snapshot of what was deleted

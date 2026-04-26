@@ -1,6 +1,31 @@
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+
+
+class BillingCycle(models.TextChoices):
+    MONTHLY = 'monthly', 'Monthly'
+    QUARTERLY = 'quarterly', 'Quarterly'
+    YEARLY = 'yearly', 'Yearly'
+
+
+CYCLE_MULTIPLIERS = {
+    BillingCycle.MONTHLY: Decimal('1'),
+    BillingCycle.QUARTERLY: Decimal('3'),
+    BillingCycle.YEARLY: Decimal('12'),
+}
+
+CYCLE_DISCOUNTS = {
+    BillingCycle.MONTHLY: Decimal('0.00'),
+    BillingCycle.QUARTERLY: Decimal('0.15'),
+    BillingCycle.YEARLY: Decimal('0.30'),
+}
+
+
+def money(value: Decimal) -> Decimal:
+    return Decimal(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 class Feature(models.Model):
     """
@@ -23,7 +48,11 @@ class Plan(models.Model):
     description = models.TextField(blank=True)
     
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    original_monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    original_quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    original_yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     
     # Hard Limits built-in for fast access
     max_managers = models.IntegerField(default=0, help_text="Number of staff accounts allowed")
@@ -37,6 +66,23 @@ class Plan(models.Model):
     
     def __str__(self):
         return f"{self.name} (₹{self.monthly_price}/mo)"
+
+    def price_for_cycle(self, cycle: str):
+        normalized = str(cycle or BillingCycle.MONTHLY).lower()
+        if normalized == BillingCycle.YEARLY:
+            return self.yearly_price or money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
+        if normalized == BillingCycle.QUARTERLY:
+            return self.quarterly_price or money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
+        return self.monthly_price
+
+    def original_price_for_cycle(self, cycle: str):
+        normalized = str(cycle or BillingCycle.MONTHLY).lower()
+        base_original = self.original_monthly_price or self.monthly_price
+        if normalized == BillingCycle.YEARLY:
+            return self.original_yearly_price or money(base_original * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
+        if normalized == BillingCycle.QUARTERLY:
+            return self.original_quarterly_price or money(base_original * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
+        return base_original
 
     @property
     def effective_team_limit(self):
@@ -72,9 +118,22 @@ class TenantSubscription(models.Model):
         choices=SubscriptionStatus.choices,
         default=SubscriptionStatus.TRIAL
     )
+    current_billing_cycle = models.CharField(
+        max_length=20,
+        choices=BillingCycle.choices,
+        default=BillingCycle.MONTHLY,
+    )
     
     current_period_start = models.DateTimeField(default=timezone.now)
     current_period_end = models.DateTimeField(null=True, blank=True)
+    pending_plan = models.ForeignKey('Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions')
+    pending_billing_cycle = models.CharField(
+        max_length=20,
+        choices=BillingCycle.choices,
+        null=True,
+        blank=True,
+    )
+    pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
     cancel_at_period_end = models.BooleanField(default=False)
     
     stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
@@ -97,3 +156,29 @@ class TenantSubscription(models.Model):
     @property
     def effective_plan_code(self):
         return self.plan.code if self.plan else 'free'
+
+
+class SubscriptionPaymentOrder(models.Model):
+    class OrderStatus(models.TextChoices):
+        CREATED = 'created', 'Created'
+        SUCCESS = 'success', 'Success'
+        FAILED = 'failed', 'Failed'
+
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscription_payment_orders')
+    order_id = models.CharField(max_length=120, unique=True)
+    payment_session_id = models.CharField(max_length=255, blank=True, default='')
+    target_plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='payment_orders')
+    billing_cycle = models.CharField(max_length=20, choices=BillingCycle.choices, default=BillingCycle.MONTHLY)
+    duration_days = models.PositiveIntegerField(default=30)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=20, choices=OrderStatus.choices, default=OrderStatus.CREATED)
+    failure_reason = models.TextField(blank=True, default='')
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.order_id} - {self.target_plan.code} ({self.status})"

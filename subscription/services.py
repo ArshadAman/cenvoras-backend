@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from decimal import Decimal
 
 from django.db.models import Count
 from django.utils import timezone
@@ -64,10 +65,20 @@ def get_effective_plan_code(user: User) -> str:
     if is_vip_user(user):
         return 'business'
 
-    plan = get_tenant_plan(user)
+    tenant = get_tenant(user)
+    subscription = get_tenant_subscription(user)
+    plan = getattr(subscription, 'plan', None) if subscription else None
+    if plan:
+        plan_code = normalize_plan_code(plan.code)
+        if plan_code != 'free' and getattr(subscription, 'status', None) == 'active' and getattr(subscription, 'is_valid', True):
+            return plan_code
+
+    # Product requirement: 14-day trial unlocks Pro-level features only.
+    if getattr(tenant, 'is_trial_active', False):
+        return 'pro'
+
     if plan:
         return normalize_plan_code(plan.code)
-    tenant = get_tenant(user)
     return normalize_plan_code(getattr(tenant, 'subscription_tier', 'FREE'))
 
 
@@ -140,6 +151,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
     tenant = get_tenant(user)
     vip = is_vip_user(user)
     usage = get_current_usage(user)
+    subscription = get_tenant_subscription(user)
 
     limits = {
         'max_team_members': get_effective_limit(user, 'max_team_members', 0),
@@ -156,10 +168,26 @@ def get_entitlements(user: User) -> dict[str, Any]:
 
     return {
         'tenant_id': str(tenant.id),
+        'is_vip': vip,
         'plan': {
             'code': plan_code,
             'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),
-            'status': getattr(get_tenant_subscription(user), 'status', None),
+            'status': getattr(subscription, 'status', None),
+            'current_billing_cycle': getattr(subscription, 'current_billing_cycle', 'monthly'),
+            'current_period_start': getattr(subscription, 'current_period_start', None),
+            'current_period_end': getattr(subscription, 'current_period_end', None),
+            'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
+            'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
+            'pending_billing_cycle': getattr(subscription, 'pending_billing_cycle', None),
+            'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
+            'prices': {
+                'monthly': str(getattr(plan, 'monthly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'quarterly': str(getattr(plan, 'quarterly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'yearly': str(getattr(plan, 'yearly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'original_monthly': str(getattr(plan, 'original_monthly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'original_quarterly': str(getattr(plan, 'original_quarterly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'original_yearly': str(getattr(plan, 'original_yearly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+            },
         },
         'limits': limits,
         'usage': usage,

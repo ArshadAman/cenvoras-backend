@@ -19,13 +19,13 @@ def fix_plan_prices(apps, schema_editor):
             'monthly_price': Decimal('1599.00'),
             'quarterly_price': discounted_cycle_price('1599.00', 3, '0.15'),
             'yearly_price': discounted_cycle_price('1599.00', 12, '0.30'),
-            'original_monthly_price': Decimal('1899.00'),
+            'original_monthly_price': Decimal('1599.00'),
         },
         'business': {
             'monthly_price': Decimal('1999.00'),
             'quarterly_price': discounted_cycle_price('1999.00', 3, '0.15'),
             'yearly_price': discounted_cycle_price('1999.00', 12, '0.30'),
-            'original_monthly_price': Decimal('2599.00'),
+            'original_monthly_price': Decimal('1999.00'),
         }
     }
     

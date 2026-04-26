@@ -101,11 +101,14 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 		if amount > Decimal('0.00') and amount < Decimal('1.00'):
 			amount = Decimal('1.00')
 
+	base_price_before_discount = target_plan.original_price_for_cycle(billing_cycle)
+
 	return {
 		'action': action,
 		'payment_required': payment_required,
 		'amount': amount,
 		'new_plan_full_price': new_plan_full_price,
+		'base_price_before_discount': base_price_before_discount,
 		'credit': credit,
 		'days_used': days_used,
 		'days_remaining': days_remaining,
@@ -113,6 +116,7 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 		'current_cycle_price': current_cycle_price,
 		'current_cycle_total_days': current_cycle_total_days,
 		'effective_at': effective_at,
+		'summary': summary,
 	}
 
 

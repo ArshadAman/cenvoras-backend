@@ -1,6 +1,7 @@
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+from decimal import Decimal, ROUND_HALF_UP
 
 class Feature(models.Model):
     """
@@ -56,7 +57,6 @@ class Plan(models.Model):
         return self.code in {'business', 'enterprise'}
 
     def get_price_for_cycle(self, cycle: str) -> Decimal:
-        from decimal import Decimal, ROUND_HALF_UP
         if cycle == BillingCycle.QUARTERLY:
             if self.quarterly_price > 0:
                 return self.quarterly_price

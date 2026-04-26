@@ -70,18 +70,18 @@ class Plan(models.Model):
     def price_for_cycle(self, cycle: str):
         normalized = str(cycle or BillingCycle.MONTHLY).lower()
         if normalized == BillingCycle.YEARLY:
-            return self.yearly_price or money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
+            return money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
         if normalized == BillingCycle.QUARTERLY:
-            return self.quarterly_price or money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
+            return money(self.monthly_price * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
         return self.monthly_price
 
     def original_price_for_cycle(self, cycle: str):
         normalized = str(cycle or BillingCycle.MONTHLY).lower()
         base_original = self.original_monthly_price or self.monthly_price
         if normalized == BillingCycle.YEARLY:
-            return self.original_yearly_price or money(base_original * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
+            return money(base_original * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
         if normalized == BillingCycle.QUARTERLY:
-            return self.original_quarterly_price or money(base_original * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
+            return money(base_original * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
         return base_original
 
     @property

@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from billing.models import Customer, SalesInvoice
 from users.models import User
+from .models import BillingCycle
 
 PLAN_CODE_ALIASES = {
     'starter': 'free',
@@ -181,12 +182,12 @@ def get_entitlements(user: User) -> dict[str, Any]:
             'pending_billing_cycle': getattr(subscription, 'pending_billing_cycle', None),
             'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
             'prices': {
-                'monthly': str(getattr(plan, 'monthly_price', Decimal('0.00')) if plan else Decimal('0.00')),
-                'quarterly': str(getattr(plan, 'quarterly_price', Decimal('0.00')) if plan else Decimal('0.00')),
-                'yearly': str(getattr(plan, 'yearly_price', Decimal('0.00')) if plan else Decimal('0.00')),
-                'original_monthly': str(getattr(plan, 'original_monthly_price', Decimal('0.00')) if plan else Decimal('0.00')),
-                'original_quarterly': str(getattr(plan, 'original_quarterly_price', Decimal('0.00')) if plan else Decimal('0.00')),
-                'original_yearly': str(getattr(plan, 'original_yearly_price', Decimal('0.00')) if plan else Decimal('0.00')),
+                'monthly': str(plan.price_for_cycle(BillingCycle.MONTHLY) if plan else Decimal('0.00')),
+                'quarterly': str(plan.price_for_cycle(BillingCycle.QUARTERLY) if plan else Decimal('0.00')),
+                'yearly': str(plan.price_for_cycle(BillingCycle.YEARLY) if plan else Decimal('0.00')),
+                'original_monthly': str(plan.original_price_for_cycle(BillingCycle.MONTHLY) if plan else Decimal('0.00')),
+                'original_quarterly': str(plan.original_price_for_cycle(BillingCycle.QUARTERLY) if plan else Decimal('0.00')),
+                'original_yearly': str(plan.original_price_for_cycle(BillingCycle.YEARLY) if plan else Decimal('0.00')),
             },
         },
         'limits': limits,

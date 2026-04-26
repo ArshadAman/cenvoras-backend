@@ -1,31 +1,6 @@
-from decimal import Decimal, ROUND_HALF_UP
-
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-
-
-class BillingCycle(models.TextChoices):
-    MONTHLY = 'monthly', 'Monthly'
-    QUARTERLY = 'quarterly', 'Quarterly'
-    YEARLY = 'yearly', 'Yearly'
-
-
-CYCLE_MULTIPLIERS = {
-    BillingCycle.MONTHLY: Decimal('1'),
-    BillingCycle.QUARTERLY: Decimal('3'),
-    BillingCycle.YEARLY: Decimal('12'),
-}
-
-CYCLE_DISCOUNTS = {
-    BillingCycle.MONTHLY: Decimal('0.00'),
-    BillingCycle.QUARTERLY: Decimal('0.15'),
-    BillingCycle.YEARLY: Decimal('0.30'),
-}
-
-
-def money(value: Decimal) -> Decimal:
-    return Decimal(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 class Feature(models.Model):
     """
@@ -48,11 +23,7 @@ class Plan(models.Model):
     description = models.TextField(blank=True)
     
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    original_monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    original_quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    original_yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     
     # Hard Limits built-in for fast access
     max_managers = models.IntegerField(default=0, help_text="Number of staff accounts allowed")
@@ -66,33 +37,6 @@ class Plan(models.Model):
     
     def __str__(self):
         return f"{self.name} (₹{self.monthly_price}/mo)"
-
-    def get_base_monthly_price(self):
-        """Helper to return the correct base price even if DB is out of sync."""
-        code = str(self.code).lower()
-        if code == 'pro':
-            return Decimal('1599.00')
-        if code == 'business':
-            return Decimal('1999.00')
-        return self.monthly_price
-
-    def price_for_cycle(self, cycle: str):
-        normalized = str(cycle or BillingCycle.MONTHLY).lower()
-        base = self.get_base_monthly_price()
-        if normalized == BillingCycle.YEARLY:
-            return money(base * CYCLE_MULTIPLIERS[BillingCycle.YEARLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.YEARLY]))
-        if normalized == BillingCycle.QUARTERLY:
-            return money(base * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY] * (Decimal('1') - CYCLE_DISCOUNTS[BillingCycle.QUARTERLY]))
-        return base
-
-    def original_price_for_cycle(self, cycle: str):
-        normalized = str(cycle or BillingCycle.MONTHLY).lower()
-        base = self.get_base_monthly_price()
-        if normalized == BillingCycle.YEARLY:
-            return money(base * CYCLE_MULTIPLIERS[BillingCycle.YEARLY])
-        if normalized == BillingCycle.QUARTERLY:
-            return money(base * CYCLE_MULTIPLIERS[BillingCycle.QUARTERLY])
-        return base
 
     @property
     def effective_team_limit(self):
@@ -140,22 +84,9 @@ class TenantSubscription(models.Model):
         choices=SubscriptionStatus.choices,
         default=SubscriptionStatus.TRIAL
     )
-    current_billing_cycle = models.CharField(
-        max_length=20,
-        choices=BillingCycle.choices,
-        default=BillingCycle.MONTHLY,
-    )
     
     current_period_start = models.DateTimeField(default=timezone.now)
     current_period_end = models.DateTimeField(null=True, blank=True)
-    pending_plan = models.ForeignKey('Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions')
-    pending_billing_cycle = models.CharField(
-        max_length=20,
-        choices=BillingCycle.choices,
-        null=True,
-        blank=True,
-    )
-    pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
     cancel_at_period_end = models.BooleanField(default=False)
     pending_plan = models.ForeignKey('Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions')
     pending_plan_starts_at = models.DateTimeField(null=True, blank=True)
@@ -182,21 +113,24 @@ class TenantSubscription(models.Model):
         return self.plan.code if self.plan else 'free'
 
 
-class SubscriptionPaymentOrder(models.Model):
-    class OrderStatus(models.TextChoices):
-        CREATED = 'created', 'Created'
-        SUCCESS = 'success', 'Success'
-        FAILED = 'failed', 'Failed'
+class SubscriptionPayment(models.Model):
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscription_payments')
+    plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='subscription_payments')
 
-    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscription_payment_orders')
-    order_id = models.CharField(max_length=120, unique=True)
-    payment_session_id = models.CharField(max_length=255, blank=True, default='')
-    target_plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='payment_orders')
-    billing_cycle = models.CharField(max_length=20, choices=BillingCycle.choices, default=BillingCycle.MONTHLY)
-    duration_days = models.PositiveIntegerField(default=30)
-    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    status = models.CharField(max_length=20, choices=OrderStatus.choices, default=OrderStatus.CREATED)
-    failure_reason = models.TextField(blank=True, default='')
+    provider = models.CharField(max_length=30, default='cashfree')
+    order_id = models.CharField(max_length=64, unique=True)
+    cf_order_id = models.CharField(max_length=64, blank=True, null=True)
+    payment_session_id = models.TextField(blank=True, null=True)
+    cf_payment_id = models.CharField(max_length=64, blank=True, null=True)
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=10, default='INR')
+    status = models.CharField(max_length=20, choices=SubscriptionPaymentStatus.choices, default=SubscriptionPaymentStatus.PENDING)
+    action = models.CharField(max_length=20, choices=SubscriptionPaymentAction.choices, default=SubscriptionPaymentAction.ACTIVATE)
+    source_plan_code = models.CharField(max_length=50, blank=True, null=True)
+    billing_details = models.JSONField(default=dict, blank=True)
+
+    raw_response = models.JSONField(default=dict, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -205,4 +139,33 @@ class SubscriptionPaymentOrder(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.order_id} - {self.target_plan.code} ({self.status})"
+        return f"{self.tenant} - {self.plan.code} - {self.order_id} ({self.status})"
+
+
+class WebhookEvent(models.Model):
+    """
+    Tracks incoming webhooks from Cashfree to ensure idempotent processing.
+    Prevents duplicate subscription updates if a webhook is received multiple times.
+    """
+    event_id = models.CharField(max_length=200, unique=True, help_text="Unique event ID from Cashfree webhook")
+    provider = models.CharField(max_length=30, default='cashfree')
+    event_type = models.CharField(max_length=100, help_text="e.g., PAYMENT_SUCCESS, PAYMENT_FAILED")
+    order_id = models.CharField(max_length=64, blank=True, null=True)
+    payload = models.JSONField(default=dict, blank=True)
+    
+    processed = models.BooleanField(default=False, help_text="Whether this event has been processed")
+    error_message = models.TextField(blank=True, null=True, help_text="Error during processing, if any")
+    
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-received_at']
+        indexes = [
+            models.Index(fields=['event_id'], name='sub_wh_ev_id_idx'),
+            models.Index(fields=['order_id'], name='sub_wh_ord_id_idx'),
+            models.Index(fields=['processed'], name='sub_wh_proc_idx'),
+        ]
+    
+    def __str__(self):
+        return f"{self.event_type} - {self.event_id} ({self.provider})"

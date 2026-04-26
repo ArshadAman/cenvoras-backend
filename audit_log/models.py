@@ -20,14 +20,6 @@ class AuditLog(models.Model):
         blank=True,
         related_name='audit_logs'
     )
-    tenant = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='tenant_audit_logs',
-        help_text="The business/tenant account this log belongs to"
-    )
     user_email = models.EmailField(blank=True, null=True, help_text="Snapshot of user email in case user is deleted")
     
     action = models.CharField(max_length=10, choices=ACTION_CHOICES)

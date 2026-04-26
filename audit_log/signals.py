@@ -1,4 +1,4 @@
-from django.db.models.signals import post_save, post_delete, pre_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.forms.models import model_to_dict
 from .models import AuditLog
@@ -15,6 +15,9 @@ EXCLUDED_MODELS = [
 ]
 
 class AuditJSONEncoder(json.JSONEncoder):
+    """
+    JSON Encoder for non-serializable objects (Decimal, Date, UUID)
+    """
     def default(self, obj):
         if isinstance(obj, Decimal):
             return str(obj)
@@ -32,36 +35,6 @@ def get_client_ip(request):
         ip = request.META.get('REMOTE_ADDR')
     return ip
 
-def get_diff(old, new):
-    """
-    Returns a dict of changed fields: {field: {'old': val, 'new': val}}
-    """
-    diff = {}
-    for key, value in new.items():
-        if key.startswith('_'): continue
-        old_value = old.get(key)
-        # Handle decimal/string comparisons
-        if str(old_value) != str(value):
-            diff[key] = {
-                'old': old_value,
-                'new': value
-            }
-    return diff
-
-@receiver(pre_save)
-def audit_log_pre_save(sender, instance, **kwargs):
-    if sender.__name__ in EXCLUDED_MODELS:
-        return
-    if instance.pk:
-        try:
-            # We don't use objects.get here because it might trigger more signals or be slow
-            # But we need the old state. 
-            old_instance = sender.objects.filter(pk=instance.pk).first()
-            if old_instance:
-                instance._old_state = model_to_dict(old_instance)
-        except:
-            instance._old_state = {}
-
 @receiver(post_save)
 def audit_log_save(sender, instance, created, **kwargs):
     if sender.__name__ in EXCLUDED_MODELS:
@@ -70,32 +43,26 @@ def audit_log_save(sender, instance, created, **kwargs):
     user = get_current_user()
     request = get_current_request()
     
+    # If no user context (e.g. management command), we can still log if needed, 
+    # but usually we want to track user actions. 
+    # For now, let's log even if user is None (system action).
+    
     action = 'CREATE' if created else 'UPDATE'
     
+    # For Updates, we ideally want to know WHAT changed.
+    # But post_save doesn't give us the 'old' instance easily without pre_save caching.
+    # For now, we'll log the 'snapshot' of the current state.
+    # Implementing full diff requires pre_save signal or __init__ tracking.
+    
     try:
-        new_state = model_to_dict(instance)
-        if created:
-            changes = new_state
-        else:
-            old_state = getattr(instance, '_old_state', {})
-            changes = get_diff(old_state, new_state)
-            if not changes:
-                return # No actual changes, don't log
+        # Simple serialization
+        changes = model_to_dict(instance)
+        # Filter out binary fields or huge text fields if needed
     except:
         changes = {}
 
-    # Resolve tenant: prioritize the object's tenant, fallback to user's tenant
-    tenant = None
-    if hasattr(instance, 'tenant') and instance.tenant:
-        tenant = instance.tenant
-    elif hasattr(instance, 'user') and instance.user:
-        tenant = getattr(instance.user, 'active_tenant', instance.user)
-    elif user and getattr(user, 'is_authenticated', False):
-        tenant = getattr(user, 'active_tenant', user)
-
     AuditLog.objects.create(
         user=user if user and getattr(user, 'is_authenticated', False) else None,
-        tenant=tenant,
         user_email=getattr(user, 'email', 'system') if user and getattr(user, 'is_authenticated', False) else 'system',
         action=action,
         model_name=sender.__name__,
@@ -113,29 +80,13 @@ def audit_log_delete(sender, instance, **kwargs):
     user = get_current_user()
     request = get_current_request()
 
-    # Resolve tenant: prioritize the object's tenant, fallback to user's tenant
-    tenant = None
-    if hasattr(instance, 'tenant') and instance.tenant:
-        tenant = instance.tenant
-    elif hasattr(instance, 'user') and instance.user:
-        tenant = getattr(instance.user, 'active_tenant', instance.user)
-    elif user and getattr(user, 'is_authenticated', False):
-        tenant = getattr(user, 'active_tenant', user)
-
-    # Capture snapshot of what was deleted
-    try:
-        snapshot = model_to_dict(instance)
-    except:
-        snapshot = {}
-
     AuditLog.objects.create(
         user=user if user and getattr(user, 'is_authenticated', False) else None,
-        tenant=tenant,
         user_email=getattr(user, 'email', 'system') if user and getattr(user, 'is_authenticated', False) else 'system',
         action='DELETE',
         model_name=sender.__name__,
         object_id=str(instance.pk),
         object_repr=str(instance)[:255],
-        changes=json.loads(json.dumps(snapshot, cls=AuditJSONEncoder)),
+        changes={}, # Deleted, no changes to track, or log snapshot
         ip_address=get_client_ip(request) if request else None
     )

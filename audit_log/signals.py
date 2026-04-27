@@ -17,7 +17,8 @@ EXCLUDED_MODELS = [
 
 # Fields to exclude from diffing (noisy system fields)
 EXCLUDED_FIELDS = [
-    'last_login', 'last_login_at', 'password', 'is_staff', 'is_superuser'
+    'last_login', 'last_login_at', 'password', 'is_staff', 'is_superuser',
+    'groups', 'user_permissions'
 ]
 
 class AuditJSONEncoder(json.JSONEncoder):

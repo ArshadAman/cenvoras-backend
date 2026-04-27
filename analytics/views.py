@@ -56,7 +56,10 @@ def sales_summary(request):
     export = request.query_params.get('export')
 
     tenant = getattr(request.user, 'active_tenant', request.user)
-    qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
+    from django.db.models import Q
+    qs = SalesInvoice.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    ).filter(status='final')
     if date_from:
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
@@ -66,7 +69,9 @@ def sales_summary(request):
     
     # Subtract Returns (Credit Notes)
     from billing.models_returns import CreditNote
-    returns_qs = CreditNote.objects.filter(created_by=tenant)
+    returns_qs = CreditNote.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    )
     if date_from:
         returns_qs = returns_qs.filter(date__gte=date_from)
     if date_to:
@@ -364,12 +369,24 @@ def dashboard_summary(request):
         from collections import defaultdict
         from decimal import Decimal
 
+        from django.db.models import Q
         # Sales
-        sales_qs = SalesInvoice.objects.filter(created_by=tenant).exclude(status='draft')
-        total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        sales_qs = SalesInvoice.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        ).exclude(status='draft')
+        total_invoices = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+
+        # Subtract returns
+        from billing.models_returns import CreditNote
+        total_returns = CreditNote.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        total_sales = total_invoices - total_returns
 
         # Purchases
-        purchase_qs = PurchaseBill.objects.filter(created_by=tenant)
+        purchase_qs = PurchaseBill.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        )
         total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Inventory

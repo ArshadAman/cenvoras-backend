@@ -124,8 +124,11 @@ def sales_invoice_list_create(request):
 
     if request.method == 'GET':
         try:
+            from django.db.models import Q
             invoices = (
-                SalesInvoice.objects.filter(created_by=tenant)
+                SalesInvoice.objects.filter(
+                    Q(created_by=tenant) | Q(created_by__parent=tenant)
+                )
                 .select_related('customer')
                 .prefetch_related('items__product')
                 .order_by('-invoice_date', '-created_at')
@@ -248,31 +251,57 @@ def sales_summary_analytics(request):
     start_date = request.GET.get('start_date')
     end_date = request.GET.get('end_date')
 
-    qs = SalesInvoice.objects.filter(created_by=request.user.active_tenant).exclude(status='draft')
+    tenant = request.user.active_tenant
+    # Filter for invoices created by the owner OR any of their team members
+    from django.db.models import Q
+    base_qs = SalesInvoice.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    ).exclude(status='draft')
+
+    qs = base_qs
     if start_date:
         qs = qs.filter(invoice_date__gte=start_date)
     if end_date:
         qs = qs.filter(invoice_date__lte=end_date)
 
-    total_revenue = qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
-    total_invoices = qs.count()
+    # Calculate using Python sum for absolute parity with the list and count
+    all_qs_invoices = list(qs.only('total_amount'))
+    total_revenue = sum((inv.total_amount for inv in all_qs_invoices), Decimal('0'))
+    total_invoices = len(all_qs_invoices)
 
     now = timezone.now()
     this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    this_month_qs = SalesInvoice.objects.filter(
-        created_by=request.user.active_tenant,
+    this_month_qs = base_qs.filter(
         invoice_date__gte=this_month_start.date(),
-    ).exclude(status='draft')
+    )
 
-    this_month_revenue = this_month_qs.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
-    this_month_invoices = this_month_qs.count()
+    this_month_invoices_list = list(this_month_qs.only('total_amount'))
+    this_month_revenue = sum((inv.total_amount for inv in this_month_invoices_list), Decimal('0'))
+    this_month_invoices = len(this_month_invoices_list)
+
+    from billing.models_returns import CreditNote
+    # Subtract returns for accuracy - also scoped to tenant+team
+    returns_base_qs = CreditNote.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    )
+    
+    returns_qs = returns_base_qs
+    if start_date:
+        returns_qs = returns_qs.filter(date__gte=start_date)
+    if end_date:
+        returns_qs = returns_qs.filter(date__lte=end_date)
+    total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    
+    month_returns = returns_base_qs.filter(
+        date__gte=this_month_start.date()
+    ).aggregate(total=Sum('total_amount'))['total'] or 0
 
     return Response(
         {
             'success': True,
-            'total_revenue': total_revenue,
+            'total_revenue': float(total_revenue - total_returns),
             'total_invoices': total_invoices,
-            'this_month_revenue': this_month_revenue,
+            'this_month_revenue': float(this_month_revenue - month_returns),
             'this_month_invoices': this_month_invoices,
         }
     )

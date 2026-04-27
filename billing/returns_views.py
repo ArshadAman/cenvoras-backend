@@ -78,6 +78,10 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 current_balance=F('current_balance') - credit_note.total_amount
             )
 
+        # Create Ledger Entries
+        from ledger.services import AccountingService
+        AccountingService.create_credit_note_entries(credit_note)
+
         return credit_note
 
 
@@ -138,6 +142,10 @@ class DebitNoteSerializer(serializers.ModelSerializer):
                     defaults={'quantity': 0}
                 )
                 StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - qty)
+
+        # Create Ledger Entries
+        from ledger.services import AccountingService
+        AccountingService.create_debit_note_entries(debit_note)
 
         return debit_note
 

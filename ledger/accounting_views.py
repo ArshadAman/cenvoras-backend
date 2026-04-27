@@ -598,8 +598,36 @@ def get_ledger_stats(request):
         entries = entries.filter(customer_id=customer_id)
         
     # Stats calculation
-    total_payments = entries.filter(account__account_type='asset', credit__gt=0).aggregate(total=Sum('credit'))['total'] or 0
-    total_invoices = entries.filter(account__account_type='asset', debit__gt=0).aggregate(total=Sum('debit'))['total'] or 0
+    # Stats calculation - accurately distinguishing between sales, returns, and payments
+    from billing.models_returns import CreditNote, DebitNote
+    
+    # Total Invoices (Sales volume)
+    total_invoices = entries.filter(
+        account__account_type='asset', 
+        debit__gt=0, 
+        sales_invoice__isnull=False
+    ).aggregate(total=Sum('debit'))['total'] or 0
+    
+    # Total Payments (Money received from customers)
+    total_payments = entries.filter(
+        account__account_type='asset', 
+        credit__gt=0, 
+        sales_invoice__isnull=True # Payments usually don't link to a single invoice if they are bulk
+    ).aggregate(total=Sum('credit'))['total'] or 0
+    
+    # Note: If payments ARE linked to invoices, we might need a better check.
+    # But usually, Returns have a 'credit_note' link.
+    
+    total_returns = entries.filter(
+        account__account_type='asset',
+        credit__gt=0,
+        credit_note__isnull=False
+    ).aggregate(total=Sum('credit'))['total'] or 0
+    
+    # Adjust total_invoices for net sales if desired, or keep separate. 
+    # Usually, dashboard wants "Net Sales".
+    net_sales = float(total_invoices) - float(total_returns)
+    
     net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
     
     # Customer specific logic

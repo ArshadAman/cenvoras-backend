@@ -367,3 +367,46 @@ class AccountingService:
             entries = entries.filter(date__lte=date_to)
         
         return entries
+    @classmethod
+    @transaction.atomic
+    def create_credit_note_entries(cls, credit_note):
+        """Create accounting entries for a Sales Return (Credit Note)"""
+        user = credit_note.created_by
+        accounts = cls.get_or_create_default_accounts(user)
+        description = f"Sales Return from {credit_note.customer.name} - CN {credit_note.credit_note_number}"
+        if credit_note.reason:
+            description += f" ({credit_note.get_reason_display()})"
+        GeneralLedgerEntry.objects.create(
+            date=credit_note.date, account=accounts['sales_revenue'],
+            debit=credit_note.total_amount, credit=0, description=description,
+            reference=credit_note.credit_note_number, credit_note=credit_note,
+            customer=credit_note.customer, created_by=user
+        )
+        GeneralLedgerEntry.objects.create(
+            date=credit_note.date, account=accounts['accounts_receivable'],
+            debit=0, credit=credit_note.total_amount, description=description,
+            reference=credit_note.credit_note_number, credit_note=credit_note,
+            customer=credit_note.customer, created_by=user
+        )
+        return True
+
+    @classmethod
+    @transaction.atomic
+    def create_debit_note_entries(cls, debit_note):
+        """Create accounting entries for a Purchase Return (Debit Note)"""
+        user = debit_note.created_by
+        accounts = cls.get_or_create_default_accounts(user)
+        description = f"Purchase Return to {debit_note.vendor_name} - DN {debit_note.debit_note_number}"
+        if debit_note.reason:
+            description += f" ({debit_note.get_reason_display()})"
+        GeneralLedgerEntry.objects.create(
+            date=debit_note.date, account=accounts['accounts_payable'],
+            debit=debit_note.total_amount, credit=0, description=description,
+            reference=debit_note.debit_note_number, debit_note=debit_note, created_by=user
+        )
+        GeneralLedgerEntry.objects.create(
+            date=debit_note.date, account=accounts['purchases'],
+            debit=0, credit=debit_note.total_amount, description=description,
+            reference=debit_note.debit_note_number, debit_note=debit_note, created_by=user
+        )
+        return True

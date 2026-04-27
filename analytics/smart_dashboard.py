@@ -492,13 +492,19 @@ class SmartDashboard:
         else:
             fy_start = date(self.today.year - 1, 4, 1)
         
-        result = SalesInvoice.objects.filter(
-            created_by=self.user,
+        invoices_total = SalesInvoice.objects.filter(
+            created_by=self.tenant,
             invoice_date__gte=fy_start,
             status='final'
-        ).aggregate(total=Sum('total_amount'))
-        
-        return float(result['total'] or 0)
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+        from billing.models_returns import CreditNote
+        returns_total = CreditNote.objects.filter(
+            created_by=self.tenant,
+            date__gte=fy_start
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+        return float(invoices_total - returns_total)
     
     def _get_turnover_percent(self):
         """Percentage of turnover limit reached"""

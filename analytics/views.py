@@ -61,7 +61,19 @@ def sales_summary(request):
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
         qs = qs.filter(invoice_date__lte=date_to)
-    total_sales = qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        
+    total_invoices = qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    
+    # Subtract Returns (Credit Notes)
+    from billing.models_returns import CreditNote
+    returns_qs = CreditNote.objects.filter(created_by=tenant)
+    if date_from:
+        returns_qs = returns_qs.filter(date__gte=date_from)
+    if date_to:
+        returns_qs = returns_qs.filter(date__lte=date_to)
+    total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    
+    total_sales = total_invoices - total_returns
 
     items = SalesInvoiceItem.objects.filter(sales_invoice__in=qs)
     sales_by_product = items.values('product__name').annotate(total=Sum('amount')).order_by('-total')

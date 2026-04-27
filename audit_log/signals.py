@@ -25,7 +25,10 @@ class AuditJSONEncoder(json.JSONEncoder):
             return obj.isoformat()
         if isinstance(obj, uuid.UUID):
             return str(obj)
-        return super().default(obj)
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
 
 def get_client_ip(request):
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')

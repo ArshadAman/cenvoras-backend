@@ -39,6 +39,7 @@ class MLPredictions:
     
     def __init__(self, user):
         self.user = user
+        self.tenant = getattr(user, 'active_tenant', user)
         self.today = date.today()
     
     # ═══════════════════════════════════════════════════════════════
@@ -53,7 +54,7 @@ class MLPredictions:
         thirty_days_ago = self.today - timedelta(days=30)
         
         daily_sales = SalesInvoice.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             invoice_date__gte=thirty_days_ago
         ).annotate(
             day=TruncDate('invoice_date')
@@ -146,7 +147,7 @@ class MLPredictions:
         Uses sales velocity + safety stock calculation
         """
         products = Product.objects.filter(
-            created_by=self.user,
+            created_by=self.tenant,
             stock__gt=0  # Only products with stock
         )
         
@@ -156,7 +157,7 @@ class MLPredictions:
         for product in products:
             # Calculate average daily sales velocity
             sales_data = SalesInvoiceItem.objects.filter(
-                sales_invoice__created_by=self.user,
+                sales_invoice__created_by=self.tenant,
                 product=product,
                 sales_invoice__invoice_date__gte=thirty_days_ago
             ).aggregate(

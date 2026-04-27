@@ -40,12 +40,11 @@ def get_client_ip(request):
 
 @receiver(post_save)
 def audit_log_save(sender, instance, created, **kwargs):
+    request = get_current_request()
+    user = getattr(request, 'user', None) if request else get_current_user()
     if sender.__name__ in EXCLUDED_MODELS:
         return
         
-    user = get_current_user()
-    request = get_current_request()
-    
     # If no user context (e.g. management command), we can still log if needed, 
     # but usually we want to track user actions. 
     # For now, let's log even if user is None (system action).
@@ -84,8 +83,8 @@ def audit_log_delete(sender, instance, **kwargs):
     if sender.__name__ in EXCLUDED_MODELS:
         return
 
-    user = get_current_user()
     request = get_current_request()
+    user = getattr(request, 'user', None) if request else get_current_user()
 
     if request and request.path.startswith('/admin/'):
         return

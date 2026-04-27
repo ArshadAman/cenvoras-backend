@@ -55,7 +55,8 @@ def sales_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
-    qs = SalesInvoice.objects.filter(created_by=request.user, status='final')
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
     if date_from:
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
@@ -124,7 +125,8 @@ def purchase_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
-    qs = PurchaseBill.objects.filter(created_by=request.user)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    qs = PurchaseBill.objects.filter(created_by=tenant)
     if date_from:
         qs = qs.filter(bill_date__gte=date_from)
     if date_to:
@@ -191,7 +193,8 @@ def inventory_summary(request):
     Optionally exports the data as CSV.
     """
     export = request.query_params.get('export')
-    products = Product.objects.filter(created_by=request.user)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    products = Product.objects.filter(created_by=tenant)
     product_list = []
     low_stock = []
     for product in products:
@@ -267,8 +270,9 @@ def gst_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     # GST collected from sales
-    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=request.user)
+    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=tenant)
     if date_from:
         sales_items = sales_items.filter(sales_invoice__invoice_date__gte=date_from)
     if date_to:
@@ -276,7 +280,7 @@ def gst_summary(request):
     gst_collected = sales_items.aggregate(total_gst=Sum('tax'))['total_gst'] or 0
 
     # GST paid on purchases
-    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=request.user)
+    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
     if date_from:
         purchase_items = purchase_items.filter(purchase_bill__bill_date__gte=date_from)
     if date_to:
@@ -489,8 +493,9 @@ def gstr1_report(request):
         # Default or Error? For now handle gracefully.
         user_state_code = "" 
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     invoices = SalesInvoice.objects.filter(
-        created_by=request.user,
+        created_by=tenant,
         invoice_date__gte=date_from,
         invoice_date__lte=date_to
     ).prefetch_related('items', 'customer')
@@ -616,8 +621,10 @@ def stock_summary_report(request):
     """
     export = request.query_params.get('export', 'json')
     
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    
     stock_points = StockPoint.objects.filter(
-        product__created_by=request.user,
+        product__created_by=tenant,
         quantity__gt=0
     ).select_related('product', 'batch', 'warehouse').order_by('product__name', 'batch__expiry_date')
     
@@ -728,22 +735,20 @@ def smart_dashboard(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@cache_page(60 * 60 * 24)  # Cache ML predictions for 24 hours
 def ml_predictions(request):
     """
     ML Predictions API - Sales Forecasting and Restock Predictions
-    
-    Sales Forecast:
-    - 7-day sales prediction using Linear Regression
-    - Trend analysis (growing/stable/declining)
-    - Confidence level based on data variance
-    
-    Restock Predictions:
-    - Days until stockout for each product
-    - Suggested reorder dates
-    - Urgency levels (critical/high/medium/low)
     """
     from .ml_predictions import MLPredictions
-    
-    ml = MLPredictions(request.user)
-    return Response(ml.get_all_predictions())
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('analytics', tenant.id, 'ml-predictions')
+
+    if request.query_params.get('refresh') == 'true':
+        from django.core.cache import cache
+        cache.delete(cache_key)
+
+    def build_predictions():
+        ml = MLPredictions(request.user)
+        return ml.get_all_predictions()
+
+    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_predictions))

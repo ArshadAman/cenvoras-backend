@@ -34,6 +34,7 @@ class AccountingService:
             # Revenue
             ('4001', 'Sales Revenue', AccountType.REVENUE),
             ('4100', 'Service Revenue', AccountType.REVENUE),
+            ('4200', 'Rounding Off', AccountType.REVENUE),
             
             # Expenses
             ('5001', 'Cost of Goods Sold', AccountType.EXPENSE),
@@ -143,6 +144,20 @@ class AccountingService:
                 # Revenue belongs to the sales account, not customer settlement.
                 # Keep customer null so customer-ledger credit appears only on payment receipt.
                 customer=None,
+                created_by=user
+            )
+        
+        # Credit/Debit: Rounding Off (handle the difference to keep Balance Sheet balanced)
+        round_off = getattr(sales_invoice, 'round_off', Decimal('0.00')) or Decimal('0.00')
+        if round_off != 0:
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=accounts['rounding_off'],
+                debit=abs(round_off) if round_off < 0 else 0,
+                credit=round_off if round_off > 0 else 0,
+                description=f"Rounding off adjustment for Invoice {sales_invoice.invoice_number}",
+                reference=sales_invoice.invoice_number,
+                sales_invoice=sales_invoice,
                 created_by=user
             )
         

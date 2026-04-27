@@ -30,6 +30,12 @@ class User(AbstractUser):
         null=True, 
         help_text="State for tax calculation (Place of Supply)"
     )
+    city = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True, 
+        help_text="City/Town"
+    )
     
     # System fields
     subscription_status = models.CharField(

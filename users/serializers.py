@@ -12,9 +12,11 @@ class QuickSignupSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'gstin')
+        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'gstin', 'state', 'city')
         extra_kwargs = {
             'gstin': {'required': False, 'allow_blank': True},
+            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def validate(self, attrs):
@@ -48,6 +50,8 @@ class QuickSignupSerializer(serializers.ModelSerializer):
             phone=validated_data['phone'],
             business_name=validated_data['business_name'],
             gstin=validated_data.get('gstin', ''),
+            state=validated_data.get('state'),
+            city=validated_data.get('city'),
             password=validated_data['password'],
             trial_ends_at=trial_end
         )
@@ -60,7 +64,7 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'first_name', 'last_name', 'business_name', 'business_address', 
-            'gstin', 'gem_id', 'dl_number', 'phone'
+            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city'
         )
         extra_kwargs = {
             'business_name': {'required': True},
@@ -68,6 +72,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
             'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def update(self, instance, validated_data):
@@ -111,7 +117,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 'subscription_status',
+            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
+            'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
@@ -133,7 +140,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 'email', 'current_password',
+            'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
+            'state', 'city', 'email', 'current_password',
             'new_password', 'confirm_new_password'
         ]
         extra_kwargs = {
@@ -144,6 +152,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
             'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_invoice_prefix(self, value):

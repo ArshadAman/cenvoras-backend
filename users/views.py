@@ -153,6 +153,8 @@ def quick_signup_view(request):
             'phone': validated['phone'],
             'business_name': validated['business_name'],
             'gstin': validated.get('gstin', ''),
+            'state': validated.get('state'),
+            'city': validated.get('city'),
             'password_hash': make_password(validated['password']),
             'requested_at': timezone.now().isoformat(),
         }
@@ -219,6 +221,8 @@ def quick_signup_view(request):
                 phone=pending['phone'],
                 business_name=pending['business_name'],
                 gstin=pending.get('gstin', ''),
+                state=pending.get('state'),
+                city=pending.get('city'),
                 trial_ends_at=trial_end,
                 password=pending['password_hash'],
                 last_login_at=timezone.now(),

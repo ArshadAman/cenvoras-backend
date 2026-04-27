@@ -38,33 +38,45 @@ def get_client_ip(request):
         ip = request.META.get('REMOTE_ADDR')
     return ip
 
+# Store old instance state for diffing
+_old_instances = local()
+
 @receiver(post_save)
 def audit_log_save(sender, instance, created, **kwargs):
-    request = get_current_request()
-    user = getattr(request, 'user', None) if request else get_current_user()
     if sender.__name__ in EXCLUDED_MODELS:
         return
         
-    # If no user context (e.g. management command), we can still log if needed, 
-    # but usually we want to track user actions. 
-    # For now, let's log even if user is None (system action).
+    request = get_current_request()
+    user = getattr(request, 'user', None) if request else get_current_user()
     
     action = 'CREATE' if created else 'UPDATE'
     
-    # For Updates, we ideally want to know WHAT changed.
-    # But post_save doesn't give us the 'old' instance easily without pre_save caching.
-    # For now, we'll log the 'snapshot' of the current state.
-    # Implementing full diff requires pre_save signal or __init__ tracking.
-    
+    changes = {}
     try:
-        # Simple serialization
-        changes = model_to_dict(instance)
-        # Filter out binary fields or huge text fields if needed
+        new_state = model_to_dict(instance)
+        if created:
+            changes = new_state
+        else:
+            # Try to get old state from thread local
+            old_state = getattr(_old_instances, str(instance.pk), None)
+            if old_state:
+                for field, new_val in new_state.items():
+                    old_val = old_state.get(field)
+                    if old_val != new_val:
+                        changes[field] = {'old': old_val, 'new': new_val}
+                # Cleanup
+                delattr(_old_instances, str(instance.pk))
+            else:
+                # Fallback if pre_save didn't catch it
+                changes = new_state
     except:
         changes = {}
 
     if request and request.path.startswith('/admin/'):
         return
+
+    if action == 'UPDATE' and not changes:
+        return # Nothing changed
 
     AuditLog.objects.create(
         tenant=getattr(user, 'active_tenant', None) if user and getattr(user, 'is_authenticated', False) else None,
@@ -77,6 +89,18 @@ def audit_log_save(sender, instance, created, **kwargs):
         changes=json.loads(json.dumps(changes, cls=AuditJSONEncoder)),
         ip_address=get_client_ip(request) if request else None
     )
+
+from django.db.models.signals import pre_save
+@receiver(pre_save)
+def audit_log_pre_save(sender, instance, **kwargs):
+    if sender.__name__ in EXCLUDED_MODELS:
+        return
+    if instance.pk:
+        try:
+            old_instance = sender.objects.get(pk=instance.pk)
+            setattr(_old_instances, str(instance.pk), model_to_dict(old_instance))
+        except:
+            pass
 
 @receiver(post_delete)
 def audit_log_delete(sender, instance, **kwargs):

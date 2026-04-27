@@ -15,6 +15,11 @@ EXCLUDED_MODELS = [
     'Permission', 'Group', 'Token', 'OutstandingToken', 'BlacklistedToken'
 ]
 
+# Fields to exclude from diffing (noisy system fields)
+EXCLUDED_FIELDS = [
+    'last_login', 'last_login_at', 'password', 'is_staff', 'is_superuser'
+]
+
 class AuditJSONEncoder(json.JSONEncoder):
     """
     JSON Encoder for non-serializable objects (Decimal, Date, UUID)
@@ -54,7 +59,7 @@ def audit_log_save(sender, instance, created, **kwargs):
     
     changes = {}
     try:
-        new_state = model_to_dict(instance)
+        new_state = {k: v for k, v in model_to_dict(instance).items() if k not in EXCLUDED_FIELDS}
         if created:
             changes = new_state
         else:
@@ -62,6 +67,8 @@ def audit_log_save(sender, instance, created, **kwargs):
             old_state = getattr(_old_instances, str(instance.pk), None)
             if old_state:
                 for field, new_val in new_state.items():
+                    if field in EXCLUDED_FIELDS:
+                        continue
                     old_val = old_state.get(field)
                     if old_val != new_val:
                         changes[field] = {'old': old_val, 'new': new_val}
@@ -99,7 +106,8 @@ def audit_log_pre_save(sender, instance, **kwargs):
     if instance.pk:
         try:
             old_instance = sender.objects.get(pk=instance.pk)
-            setattr(_old_instances, str(instance.pk), model_to_dict(old_instance))
+            old_dict = {k: v for k, v in model_to_dict(old_instance).items() if k not in EXCLUDED_FIELDS}
+            setattr(_old_instances, str(instance.pk), old_dict)
         except:
             pass
 

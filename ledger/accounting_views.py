@@ -589,7 +589,9 @@ def get_ledger_stats(request):
     
     # Base queries
     from .models import GeneralLedgerEntry
-    entries = GeneralLedgerEntry.objects.filter(created_by=user)
+    entries = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if date_from_str:
         entries = entries.filter(date__gte=date_from_str)
     if date_to_str:
@@ -632,7 +634,9 @@ def get_ledger_stats(request):
     
     # Customer specific logic
     from billing.models import Customer, SalesInvoice, BillPaymentStatus
-    customers_query = Customer.objects.filter(created_by=user)
+    customers_query = Customer.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if customer_id:
         customers_query = customers_query.filter(id=customer_id)
         
@@ -641,7 +645,7 @@ def get_ledger_stats(request):
 
     # Overdue invoice stats
     overdue_query = SalesInvoice.objects.filter(
-        created_by=user,
+        Q(created_by=user) | Q(created_by__parent=user),
         due_date__lt=timezone.now().date(),
         payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID]
     )
@@ -654,7 +658,9 @@ def get_ledger_stats(request):
     )
 
     # Reconciliation stats: compare customer balance with invoice-level outstanding
-    invoice_outstanding = SalesInvoice.objects.filter(created_by=user)
+    invoice_outstanding = SalesInvoice.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if customer_id:
         invoice_outstanding = invoice_outstanding.filter(customer_id=customer_id)
 
@@ -667,17 +673,24 @@ def get_ledger_stats(request):
     
     # Recent transactions (last 30 days)
     thirty_days_ago = timezone.now().date() - timedelta(days=30)
-    recent_count = GeneralLedgerEntry.objects.filter(created_by=user, date__gte=thirty_days_ago).count()
+    recent_count = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user),
+        date__gte=thirty_days_ago
+    ).count()
     
     # Average and Largest
-    payment_stats = GeneralLedgerEntry.objects.filter(created_by=user, account__account_type='asset', credit__gt=0).aggregate(
+    payment_stats = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user),
+        account__account_type='asset', 
+        credit__gt=0
+    ).aggregate(
         avg=Avg('credit'),
         max=Max('credit')
     )
     
     return Response({
         'total_payments': float(total_payments),
-        'total_invoices': float(total_invoices),
+        'total_invoices': float(net_sales), # Return Net Sales for the dashboard
         'net_balance': float(net_balance),
         'total_customers': total_customers,
         'recent_transactions': recent_count,

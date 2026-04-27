@@ -1,23 +1,37 @@
 import os
 import django
-import sys
+from decimal import Decimal
 
-# Set up Django environment
-sys.path.append('/Users/arshadaman/Cenvoras/cenvoras')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cenvoras.settings')
 django.setup()
 
 from billing.models import SalesInvoice
-from django.db.models import Sum
+from users.models import User
 
-# Get all invoices
-invoices = SalesInvoice.objects.all().order_by('invoice_date')
+# Find the user mearshadaman@gmail.com
+user = User.objects.get(email='mearshadaman@gmail.com')
+tenant = user.active_tenant or user
 
-print(f"{'ID':<40} | {'Number':<15} | {'Date':<12} | {'Amount':<10} | {'Status':<10} | {'Created By'}")
-print("-" * 110)
+print(f"Tenant: {tenant.email} (ID: {tenant.id})")
+
+# Find all invoices for this tenant and their team
+from django.db.models import Q
+invoices = SalesInvoice.objects.filter(
+    Q(created_by=tenant) | Q(created_by__parent=tenant)
+).exclude(status='draft').order_by('-invoice_date', '-created_at')
+
+print(f"Total Final Invoices: {len(invoices)}")
+total_sum = Decimal('0')
 for inv in invoices:
-    print(f"{str(inv.id):<40} | {inv.invoice_number:<15} | {str(inv.invoice_date):<12} | {inv.total_amount:<10} | {inv.status:<10} | {inv.created_by.email}")
+    print(f"ID: {inv.id} | Date: {inv.invoice_date} | Created At: {inv.created_at} | Total: {inv.total_amount} | Created By: {inv.created_by.email}")
+    total_sum += inv.total_amount
 
-total_final = SalesInvoice.objects.filter(status='final').aggregate(Sum('total_amount'))['total_amount__sum'] or 0
-print("-" * 110)
-print(f"Total Final Sales: {total_final}")
+print(f"Overall Total: {total_sum}")
+
+# Today's invoices (Apr 28)
+today_invoices = invoices.filter(invoice_date='2026-04-28')
+print(f"Invoices on 2026-04-28: {len(today_invoices)} | Sum: {sum(i.total_amount for i in today_invoices)}")
+
+# Yesterday's invoices (Apr 27)
+yesterday_invoices = invoices.filter(invoice_date='2026-04-27')
+print(f"Invoices on 2026-04-27: {len(yesterday_invoices)} | Sum: {sum(i.total_amount for i in yesterday_invoices)}")

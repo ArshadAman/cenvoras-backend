@@ -252,6 +252,10 @@ def sales_summary_analytics(request):
     end_date = request.GET.get('end_date')
 
     tenant = request.user.active_tenant
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Sales Analytics Request - start_date: {start_date}, end_date: {end_date}, tenant: {tenant.email}")
+
     # Filter for invoices created by the owner OR any of their team members
     from django.db.models import Q
     base_qs = SalesInvoice.objects.filter(
@@ -268,6 +272,8 @@ def sales_summary_analytics(request):
     all_qs_invoices = list(qs.only('total_amount'))
     total_revenue = sum((inv.total_amount for inv in all_qs_invoices), Decimal('0'))
     total_invoices = len(all_qs_invoices)
+    
+    logger.info(f"Sales Analytics Result - count: {total_invoices}, total: {total_revenue}")
 
     now = timezone.now()
     this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -310,7 +316,10 @@ def sales_summary_analytics(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def recalculate_invoice_totals(request):
-    invoices = SalesInvoice.objects.filter(created_by=request.user.active_tenant)
+    tenant = request.user.active_tenant
+    invoices = SalesInvoice.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    )
     fixed_count = 0
 
     for invoice in invoices:

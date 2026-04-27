@@ -19,8 +19,7 @@ class SmartDashboard:
     
     def __init__(self, user):
         self.user = user
-        self.tenant = getattr(user, 'active_tenant', user)
-        self.owner_ids = list({self.user.id, self.tenant.id})
+        self.owner = getattr(user, 'active_tenant', user)
         self.today = timezone.localdate()
         self.yesterday = self.today - timedelta(days=1)
     
@@ -44,20 +43,36 @@ class SmartDashboard:
         }
     
     def _get_sales_today(self):
-        """Total sales amount for today"""
-        today_filter = Q(invoice_date=self.today) | Q(created_at__date=self.today)
-        result = SalesInvoice.objects.filter(
-            created_by_id__in=self.owner_ids,
-        ).exclude(status='draft').filter(today_filter).aggregate(total=Sum('total_amount'))
-        return float(result['total'] or 0)
-    
+        """Total net sales amount for today (minus returns)"""
+        invoices_total = SalesInvoice.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+            invoice_date=self.today,
+            status='final'
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+
+        from billing.models_returns import CreditNote
+        returns_total = CreditNote.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+            date=self.today
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+
+        return float(invoices_total - returns_total)
+
     def _get_sales_yesterday(self):
-        """Total sales amount for yesterday"""
-        yesterday_filter = Q(invoice_date=self.yesterday) | Q(created_at__date=self.yesterday)
-        result = SalesInvoice.objects.filter(
-            created_by_id__in=self.owner_ids,
-        ).exclude(status='draft').filter(yesterday_filter).aggregate(total=Sum('total_amount'))
-        return float(result['total'] or 0)
+        """Total net sales amount for yesterday (minus returns)"""
+        invoices_total = SalesInvoice.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+            invoice_date=self.yesterday,
+            status='final'
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+
+        from billing.models_returns import CreditNote
+        returns_total = CreditNote.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+            date=self.yesterday
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+
+        return float(invoices_total - returns_total)
     
     def _get_sales_change_percent(self):
         """Percentage change from yesterday"""
@@ -70,7 +85,7 @@ class SmartDashboard:
     def _get_cash_collections(self):
         """Today's cash collections."""
         result = Payment.objects.filter(
-            created_by_id__in=self.owner_ids,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             date=self.today,
             mode='cash'
         ).aggregate(total=Sum('amount'))
@@ -79,14 +94,14 @@ class SmartDashboard:
     def _get_bank_collections(self):
         """Today's bank/UPI collections."""
         result = Payment.objects.filter(
-            created_by_id__in=self.owner_ids,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             date=self.today,
             mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
         ).aggregate(total=Sum('amount'))
         return float(result['total'] or 0)
 
     def _get_collections_total(self, on_date=None):
-        payments = Payment.objects.filter(created_by_id__in=self.owner_ids)
+        payments = Payment.objects.filter(Q(created_by=self.owner) | Q(created_by__parent=self.owner))
         if on_date is not None:
             payments = payments.filter(date=on_date)
         result = payments.aggregate(total=Sum('amount'))
@@ -94,7 +109,7 @@ class SmartDashboard:
 
     def _get_purchase_paid_total(self):
         result = PurchaseBill.objects.filter(
-            created_by_id__in=self.owner_ids,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
         ).aggregate(total=Sum('amount_paid'))
         return float(result['total'] or 0)
 
@@ -106,9 +121,9 @@ class SmartDashboard:
         """Estimated net profit = Sales - Cost of Goods Sold"""
         # Get today's sales items
         sales_items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by_id__in=self.owner_ids,
+            Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
         ).filter(
-            Q(sales_invoice__invoice_date=self.today) | Q(sales_invoice__created_at__date=self.today)
+            sales_invoice__invoice_date=self.today
         ).exclude(sales_invoice__status='draft').select_related('product', 'batch')
         
         total_revenue = Decimal('0')
@@ -134,9 +149,9 @@ class SmartDashboard:
         """Total unpaid invoices created today (Udhaar given)"""
         # Get today's invoices
         today_invoices = SalesInvoice.objects.filter(
-            created_by_id__in=self.owner_ids,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
         ).exclude(status='draft').filter(
-            Q(invoice_date=self.today) | Q(created_at__date=self.today)
+            invoice_date=self.today
         )
         
         total_billed = today_invoices.aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
@@ -151,17 +166,18 @@ class SmartDashboard:
     def _get_credit_collected_today(self):
         """Payments received today for old invoices"""
         # Total payments today
-        total_payments = Payment.objects.filter(
-            created_by_id__in=self.owner_ids,
+        result = Payment.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             date=self.today
-        ).aggregate(total=Sum('amount'))['total'] or 0
+        ).aggregate(total=Sum('amount'))
+        total_payments = result['total'] or 0
         return float(total_payments)
     
     def _get_total_receivables(self):
         """Total money owed to the business"""
         # Sum of all customer outstanding balance
         result = Customer.objects.filter(
-            created_by_id__in=self.owner_ids,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             current_balance__gt=0
         ).aggregate(total=Sum('current_balance'))
         return float(result['total'] or 0)
@@ -188,7 +204,7 @@ class SmartDashboard:
     def _get_out_of_stock_warnings(self):
         """Products that are completely out of stock"""
         out_of_stock = Product.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             stock=0
         ).values('id', 'name')[:5]
         
@@ -204,7 +220,7 @@ class SmartDashboard:
     def _get_low_stock_warnings(self):
         """Products below low stock alert threshold (fallback to 10)"""
         products = Product.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             stock__gt=0
         ).values('id', 'name', 'stock', 'low_stock_alert')
         
@@ -240,7 +256,7 @@ class SmartDashboard:
         thirty_days_ago = self.today - timedelta(days=30)
         
         result = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=self.user,
+            Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
             product_id=product_id,
             sales_invoice__invoice_date__gte=thirty_days_ago,
             sales_invoice__status='final'
@@ -260,18 +276,17 @@ class SmartDashboard:
         overdue_customers = []
         
         customers_with_credit = Customer.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             current_balance__gt=0
         ).values('id', 'name', 'current_balance', 'credit_limit')[:5]
         
         for c in customers_with_credit:
             # Check for overdue invoices
             overdue_invoices = SalesInvoice.objects.filter(
-                created_by=self.tenant,
+                Q(created_by=self.owner) | Q(created_by__parent=self.owner),
                 customer_id=c['id'],
                 due_date__lt=self.today,
                 status='final',
-                # Simplified: assume any invoice with a customer is on credit
             ).count()
             
             if overdue_invoices > 0 or c['current_balance'] > 0:
@@ -293,7 +308,7 @@ class SmartDashboard:
         
         # Get products with stock but no recent sales
         products_with_stock = Product.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             stock__gt=0
         ).values('id', 'name', 'stock', 'price')
         
@@ -301,7 +316,7 @@ class SmartDashboard:
         for p in products_with_stock:
             # Check if sold in last 60 days
             recent_sales = SalesInvoiceItem.objects.filter(
-                sales_invoice__created_by=self.user,
+                Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
                 product_id=p['id'],
                 sales_invoice__invoice_date__gte=sixty_days_ago,
                 sales_invoice__status='final'
@@ -328,13 +343,13 @@ class SmartDashboard:
         thirty_days_ago = self.today - timedelta(days=30)
         
         total_sales = SalesInvoice.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             invoice_date__gte=thirty_days_ago,
             status='final'
         ).aggregate(total=Sum('total_amount'))['total'] or 0
         
         total_purchases = PurchaseBill.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             bill_date__gte=thirty_days_ago
         ).aggregate(total=Sum('total_amount'))['total'] or 0
         
@@ -369,7 +384,7 @@ class SmartDashboard:
         thirty_days_ago = self.today - timedelta(days=30)
         
         top_products = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=self.user,
+            Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
             sales_invoice__invoice_date__gte=thirty_days_ago,
             sales_invoice__status='final'
         ).values('product__name', 'product__id').annotate(
@@ -399,7 +414,7 @@ class SmartDashboard:
         
         # Get all products with stock
         products_with_stock = list(Product.objects.filter(
-            created_by=self.user,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             stock__gt=10  # Only consider if decent stock
         ).order_by('-stock')[:10])
 
@@ -407,7 +422,7 @@ class SmartDashboard:
         sales_by_product = {
             row['product_id']: row['total'] or 0
             for row in SalesInvoiceItem.objects.filter(
-                sales_invoice__created_by=self.user,
+                Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
                 product_id__in=product_ids,
                 sales_invoice__invoice_date__gte=thirty_days_ago,
                 sales_invoice__status='final'
@@ -435,7 +450,7 @@ class SmartDashboard:
     def _get_margin_analysis(self):
         """Analyze profit margins by product"""
         products = Product.objects.filter(
-            created_by=self.user
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner)
         ).values('id', 'name', 'price', 'sale_price')[:10]
         
         margins = []
@@ -493,16 +508,16 @@ class SmartDashboard:
             fy_start = date(self.today.year - 1, 4, 1)
         
         invoices_total = SalesInvoice.objects.filter(
-            created_by=self.tenant,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             invoice_date__gte=fy_start,
             status='final'
-        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
 
         from billing.models_returns import CreditNote
         returns_total = CreditNote.objects.filter(
-            created_by=self.tenant,
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
             date__gte=fy_start
-        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
 
         return float(invoices_total - returns_total)
     
@@ -540,14 +555,14 @@ class SmartDashboard:
         """Total GST collected from sales this month"""
         month_start = date(self.today.year, self.today.month, 1)
         
-        items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=self.user,
+        sales_items = SalesInvoiceItem.objects.filter(
+            Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
             sales_invoice__invoice_date__gte=month_start,
             sales_invoice__status='final'
         )
         
         total_gst = Decimal('0')
-        for item in items:
+        for item in sales_items:
             taxable = Decimal(str(item.quantity)) * Decimal(str(item.price))
             discount = (taxable * Decimal(str(item.discount or 0))) / 100
             taxable -= discount
@@ -560,13 +575,13 @@ class SmartDashboard:
         """Total GST paid on purchases this month"""
         month_start = date(self.today.year, self.today.month, 1)
         
-        items = PurchaseBillItem.objects.filter(
-            purchase_bill__created_by=self.user,
+        purchase_items = PurchaseBillItem.objects.filter(
+            Q(purchase_bill__created_by=self.owner) | Q(purchase_bill__created_by__parent=self.owner),
             purchase_bill__bill_date__gte=month_start
         )
         
         total_gst = Decimal('0')
-        for item in items:
+        for item in purchase_items:
             taxable = Decimal(str(item.quantity)) * Decimal(str(item.price))
             discount = (taxable * Decimal(str(item.discount or 0))) / 100
             taxable -= discount

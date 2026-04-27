@@ -275,7 +275,9 @@ def sales_summary_analytics(request):
     
     logger.info(f"Sales Analytics Result - count: {total_invoices}, total: {total_revenue}")
 
-    now = timezone.now()
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    now = timezone.now().astimezone(ist)
     this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     this_month_qs = base_qs.filter(
         invoice_date__gte=this_month_start.date(),

@@ -20,7 +20,11 @@ class SmartDashboard:
     def __init__(self, user):
         self.user = user
         self.owner = getattr(user, 'active_tenant', user)
-        self.today = timezone.localdate()
+        # Explicitly use IST for "Today" calculation
+        from django.utils import timezone
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        self.today = timezone.now().astimezone(ist).date()
         self.yesterday = self.today - timedelta(days=1)
     
     # ═══════════════════════════════════════════════════════════════

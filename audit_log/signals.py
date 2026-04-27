@@ -64,7 +64,11 @@ def audit_log_save(sender, instance, created, **kwargs):
     except:
         changes = {}
 
+    if request and request.path.startswith('/admin/'):
+        return
+
     AuditLog.objects.create(
+        tenant=getattr(user, 'active_tenant', None) if user and getattr(user, 'is_authenticated', False) else None,
         user=user if user and getattr(user, 'is_authenticated', False) else None,
         user_email=getattr(user, 'email', 'system') if user and getattr(user, 'is_authenticated', False) else 'system',
         action=action,
@@ -83,7 +87,11 @@ def audit_log_delete(sender, instance, **kwargs):
     user = get_current_user()
     request = get_current_request()
 
+    if request and request.path.startswith('/admin/'):
+        return
+
     AuditLog.objects.create(
+        tenant=getattr(user, 'active_tenant', None) if user and getattr(user, 'is_authenticated', False) else None,
         user=user if user and getattr(user, 'is_authenticated', False) else None,
         user_email=getattr(user, 'email', 'system') if user and getattr(user, 'is_authenticated', False) else 'system',
         action='DELETE',

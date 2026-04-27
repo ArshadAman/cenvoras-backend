@@ -64,7 +64,7 @@ def _forgot_otp_key(email: str) -> str:
     return f"auth:forgot:otp:{_normalize_email(email)}"
 
 
-def _send_otp_email(email: str, otp: str, subject: str, intro: str) -> None:
+def _send_otp_email(email: str, otp: str, subject: str, intro: str, user_id=None) -> None:
     body = (
         f"Hello,\n\n"
         f"{intro}\n\n"
@@ -79,6 +79,7 @@ def _send_otp_email(email: str, otp: str, subject: str, intro: str) -> None:
         message=body,
         recipient_list=[email],
         force_cenvora_branding=True,
+        user_id=user_id,
     )
 
 # Create your views here.
@@ -252,6 +253,28 @@ def quick_signup_view(request):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            from audit_log.models import AuditLog
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            email = request.data.get('email')
+            user = User.objects.filter(email=email).first()
+            if user:
+                from audit_log.signals import get_client_ip
+                AuditLog.objects.create(
+                    tenant=user.active_tenant,
+                    user=user,
+                    user_email=user.email,
+                    action='LOGIN',
+                    model_name='User',
+                    object_id=str(user.id),
+                    object_repr=str(user),
+                    ip_address=get_client_ip(request)
+                )
+        return response
 
 @swagger_auto_schema(
     method='get',
@@ -610,6 +633,7 @@ def password_reset_request_view(request):
             otp,
             subject='Cenvora password reset OTP',
             intro='Use the OTP below to reset your Cenvora account password.',
+            user_id=str(user.id),
         )
         
         return Response({'message': 'Password reset OTP sent.'})

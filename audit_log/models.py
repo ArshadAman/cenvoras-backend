@@ -10,9 +10,19 @@ class AuditLog(models.Model):
         ('DELETE', _('Delete')),
         ('LOGIN', _('Login')),
         ('LOGOUT', _('Logout')),
+        ('EMAIL', _('Email Sent')),
+        ('BACKUP', _('Backup')),
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tenant_audit_logs',
+        help_text="The account owner this log belongs to"
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, 
         on_delete=models.SET_NULL, 

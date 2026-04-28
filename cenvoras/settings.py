@@ -69,6 +69,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'audit_log.middleware.AuditMiddleware',
+    'users.middleware.ManagerPermissionMiddleware',
 ]
 
 # OWASP Security Hardening

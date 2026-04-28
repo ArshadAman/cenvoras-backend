@@ -3,7 +3,7 @@ from .models import User
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 from datetime import timedelta
-from subscription.services import get_tenant_plan, get_effective_plan_code, get_effective_limit
+from subscription.services import get_tenant_plan, get_effective_plan_code, get_effective_limit, is_vip_user
 
 class QuickSignupSerializer(serializers.ModelSerializer):
     """Minimal friction signup - only essential fields"""
@@ -102,6 +102,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return obj.can_generate_gst_invoice
         
     def get_plan_name(self, obj):
+        if is_vip_user(obj):
+            return "Business"
         plan = get_tenant_plan(obj)
         if plan:
             return plan.name

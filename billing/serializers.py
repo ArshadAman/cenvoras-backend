@@ -78,17 +78,21 @@ def normalize_indian_state_choice(value):
 def _rebuild_sales_invoice_ledger(invoice_id):
     from ledger.models import GeneralLedgerEntry
     from ledger.services import AccountingService
-    sales_invoice = SalesInvoice.objects.select_related('customer').get(pk=invoice_id)
-    GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice).delete()
-    AccountingService.create_sales_invoice_entries(sales_invoice)
+    from django.db import transaction as db_transaction
+    with db_transaction.atomic():
+        sales_invoice = SalesInvoice.objects.select_related('customer').get(pk=invoice_id)
+        GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice).delete()
+        AccountingService.create_sales_invoice_entries(sales_invoice)
 
 
 def _rebuild_purchase_bill_ledger(bill_id):
     from ledger.models import GeneralLedgerEntry
     from ledger.services import AccountingService
-    purchase_bill = PurchaseBill.objects.select_related('vendor').get(pk=bill_id)
-    GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill).delete()
-    AccountingService.create_purchase_bill_entries(purchase_bill)
+    from django.db import transaction as db_transaction
+    with db_transaction.atomic():
+        purchase_bill = PurchaseBill.objects.select_related('vendor').get(pk=bill_id)
+        GeneralLedgerEntry.objects.filter(purchase_bill=purchase_bill).delete()
+        AccountingService.create_purchase_bill_entries(purchase_bill)
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):

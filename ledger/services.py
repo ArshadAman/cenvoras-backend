@@ -150,9 +150,24 @@ class AccountingService:
         # Credit/Debit: Rounding Off (handle the difference to keep Balance Sheet balanced)
         round_off = getattr(sales_invoice, 'round_off', Decimal('0.00')) or Decimal('0.00')
         if round_off != 0:
+            # Ensure the rounding_off account exists (may be missing for older users)
+            rounding_off_account = accounts.get('rounding_off')
+            if rounding_off_account is None:
+                rounding_off_account, _ = Account.objects.get_or_create(
+                    code='4200',
+                    created_by=user,
+                    defaults={
+                        'name': 'Rounding Off',
+                        'account_type': AccountType.REVENUE,
+                        'description': 'Default Revenue account',
+                    }
+                )
+                accounts['rounding_off'] = rounding_off_account
+                accounts['4200'] = rounding_off_account
+
             GeneralLedgerEntry.objects.create(
                 date=sales_invoice.invoice_date,
-                account=accounts['rounding_off'],
+                account=rounding_off_account,
                 debit=abs(round_off) if round_off < 0 else 0,
                 credit=round_off if round_off > 0 else 0,
                 description=f"Rounding off adjustment for Invoice {sales_invoice.invoice_number}",
@@ -237,7 +252,35 @@ class AccountingService:
             purchase_bill=purchase_bill,
             created_by=user
         )
-        
+
+        # Debit/Credit: Rounding Off adjustment for purchase bill
+        round_off = getattr(purchase_bill, 'round_off', Decimal('0.00')) or Decimal('0.00')
+        if round_off != 0:
+            rounding_off_account = accounts.get('rounding_off')
+            if rounding_off_account is None:
+                rounding_off_account, _ = Account.objects.get_or_create(
+                    code='4200',
+                    created_by=user,
+                    defaults={
+                        'name': 'Rounding Off',
+                        'account_type': AccountType.REVENUE,
+                        'description': 'Default Revenue account',
+                    }
+                )
+                accounts['rounding_off'] = rounding_off_account
+                accounts['4200'] = rounding_off_account
+
+            GeneralLedgerEntry.objects.create(
+                date=purchase_bill.bill_date,
+                account=rounding_off_account,
+                debit=round_off if round_off > 0 else 0,
+                credit=abs(round_off) if round_off < 0 else 0,
+                description=f"Rounding off adjustment for Bill {purchase_bill.bill_number}",
+                reference=purchase_bill.bill_number,
+                purchase_bill=purchase_bill,
+                created_by=user
+            )
+
         return True
     
     @classmethod

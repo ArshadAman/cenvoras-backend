@@ -921,3 +921,64 @@ def create_manual_journal_entry(request):
     except Exception as e:
         logger.error(f"Error creating manual journal entry: {str(e)}")
         return Response({'success': False, 'error': 'Internal server error while creating manual entries.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def repair_round_off_entries(request):
+    """
+    Rebuild ledger entries for all invoices/bills that have a round_off value
+    but are missing the corresponding Rounding Off journal entry.
+    This fixes the balance sheet imbalance caused by missing round-off entries.
+    """
+    from billing.models import SalesInvoice, PurchaseBill
+    from django.db import transaction as db_transaction
+    from decimal import Decimal
+
+    user = request.user
+    repaired_invoices = []
+    repaired_bills = []
+    errors = []
+
+    # Find sales invoices with round_off != 0
+    invoices = SalesInvoice.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    for invoice in invoices:
+        # Check if a rounding_off entry exists for this invoice
+        has_round_off_entry = GeneralLedgerEntry.objects.filter(
+            sales_invoice=invoice,
+            created_by=user,
+            account__code='4200',
+        ).exists()
+        if not has_round_off_entry:
+            try:
+                with db_transaction.atomic():
+                    GeneralLedgerEntry.objects.filter(sales_invoice=invoice).delete()
+                    AccountingService.create_sales_invoice_entries(invoice)
+                repaired_invoices.append(invoice.invoice_number)
+            except Exception as e:
+                errors.append(f"Invoice {invoice.invoice_number}: {str(e)}")
+
+    # Find purchase bills with round_off != 0
+    bills = PurchaseBill.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    for bill in bills:
+        has_round_off_entry = GeneralLedgerEntry.objects.filter(
+            purchase_bill=bill,
+            created_by=user,
+            account__code='4200',
+        ).exists()
+        if not has_round_off_entry:
+            try:
+                with db_transaction.atomic():
+                    GeneralLedgerEntry.objects.filter(purchase_bill=bill).delete()
+                    AccountingService.create_purchase_bill_entries(bill)
+                repaired_bills.append(bill.bill_number)
+            except Exception as e:
+                errors.append(f"Bill {bill.bill_number}: {str(e)}")
+
+    return Response({
+        'success': True,
+        'repaired_invoices': repaired_invoices,
+        'repaired_bills': repaired_bills,
+        'errors': errors,
+        'message': f"Repaired {len(repaired_invoices)} invoice(s) and {len(repaired_bills)} bill(s).",
+    })

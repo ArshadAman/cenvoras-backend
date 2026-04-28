@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 import uuid
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -11,6 +12,21 @@ from rest_framework import status
 
 from .models import BillingCycle, Plan, SubscriptionPaymentOrder, SubscriptionStatus, TenantSubscription
 from .services import get_entitlements, get_tenant
+
+
+CACHE_TTL_LONG = 60 * 60 * 24
+
+
+def global_cache_key(*parts) -> str:
+	return ':'.join(str(part) for part in parts)
+
+
+def cache_get_or_set(key: str, timeout: int, factory):
+	value = cache.get(key)
+	if value is None:
+		value = factory()
+		cache.set(key, value, timeout)
+	return value
 
 
 def _normalize_cycle(cycle: str | None) -> str:
@@ -108,6 +124,8 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 			if credit < (new_plan_full_price * Decimal('0.5')):
 				# Force a re-calculation or at least use the full price if something is wrong
 				amount = max(Decimal('0.00'), new_plan_full_price - credit)
+
+	base_price_before_discount = new_plan_full_price
 
 	summary = ""
 	if payment_required:
@@ -253,7 +271,8 @@ def plan_catalog(request):
 				BillingCycle.QUARTERLY: _days_for_cycle(BillingCycle.QUARTERLY),
 				BillingCycle.YEARLY: _days_for_cycle(BillingCycle.YEARLY),
 			},
-		})
+		} for plan in Plan.objects.filter(is_active=True).order_by('monthly_price')
+	])
 
 	return Response({
 		'success': True,

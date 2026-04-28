@@ -728,7 +728,6 @@ def smart_dashboard(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-@cache_page(60 * 60 * 24)  # Cache ML predictions for 24 hours
 def ml_predictions(request):
     """
     ML Predictions API - Sales Forecasting and Restock Predictions
@@ -744,6 +743,15 @@ def ml_predictions(request):
     - Urgency levels (critical/high/medium/low)
     """
     from .ml_predictions import MLPredictions
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    cache_key = tenant_cache_key('analytics', tenant.id, 'ml_predictions')
     
-    ml = MLPredictions(request.user)
-    return Response(ml.get_all_predictions())
+    if request.query_params.get('refresh') == 'true':
+        from django.core.cache import cache
+        cache.delete(cache_key)
+
+    def build_predictions():
+        ml = MLPredictions(request.user)
+        return ml.get_all_predictions()
+
+    return Response(cache_get_or_set(cache_key, 60 * 60 * 24, build_predictions))

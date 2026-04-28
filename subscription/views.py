@@ -368,7 +368,6 @@ def schedule_plan_change(request):
 		return Response({'success': False, 'error': 'No active cycle available. Use payment to activate a plan now.'}, status=status.HTTP_400_BAD_REQUEST)
 
 	target_plan = Plan.objects.filter(code=lookup_code, is_active=True).first() if lookup_code != 'free' else None
-	active_until = subscription.current_period_end
 
 	if lookup_code == 'free':
 		return Response({

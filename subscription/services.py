@@ -262,7 +262,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
             'plan': {
                 'code': plan_code,
                 'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else ('Starter' if plan_code == 'starter' else plan_code.title())),
-                'status': getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
+                'status': 'active' if vip else getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
                 'current_period_end': getattr(subscription, 'current_period_end', None),
                 'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
                 'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),

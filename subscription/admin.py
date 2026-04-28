@@ -15,7 +15,7 @@ class PlanAdmin(admin.ModelAdmin):
 class TenantSubscriptionAdmin(admin.ModelAdmin):
     list_display = (
         'tenant',
-        'plan',
+        'display_plan',
         'status',
         'current_period_end',
         'cancel_at_period_end',
@@ -25,6 +25,19 @@ class TenantSubscriptionAdmin(admin.ModelAdmin):
     list_filter = ('status', 'plan', 'cancel_at_period_end')
     search_fields = ('tenant__email', 'tenant__business_name')
     actions = ['clear_scheduled_plan_changes']
+    readonly_fields = ('display_plan_detail',)
+
+    def display_plan(self, obj):
+        from subscription.services import is_vip_user
+        if obj.tenant and is_vip_user(obj.tenant):
+            return "Business (Lifetime VIP)"
+        return obj.plan
+    display_plan.short_description = "Effective Plan"
+    display_plan.admin_order_field = "plan"
+
+    def display_plan_detail(self, obj):
+        return self.display_plan(obj)
+    display_plan_detail.short_description = "Effective Plan (including VIP logic)"
 
     @admin.action(description='Clear scheduled plan changes (pending plan and cancel-at-period-end)')
     def clear_scheduled_plan_changes(self, request, queryset):

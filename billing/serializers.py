@@ -127,7 +127,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         model = PurchaseBillItem
         fields = [
             'product', 'hsn_sac_code', 'unit',
-            'quantity', 'price', 'amount', 'discount', 'tax',
+            'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
             'batch_number', 'expiry_date', 'mrp'
         ]
 
@@ -140,7 +140,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
 
         try:
             uuid_obj = uuid.UUID(str(product_value))
-            product = Product.objects.get(id=uuid_obj)
+            product = Product.objects.get(id=uuid_obj, created_by=user)
             # Update product fields if present in data
             updated = False
             for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
@@ -218,6 +218,19 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'items': 'At least one item is required.'})
         return data
 
+    @staticmethod
+    def _calculate_line_amount(item_data):
+        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
+        price = Decimal(str(item_data.get('price', 0) or 0))
+        discount = Decimal(str(item_data.get('discount', 0) or 0))
+        tax = Decimal(str(item_data.get('tax', 0) or 0))
+
+        base_amount = quantity * price
+        discount_amount = (base_amount * discount) / Decimal('100')
+        taxable_amount = base_amount - discount_amount
+        tax_amount = (taxable_amount * tax) / Decimal('100')
+        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         meta_data = validated_data.pop('meta', None)
@@ -230,7 +243,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         if vendor_name:
             try:
-                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
                 updated = False
                 if vendor_address and not vendor.address:
                     vendor.address = vendor_address
@@ -240,22 +253,33 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                     updated = True
                 if updated:
                     vendor.save()
-            except Customer.DoesNotExist:
-                vendor = Customer.objects.create(
+            except Vendor.DoesNotExist:
+                vendor = Vendor.objects.create(
                     name=vendor_name,
                     address=vendor_address,
                     gstin=vendor_gstin,
                     created_by=user
                 )
-                from .models_sidecar import PartyMeta
-                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
+            validated_data['vendor'] = vendor
+        
+        # Recalculate total amount from items to ensure integrity
+        round_off = validated_data.get('round_off', Decimal('0.00'))
+        recalculated_total = sum(
+            (self._calculate_line_amount(item) for item in items_data),
+            Decimal('0.00')
+        ) + Decimal(str(round_off))
+        validated_data['total_amount'] = recalculated_total
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
         
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
+            item_data['amount'] = self._calculate_line_amount(item_data)
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+
+        # Refresh payment status in case amount_paid was provided
+        purchase_bill.refresh_payment_status(save=True)
 
         transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         return purchase_bill
@@ -271,7 +295,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         if vendor_name:
             try:
-                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
                 updated = False
                 if vendor_address and not vendor.address:
                     vendor.address = vendor_address
@@ -281,15 +305,14 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                     updated = True
                 if updated:
                     vendor.save()
-            except Customer.DoesNotExist:
-                vendor = Customer.objects.create(
+            except Vendor.DoesNotExist:
+                vendor = Vendor.objects.create(
                     name=vendor_name,
                     address=vendor_address,
                     gstin=vendor_gstin,
                     created_by=user
                 )
-                from .models_sidecar import PartyMeta
-                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
+            validated_data['vendor'] = vendor
         
         # Update the purchase bill fields
         for attr, value in validated_data.items():

@@ -160,6 +160,8 @@ def invalidate_subscription_cache(user: User) -> None:
 
 def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
     if is_vip_user(user):
+        if field_name in {'max_team_members', 'max_managers'}:
+            return 5
         return -1
 
     plan = get_tenant_plan(user)
@@ -169,7 +171,11 @@ def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
     value = getattr(plan, field_name, None)
     if value is None and field_name == 'max_team_members':
         value = getattr(plan, 'max_managers', default)
-    return default if value is None else int(value)
+        
+    res = default if value is None else int(value)
+    if res == -1:
+        return 999
+    return res
 
 
 def get_current_usage(user: User) -> dict[str, int]:
@@ -245,8 +251,8 @@ def get_entitlements(user: User) -> dict[str, Any]:
 
         limits = {
             'max_team_members': get_effective_limit(user, 'max_team_members', 0),
-            'max_invoices_per_month': -1,
-            'max_customers': -1,
+            'max_invoices_per_month': get_effective_limit(user, 'max_invoices_per_month', -1),
+            'max_customers': get_effective_limit(user, 'max_customers', -1),
         }
 
         locked_modules = {}

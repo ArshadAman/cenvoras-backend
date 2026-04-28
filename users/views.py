@@ -762,7 +762,7 @@ class TeamViewSet(viewsets.ModelViewSet):
         if reason:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(reason)
-        if current_members >= max_members:
+        if max_members >= 0 and current_members >= max_members:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(f"Your current plan limits you to {max_members} team members. Upgrade for more.")
             

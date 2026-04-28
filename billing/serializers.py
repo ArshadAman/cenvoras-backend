@@ -472,6 +472,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesInvoiceItemSerializer(many=True, required=False)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_details = serializers.SerializerMethodField(read_only=True)
+    tax_type = serializers.SerializerMethodField(read_only=True)
     customer_name = serializers.CharField(required=False, allow_blank=True)  # Name to display, optional for draft
     status = serializers.CharField(required=False, default='final')
     customer_email = serializers.EmailField(write_only=True, required=False)
@@ -488,7 +489,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -504,6 +505,19 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             'gstin': getattr(customer, 'gstin', None),
             'state': getattr(customer, 'state', None),
         }
+
+    def get_tax_type(self, instance):
+        """
+        Returns 'igst' if inter-state, 'cgst_sgst' if intra-state.
+        Logic: compare seller state (created_by.state) vs place_of_supply (or customer state).
+        """
+        seller_state = getattr(instance.created_by, 'state', None)
+        pos = instance.place_of_supply
+        if not pos and instance.customer:
+            pos = getattr(instance.customer, 'state', None)
+        if not seller_state or not pos:
+            return 'cgst_sgst'
+        return 'igst' if seller_state.upper() != pos.upper() else 'cgst_sgst'
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

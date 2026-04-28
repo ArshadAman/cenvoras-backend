@@ -1,7 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from billing.models import SalesInvoice, PurchaseBill
-from .models import ActionLog
+from .models import ActionLog, User
 import json
 
 def get_current_user():
@@ -43,3 +43,20 @@ def log_purchase_bill_change(sender, instance, created, **kwargs):
             "total_amount": float(instance.total_amount)
         }
     )
+
+
+@receiver(post_save, sender=User)
+def sync_vip_subscription(sender, instance, created, update_fields, **kwargs):
+    """
+    When is_lifetime_free changes, invalidate the subscription entitlements cache
+    so the new plan (business or fallback) takes effect immediately.
+    """
+    # Only act when is_lifetime_free was explicitly saved
+    if update_fields is not None and 'is_lifetime_free' not in update_fields:
+        return
+
+    try:
+        from subscription.services import invalidate_subscription_cache
+        invalidate_subscription_cache(instance)
+    except Exception:
+        pass  # Never break a save due to cache issues

@@ -15,7 +15,7 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'gstin', 'state', 'city')
         extra_kwargs = {
             'gstin': {'required': False, 'allow_blank': True},
-            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'state': {'required': True, 'allow_blank': False, 'allow_null': False},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     

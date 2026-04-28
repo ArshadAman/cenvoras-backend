@@ -34,6 +34,7 @@ class AccountingService:
             # Revenue
             ('4001', 'Sales Revenue', AccountType.REVENUE),
             ('4100', 'Service Revenue', AccountType.REVENUE),
+            ('4200', 'Rounding Off', AccountType.REVENUE),
             
             # Expenses
             ('5001', 'Cost of Goods Sold', AccountType.EXPENSE),
@@ -146,6 +147,35 @@ class AccountingService:
                 created_by=user
             )
         
+        # Credit/Debit: Rounding Off (handle the difference to keep Balance Sheet balanced)
+        round_off = getattr(sales_invoice, 'round_off', Decimal('0.00')) or Decimal('0.00')
+        if round_off != 0:
+            # Ensure the rounding_off account exists (may be missing for older users)
+            rounding_off_account = accounts.get('rounding_off')
+            if rounding_off_account is None:
+                rounding_off_account, _ = Account.objects.get_or_create(
+                    code='4200',
+                    created_by=user,
+                    defaults={
+                        'name': 'Rounding Off',
+                        'account_type': AccountType.REVENUE,
+                        'description': 'Default Revenue account',
+                    }
+                )
+                accounts['rounding_off'] = rounding_off_account
+                accounts['4200'] = rounding_off_account
+
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=rounding_off_account,
+                debit=abs(round_off) if round_off < 0 else 0,
+                credit=round_off if round_off > 0 else 0,
+                description=f"Rounding off adjustment for Invoice {sales_invoice.invoice_number}",
+                reference=sales_invoice.invoice_number,
+                sales_invoice=sales_invoice,
+                created_by=user
+            )
+        
         return True
     
     @classmethod
@@ -222,7 +252,35 @@ class AccountingService:
             purchase_bill=purchase_bill,
             created_by=user
         )
-        
+
+        # Debit/Credit: Rounding Off adjustment for purchase bill
+        round_off = getattr(purchase_bill, 'round_off', Decimal('0.00')) or Decimal('0.00')
+        if round_off != 0:
+            rounding_off_account = accounts.get('rounding_off')
+            if rounding_off_account is None:
+                rounding_off_account, _ = Account.objects.get_or_create(
+                    code='4200',
+                    created_by=user,
+                    defaults={
+                        'name': 'Rounding Off',
+                        'account_type': AccountType.REVENUE,
+                        'description': 'Default Revenue account',
+                    }
+                )
+                accounts['rounding_off'] = rounding_off_account
+                accounts['4200'] = rounding_off_account
+
+            GeneralLedgerEntry.objects.create(
+                date=purchase_bill.bill_date,
+                account=rounding_off_account,
+                debit=round_off if round_off > 0 else 0,
+                credit=abs(round_off) if round_off < 0 else 0,
+                description=f"Rounding off adjustment for Bill {purchase_bill.bill_number}",
+                reference=purchase_bill.bill_number,
+                purchase_bill=purchase_bill,
+                created_by=user
+            )
+
         return True
     
     @classmethod
@@ -367,3 +425,46 @@ class AccountingService:
             entries = entries.filter(date__lte=date_to)
         
         return entries
+    @classmethod
+    @transaction.atomic
+    def create_credit_note_entries(cls, credit_note):
+        """Create accounting entries for a Sales Return (Credit Note)"""
+        user = credit_note.created_by
+        accounts = cls.get_or_create_default_accounts(user)
+        description = f"Sales Return from {credit_note.customer.name} - CN {credit_note.credit_note_number}"
+        if credit_note.reason:
+            description += f" ({credit_note.get_reason_display()})"
+        GeneralLedgerEntry.objects.create(
+            date=credit_note.date, account=accounts['sales_revenue'],
+            debit=credit_note.total_amount, credit=0, description=description,
+            reference=credit_note.credit_note_number, credit_note=credit_note,
+            customer=credit_note.customer, created_by=user
+        )
+        GeneralLedgerEntry.objects.create(
+            date=credit_note.date, account=accounts['accounts_receivable'],
+            debit=0, credit=credit_note.total_amount, description=description,
+            reference=credit_note.credit_note_number, credit_note=credit_note,
+            customer=credit_note.customer, created_by=user
+        )
+        return True
+
+    @classmethod
+    @transaction.atomic
+    def create_debit_note_entries(cls, debit_note):
+        """Create accounting entries for a Purchase Return (Debit Note)"""
+        user = debit_note.created_by
+        accounts = cls.get_or_create_default_accounts(user)
+        description = f"Purchase Return to {debit_note.vendor_name} - DN {debit_note.debit_note_number}"
+        if debit_note.reason:
+            description += f" ({debit_note.get_reason_display()})"
+        GeneralLedgerEntry.objects.create(
+            date=debit_note.date, account=accounts['accounts_payable'],
+            debit=debit_note.total_amount, credit=0, description=description,
+            reference=debit_note.debit_note_number, debit_note=debit_note, created_by=user
+        )
+        GeneralLedgerEntry.objects.create(
+            date=debit_note.date, account=accounts['purchases'],
+            debit=0, credit=debit_note.total_amount, description=description,
+            reference=debit_note.debit_note_number, debit_note=debit_note, created_by=user
+        )
+        return True

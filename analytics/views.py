@@ -55,12 +55,30 @@ def sales_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
-    qs = SalesInvoice.objects.filter(created_by=request.user, status='final')
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    from django.db.models import Q
+    qs = SalesInvoice.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    ).filter(status='final')
     if date_from:
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
         qs = qs.filter(invoice_date__lte=date_to)
-    total_sales = qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        
+    total_invoices = qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    
+    # Subtract Returns (Credit Notes)
+    from billing.models_returns import CreditNote
+    returns_qs = CreditNote.objects.filter(
+        Q(created_by=tenant) | Q(created_by__parent=tenant)
+    )
+    if date_from:
+        returns_qs = returns_qs.filter(date__gte=date_from)
+    if date_to:
+        returns_qs = returns_qs.filter(date__lte=date_to)
+    total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+    
+    total_sales = total_invoices - total_returns
 
     items = SalesInvoiceItem.objects.filter(sales_invoice__in=qs)
     sales_by_product = items.values('product__name').annotate(total=Sum('amount')).order_by('-total')
@@ -124,7 +142,8 @@ def purchase_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
-    qs = PurchaseBill.objects.filter(created_by=request.user)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    qs = PurchaseBill.objects.filter(created_by=tenant)
     if date_from:
         qs = qs.filter(bill_date__gte=date_from)
     if date_to:
@@ -191,7 +210,8 @@ def inventory_summary(request):
     Optionally exports the data as CSV.
     """
     export = request.query_params.get('export')
-    products = Product.objects.filter(created_by=request.user)
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    products = Product.objects.filter(created_by=tenant)
     product_list = []
     low_stock = []
     for product in products:
@@ -267,8 +287,9 @@ def gst_summary(request):
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export')
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     # GST collected from sales
-    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=request.user)
+    sales_items = SalesInvoiceItem.objects.filter(sales_invoice__created_by=tenant)
     if date_from:
         sales_items = sales_items.filter(sales_invoice__invoice_date__gte=date_from)
     if date_to:
@@ -276,7 +297,7 @@ def gst_summary(request):
     gst_collected = sales_items.aggregate(total_gst=Sum('tax'))['total_gst'] or 0
 
     # GST paid on purchases
-    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=request.user)
+    purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
     if date_from:
         purchase_items = purchase_items.filter(purchase_bill__bill_date__gte=date_from)
     if date_to:
@@ -348,12 +369,24 @@ def dashboard_summary(request):
         from collections import defaultdict
         from decimal import Decimal
 
+        from django.db.models import Q
         # Sales
-        sales_qs = SalesInvoice.objects.filter(created_by=tenant).exclude(status='draft')
-        total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        sales_qs = SalesInvoice.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        ).exclude(status='draft')
+        total_invoices = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+
+        # Subtract returns
+        from billing.models_returns import CreditNote
+        total_returns = CreditNote.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+        total_sales = total_invoices - total_returns
 
         # Purchases
-        purchase_qs = PurchaseBill.objects.filter(created_by=tenant)
+        purchase_qs = PurchaseBill.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant)
+        )
         total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Inventory
@@ -489,8 +522,9 @@ def gstr1_report(request):
         # Default or Error? For now handle gracefully.
         user_state_code = "" 
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     invoices = SalesInvoice.objects.filter(
-        created_by=request.user,
+        created_by=tenant,
         invoice_date__gte=date_from,
         invoice_date__lte=date_to
     ).prefetch_related('items', 'customer')
@@ -616,8 +650,10 @@ def stock_summary_report(request):
     """
     export = request.query_params.get('export', 'json')
     
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    
     stock_points = StockPoint.objects.filter(
-        product__created_by=request.user,
+        product__created_by=tenant,
         quantity__gt=0
     ).select_related('product', 'batch', 'warehouse').order_by('product__name', 'batch__expiry_date')
     
@@ -731,16 +767,6 @@ def smart_dashboard(request):
 def ml_predictions(request):
     """
     ML Predictions API - Sales Forecasting and Restock Predictions
-    
-    Sales Forecast:
-    - 7-day sales prediction using Linear Regression
-    - Trend analysis (growing/stable/declining)
-    - Confidence level based on data variance
-    
-    Restock Predictions:
-    - Days until stockout for each product
-    - Suggested reorder dates
-    - Urgency levels (critical/high/medium/low)
     """
     from .ml_predictions import MLPredictions
     tenant = getattr(request.user, 'active_tenant', request.user)

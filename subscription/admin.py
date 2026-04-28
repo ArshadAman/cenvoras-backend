@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Feature, Plan, SubscriptionPaymentOrder, TenantSubscription
+from .models import Feature, Plan, TenantSubscription, SubscriptionPayment
 
 @admin.register(Feature)
 class FeatureAdmin(admin.ModelAdmin):
@@ -8,7 +8,7 @@ class FeatureAdmin(admin.ModelAdmin):
 
 @admin.register(Plan)
 class PlanAdmin(admin.ModelAdmin):
-    list_display = ('name', 'code', 'monthly_price', 'quarterly_price', 'yearly_price', 'max_managers', 'is_active')
+    list_display = ('name', 'code', 'monthly_price', 'max_managers', 'is_active')
     filter_horizontal = ('features',)
 
 @admin.register(TenantSubscription)
@@ -24,10 +24,20 @@ class TenantSubscriptionAdmin(admin.ModelAdmin):
     )
     list_filter = ('status', 'plan', 'cancel_at_period_end')
     search_fields = ('tenant__email', 'tenant__business_name')
+    actions = ['clear_scheduled_plan_changes']
+
+    @admin.action(description='Clear scheduled plan changes (pending plan and cancel-at-period-end)')
+    def clear_scheduled_plan_changes(self, request, queryset):
+        updated = queryset.update(
+            pending_plan=None,
+            pending_plan_starts_at=None,
+            cancel_at_period_end=False,
+        )
+        self.message_user(request, f'Cleared scheduled plan state for {updated} subscription(s).')
 
 
-@admin.register(SubscriptionPaymentOrder)
-class SubscriptionPaymentOrderAdmin(admin.ModelAdmin):
-    list_display = ('order_id', 'tenant', 'target_plan', 'billing_cycle', 'duration_days', 'amount', 'status', 'created_at', 'paid_at')
-    list_filter = ('status', 'target_plan', 'billing_cycle')
-    search_fields = ('order_id', 'tenant__email', 'tenant__business_name')
+@admin.register(SubscriptionPayment)
+class SubscriptionPaymentAdmin(admin.ModelAdmin):
+    list_display = ('tenant', 'plan', 'amount', 'currency', 'status', 'order_id', 'created_at')
+    list_filter = ('status', 'plan', 'provider')
+    search_fields = ('tenant__email', 'tenant__business_name', 'order_id', 'cf_order_id', 'cf_payment_id')

@@ -83,7 +83,7 @@ def create_default_plans_and_migrate(apps, schema_editor):
     for user in User.objects.filter(parent__isnull=True): # Only create subs for Admins/Tenants
         # Safely determine the intended plan based on legacy tier or default to starter
         legacy_tier = getattr(user, 'subscription_tier', 'FREE')
-        matched_plan = tier_mapping.get(legacy_tier, free)
+        matched_plan = tier_mapping.get(legacy_tier, starter)
         
         # Safely determine the status
         legacy_status = getattr(user, 'subscription_status', 'trial')
@@ -113,3 +113,4 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunPython(create_default_plans_and_migrate, reverse_migration),
     ]
+

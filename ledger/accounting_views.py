@@ -589,7 +589,9 @@ def get_ledger_stats(request):
     
     # Base queries
     from .models import GeneralLedgerEntry
-    entries = GeneralLedgerEntry.objects.filter(created_by=user)
+    entries = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if date_from_str:
         entries = entries.filter(date__gte=date_from_str)
     if date_to_str:
@@ -598,13 +600,43 @@ def get_ledger_stats(request):
         entries = entries.filter(customer_id=customer_id)
         
     # Stats calculation
-    total_payments = entries.filter(account__account_type='asset', credit__gt=0).aggregate(total=Sum('credit'))['total'] or 0
-    total_invoices = entries.filter(account__account_type='asset', debit__gt=0).aggregate(total=Sum('debit'))['total'] or 0
+    # Stats calculation - accurately distinguishing between sales, returns, and payments
+    from billing.models_returns import CreditNote, DebitNote
+    
+    # Total Invoices (Sales volume)
+    total_invoices = entries.filter(
+        account__account_type='asset', 
+        debit__gt=0, 
+        sales_invoice__isnull=False
+    ).aggregate(total=Sum('debit'))['total'] or 0
+    
+    # Total Payments (Money received from customers)
+    total_payments = entries.filter(
+        account__account_type='asset', 
+        credit__gt=0, 
+        sales_invoice__isnull=True # Payments usually don't link to a single invoice if they are bulk
+    ).aggregate(total=Sum('credit'))['total'] or 0
+    
+    # Note: If payments ARE linked to invoices, we might need a better check.
+    # But usually, Returns have a 'credit_note' link.
+    
+    total_returns = entries.filter(
+        account__account_type='asset',
+        credit__gt=0,
+        credit_note__isnull=False
+    ).aggregate(total=Sum('credit'))['total'] or 0
+    
+    # Adjust total_invoices for net sales if desired, or keep separate. 
+    # Usually, dashboard wants "Net Sales".
+    net_sales = float(total_invoices) - float(total_returns)
+    
     net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
     
     # Customer specific logic
     from billing.models import Customer, SalesInvoice, BillPaymentStatus
-    customers_query = Customer.objects.filter(created_by=user)
+    customers_query = Customer.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if customer_id:
         customers_query = customers_query.filter(id=customer_id)
         
@@ -613,7 +645,7 @@ def get_ledger_stats(request):
 
     # Overdue invoice stats
     overdue_query = SalesInvoice.objects.filter(
-        created_by=user,
+        Q(created_by=user) | Q(created_by__parent=user),
         due_date__lt=timezone.now().date(),
         payment_status__in=[BillPaymentStatus.PENDING, BillPaymentStatus.PARTIAL_PAID]
     )
@@ -626,7 +658,9 @@ def get_ledger_stats(request):
     )
 
     # Reconciliation stats: compare customer balance with invoice-level outstanding
-    invoice_outstanding = SalesInvoice.objects.filter(created_by=user)
+    invoice_outstanding = SalesInvoice.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user)
+    )
     if customer_id:
         invoice_outstanding = invoice_outstanding.filter(customer_id=customer_id)
 
@@ -639,17 +673,24 @@ def get_ledger_stats(request):
     
     # Recent transactions (last 30 days)
     thirty_days_ago = timezone.now().date() - timedelta(days=30)
-    recent_count = GeneralLedgerEntry.objects.filter(created_by=user, date__gte=thirty_days_ago).count()
+    recent_count = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user),
+        date__gte=thirty_days_ago
+    ).count()
     
     # Average and Largest
-    payment_stats = GeneralLedgerEntry.objects.filter(created_by=user, account__account_type='asset', credit__gt=0).aggregate(
+    payment_stats = GeneralLedgerEntry.objects.filter(
+        Q(created_by=user) | Q(created_by__parent=user),
+        account__account_type='asset', 
+        credit__gt=0
+    ).aggregate(
         avg=Avg('credit'),
         max=Max('credit')
     )
     
     return Response({
         'total_payments': float(total_payments),
-        'total_invoices': float(total_invoices),
+        'total_invoices': float(net_sales), # Return Net Sales for the dashboard
         'net_balance': float(net_balance),
         'total_customers': total_customers,
         'recent_transactions': recent_count,
@@ -880,3 +921,64 @@ def create_manual_journal_entry(request):
     except Exception as e:
         logger.error(f"Error creating manual journal entry: {str(e)}")
         return Response({'success': False, 'error': 'Internal server error while creating manual entries.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def repair_round_off_entries(request):
+    """
+    Rebuild ledger entries for all invoices/bills that have a round_off value
+    but are missing the corresponding Rounding Off journal entry.
+    This fixes the balance sheet imbalance caused by missing round-off entries.
+    """
+    from billing.models import SalesInvoice, PurchaseBill
+    from django.db import transaction as db_transaction
+    from decimal import Decimal
+
+    user = request.user
+    repaired_invoices = []
+    repaired_bills = []
+    errors = []
+
+    # Find sales invoices with round_off != 0
+    invoices = SalesInvoice.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    for invoice in invoices:
+        # Check if a rounding_off entry exists for this invoice
+        has_round_off_entry = GeneralLedgerEntry.objects.filter(
+            sales_invoice=invoice,
+            created_by=user,
+            account__code='4200',
+        ).exists()
+        if not has_round_off_entry:
+            try:
+                with db_transaction.atomic():
+                    GeneralLedgerEntry.objects.filter(sales_invoice=invoice).delete()
+                    AccountingService.create_sales_invoice_entries(invoice)
+                repaired_invoices.append(invoice.invoice_number)
+            except Exception as e:
+                errors.append(f"Invoice {invoice.invoice_number}: {str(e)}")
+
+    # Find purchase bills with round_off != 0
+    bills = PurchaseBill.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    for bill in bills:
+        has_round_off_entry = GeneralLedgerEntry.objects.filter(
+            purchase_bill=bill,
+            created_by=user,
+            account__code='4200',
+        ).exists()
+        if not has_round_off_entry:
+            try:
+                with db_transaction.atomic():
+                    GeneralLedgerEntry.objects.filter(purchase_bill=bill).delete()
+                    AccountingService.create_purchase_bill_entries(bill)
+                repaired_bills.append(bill.bill_number)
+            except Exception as e:
+                errors.append(f"Bill {bill.bill_number}: {str(e)}")
+
+    return Response({
+        'success': True,
+        'repaired_invoices': repaired_invoices,
+        'repaired_bills': repaired_bills,
+        'errors': errors,
+        'message': f"Repaired {len(repaired_invoices)} invoice(s) and {len(repaired_bills)} bill(s).",
+    })

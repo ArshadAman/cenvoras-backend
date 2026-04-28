@@ -239,11 +239,28 @@ def _open_circuit(now):
 
 
 @shared_task
-def send_async_email(subject, message, recipient_list, force_cenvora_branding=False):
+def send_async_email(subject, message, recipient_list, force_cenvora_branding=False, user_id=None):
     """
     Asynchronously sends an email via AhaSend using Cenvora branding.
     """
     try:
+        from django.contrib.auth import get_user_model
+        from audit_log.models import AuditLog
+        
+        user = None
+        if user_id:
+            user = get_user_model().objects.filter(id=user_id).first()
+            
+        if user:
+            AuditLog.objects.create(
+                tenant=user.active_tenant,
+                user=user,
+                user_email=user.email,
+                action='EMAIL',
+                model_name='Email',
+                object_repr=f"Email to {', '.join(recipient_list)}: {subject}",
+                changes={'subject': subject, 'recipients': recipient_list}
+            )
         api_key = getattr(settings, 'TRANSACTIONAL_EMAIL_API_KEY', '')
         base_url = (getattr(settings, 'TRANSACTIONAL_EMAIL_API_URL', '') or 'https://api.ahasend.com/v1').rstrip('/')
         send_endpoint = getattr(settings, 'TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')

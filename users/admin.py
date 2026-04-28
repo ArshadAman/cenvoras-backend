@@ -20,14 +20,22 @@ def trigger_database_backup(modeladmin, request, queryset):
 
 @admin.action(description="Grant VIP (lifetime free) access")
 def grant_vip_access(modeladmin, request, queryset):
-	updated = queryset.update(is_lifetime_free=True)
-	messages.success(request, f"Granted VIP access to {updated} user(s).")
+	from subscription.services import invalidate_subscription_cache
+	for user in queryset:
+		user.is_lifetime_free = True
+		user.save(update_fields=['is_lifetime_free'])
+		invalidate_subscription_cache(user)
+	messages.success(request, f"Granted VIP (Business plan) access to {queryset.count()} user(s).")
 
 
 @admin.action(description="Revoke VIP (lifetime free) access")
 def revoke_vip_access(modeladmin, request, queryset):
-	updated = queryset.update(is_lifetime_free=False)
-	messages.success(request, f"Revoked VIP access for {updated} user(s).")
+	from subscription.services import invalidate_subscription_cache
+	for user in queryset:
+		user.is_lifetime_free = False
+		user.save(update_fields=['is_lifetime_free'])
+		invalidate_subscription_cache(user)
+	messages.success(request, f"Revoked VIP access for {queryset.count()} user(s). They now use their active plan or free tier.")
 
 
 @admin.register(User)

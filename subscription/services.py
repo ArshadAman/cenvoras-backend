@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from decimal import Decimal
+from datetime import timedelta
 
 from django.db.models import Count
 from django.utils import timezone
@@ -16,7 +16,6 @@ from cenvoras.cache_utils import (
 
 from billing.models import Customer, SalesInvoice
 from users.models import User
-from .models import BillingCycle
 
 PLAN_CODE_ALIASES = {
     'starter': 'free',
@@ -139,19 +138,18 @@ def get_effective_plan_code(user: User) -> str:
         return 'business'
 
     tenant = get_tenant(user)
-    subscription = get_tenant_subscription(user)
-    plan = getattr(subscription, 'plan', None) if subscription else None
-    if plan:
-        plan_code = normalize_plan_code(plan.code)
-        if plan_code != 'free' and getattr(subscription, 'status', None) == 'active' and getattr(subscription, 'is_valid', True):
-            return plan_code
+    if _is_legacy_trial_active(tenant):
+        return 'starter'
 
-    # Product requirement: 14-day trial unlocks Pro-level features only.
-    if getattr(tenant, 'is_trial_active', False):
-        return 'pro'
-
+    plan = get_tenant_plan(user)
     if plan:
         return normalize_plan_code(plan.code)
+
+    if not _is_legacy_trial_active(tenant):
+        tenant_status = (getattr(tenant, 'subscription_status', '') or '').lower()
+        if tenant_status != 'active':
+            return 'free'
+
     return normalize_plan_code(getattr(tenant, 'subscription_tier', 'FREE'))
 
 
@@ -236,15 +234,20 @@ def can_auto_create_inventory_product(user: User) -> bool:
 
 def get_entitlements(user: User) -> dict[str, Any]:
     tenant = get_tenant(user)
-    vip = is_vip_user(user)
-    usage = get_current_usage(user)
-    subscription = get_tenant_subscription(user)
+    cache_key = tenant_cache_key('subscription', tenant.id, 'entitlements')
 
-    limits = {
-        'max_team_members': get_effective_limit(user, 'max_team_members', 0),
-        'max_invoices_per_month': -1,
-        'max_customers': -1,
-    }
+    def build_entitlements() -> dict[str, Any]:
+        subscription = get_active_tenant_subscription(user)
+        plan = subscription.plan if subscription else None
+        plan_code = get_effective_plan_code(user)
+        vip = is_vip_user(user)
+        usage = get_current_usage(user)
+
+        limits = {
+            'max_team_members': get_effective_limit(user, 'max_team_members', 0),
+            'max_invoices_per_month': -1,
+            'max_customers': -1,
+        }
 
         locked_modules = {}
         for module_name, feature_code in MODULE_FEATURES.items():
@@ -289,48 +292,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
             },
         }
 
-    return {
-        'tenant_id': str(tenant.id),
-        'is_vip': vip,
-        'plan': {
-            'code': plan_code,
-            'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else plan_code.title()),
-            'status': getattr(subscription, 'status', None),
-            'current_billing_cycle': getattr(subscription, 'current_billing_cycle', 'monthly'),
-            'current_period_start': getattr(subscription, 'current_period_start', None),
-            'current_period_end': getattr(subscription, 'current_period_end', None),
-            'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
-            'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
-            'pending_billing_cycle': getattr(subscription, 'pending_billing_cycle', None),
-            'pending_plan_starts_at': getattr(subscription, 'pending_plan_starts_at', None),
-            'prices': {
-                'monthly': str(plan.price_for_cycle(BillingCycle.MONTHLY) if plan else Decimal('0.00')),
-                'quarterly': str(plan.price_for_cycle(BillingCycle.QUARTERLY) if plan else Decimal('0.00')),
-                'yearly': str(plan.price_for_cycle(BillingCycle.YEARLY) if plan else Decimal('0.00')),
-                'original_monthly': str(plan.original_price_for_cycle(BillingCycle.MONTHLY) if plan else Decimal('0.00')),
-                'original_quarterly': str(plan.original_price_for_cycle(BillingCycle.QUARTERLY) if plan else Decimal('0.00')),
-                'original_yearly': str(plan.original_price_for_cycle(BillingCycle.YEARLY) if plan else Decimal('0.00')),
-            },
-        },
-        'limits': limits,
-        'usage': usage,
-        'locked_modules': locked_modules,
-        'can': {
-            'inventory': can_use_feature(user, MODULE_FEATURES['inventory']),
-            'analytics': can_use_feature(user, MODULE_FEATURES['analytics']),
-            'integrations': can_use_feature(user, MODULE_FEATURES['integrations']),
-            'dashboard': can_use_feature(user, MODULE_FEATURES['dashboard']),
-            'reports': can_use_feature(user, MODULE_FEATURES['reports']),
-            'forecast': can_use_feature(user, MODULE_FEATURES['forecast']),
-            'restock': can_use_feature(user, MODULE_FEATURES['restock']),
-            'warehouse': can_use_feature(user, MODULE_FEATURES['warehouse']),
-            'item_pnl': can_use_feature(user, MODULE_FEATURES['item_pnl']),
-            'stock_ledger': can_use_feature(user, MODULE_FEATURES['stock_ledger']),
-            'shortage_management': can_use_feature(user, MODULE_FEATURES['shortage_management']),
-            'priority_support': can_use_feature(user, MODULE_FEATURES['priority_support']),
-            'team': can_use_feature(user, MODULE_FEATURES['team']),
-        },
-    }
+    return cache_get_or_set(cache_key, CACHE_TTL_SHORT, build_entitlements)
 
 
 def get_limit_exceeded_reason(user: User, resource: str) -> str | None:

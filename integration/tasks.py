@@ -41,6 +41,17 @@ def send_async_email_notification(self, user_id, to_email, subject, body, relate
         status='queued',
     )
 
+    from audit_log.models import AuditLog
+    AuditLog.objects.create(
+        tenant=user.active_tenant,
+        user=user,
+        user_email=user.email,
+        action='EMAIL',
+        model_name='Email',
+        object_repr=f"Email to {to_email}: {subject}",
+        changes={'subject': subject, 'recipient': to_email, 'related_model': related_model}
+    )
+
     # Dynamic Sender Configuration
     business_name = user.business_name if user and user.business_name else "Cenvora"
     # Simple sanitization to create businessname@email.cenvora.app

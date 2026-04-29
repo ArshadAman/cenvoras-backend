@@ -213,7 +213,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
             'warehouse', 'journal',
-            'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta'
+            'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
 
@@ -271,11 +271,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             validated_data['vendor'] = vendor
         
         # Recalculate total amount from items to ensure integrity
-        round_off = validated_data.get('round_off', Decimal('0.00'))
         recalculated_total = sum(
             (self._calculate_line_amount(item) for item in items_data),
             Decimal('0.00')
-        ) + Decimal(str(round_off))
+        )
         validated_data['total_amount'] = recalculated_total
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
@@ -335,16 +334,14 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
-            round_off = validated_data.get('round_off', instance.round_off)
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
             instance.total_amount = recalculated_total
-            instance.round_off = round_off
-
+            instance.save(update_fields=['total_amount'])
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount
 
             instance.refresh_payment_status(save=False)
-            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
 
         transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
         

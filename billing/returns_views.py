@@ -38,7 +38,8 @@ class CreditNoteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        validated_data['created_by'] = user
         
         # Auto-generate credit note number if not provided
         last_note = CreditNote.objects.order_by('-created_at').first()
@@ -53,7 +54,6 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             
         credit_note = CreditNote.objects.create(**validated_data)
 
-        user = self.context['request'].user
         target_warehouse = credit_note.warehouse
         if not target_warehouse:
             target_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
@@ -107,7 +107,8 @@ class DebitNoteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        validated_data['created_by'] = user
         
         # Auto-generate debit note number if not provided
         last_note = DebitNote.objects.order_by('-created_at').first()
@@ -122,7 +123,6 @@ class DebitNoteSerializer(serializers.ModelSerializer):
             
         debit_note = DebitNote.objects.create(**validated_data)
 
-        user = self.context['request'].user
         source_warehouse = debit_note.warehouse
         if not source_warehouse:
             source_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
@@ -155,8 +155,9 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def credit_note_list_create(request):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
-        notes = CreditNote.objects.filter(created_by=request.user).order_by('-date')
+        notes = CreditNote.objects.filter(created_by=tenant).order_by('-date')
         serializer = CreditNoteSerializer(notes, many=True)
         return Response(serializer.data)
 
@@ -173,8 +174,9 @@ def credit_note_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def credit_note_detail(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        note = CreditNote.objects.get(pk=pk, created_by=request.user)
+        note = CreditNote.objects.get(pk=pk, created_by=tenant)
     except CreditNote.DoesNotExist:
         return Response({'error': 'Not found'}, status=404)
 
@@ -188,8 +190,9 @@ def credit_note_detail(request, pk):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def debit_note_list_create(request):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
-        notes = DebitNote.objects.filter(created_by=request.user).order_by('-date')
+        notes = DebitNote.objects.filter(created_by=tenant).order_by('-date')
         serializer = DebitNoteSerializer(notes, many=True)
         return Response(serializer.data)
 
@@ -202,8 +205,9 @@ def debit_note_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def debit_note_detail(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        note = DebitNote.objects.get(pk=pk, created_by=request.user)
+        note = DebitNote.objects.get(pk=pk, created_by=tenant)
     except DebitNote.DoesNotExist:
         return Response({'error': 'Not found'}, status=404)
 

@@ -334,6 +334,7 @@ def view_profile(request):
     - Usage statistics
     """
     user = request.user
+    tenant = user.active_tenant
     user.last_login_at = timezone.now()
     user.save(update_fields=['last_login_at'])
     
@@ -343,36 +344,38 @@ def view_profile(request):
     
     if user.email: completed_fields += 1
     if user.phone: completed_fields += 1
-    if user.business_name: completed_fields += 1
+    if tenant.business_name: completed_fields += 1
     if user.first_name: completed_fields += 1
     if user.last_name: completed_fields += 1
-    if user.business_address: completed_fields += 1
-    if user.gstin: completed_fields += 1
+    if tenant.business_address: completed_fields += 1
+    if tenant.gstin: completed_fields += 1
     
     completion_percentage = int((completed_fields / total_fields) * 100)
     
     # Calculate account stats
     days_since_signup = (timezone.now() - user.date_joined).days
     trial_days_remaining = 0
-    if user.trial_ends_at and user.is_trial_active:
-        trial_days_remaining = (user.trial_ends_at - timezone.now()).days
+    if tenant.trial_ends_at and tenant.is_trial_active:
+        trial_days_remaining = (tenant.trial_ends_at - timezone.now()).days
     
     # Get usage stats (you can expand this)
     from billing.models import SalesInvoice, Customer
-    total_invoices = SalesInvoice.objects.filter(created_by=user).count()
-    total_customers = Customer.objects.filter(created_by=user).count()
+    total_invoices = SalesInvoice.objects.filter(created_by=tenant).count()
+    total_customers = Customer.objects.filter(created_by=tenant).count()
     
     serializer = UserProfileSerializer(user)
+    tenant_serializer = UserProfileSerializer(tenant)
     return Response({
         'success': True,
         'profile': serializer.data,
+        'billing_profile': tenant_serializer.data,
         'setup_progress': {
             'signup_completed': True,
             'profile_completed': user.profile_completed,
-            'can_create_invoices': bool(user.business_name),
-            'can_create_gst_invoices': user.can_generate_gst_invoice,
+            'can_create_invoices': bool(tenant.business_name),
+            'can_create_gst_invoices': tenant.can_generate_gst_invoice,
             'completion_percentage': completion_percentage,
-            'next_steps': _get_profile_next_steps(user)
+            'next_steps': _get_profile_next_steps(tenant)
         },
         'account_stats': {
             'days_since_signup': days_since_signup,

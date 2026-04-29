@@ -147,7 +147,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         product_value = data.get('product')
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
         try:
             uuid_obj = uuid.UUID(str(product_value))
@@ -253,7 +253,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         meta_data = validated_data.pop('meta', None)
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         # Smart Feature: Auto-create/sync vendor details
         vendor_name = validated_data.get('vendor_name')
@@ -305,7 +305,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         # Smart Feature: Auto-create/sync vendor details
         vendor_name = validated_data.get('vendor_name', instance.vendor_name)
@@ -586,7 +586,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         Check for Credit Limit violations.
         """
         request = self.context.get('request')
-        user = request.user if request else None
+        user = getattr(request.user, 'active_tenant', request.user) if request else None
         
         # We need to resolve the customer to check their limit
         # Use the customer object resolved in to_internal_value
@@ -947,7 +947,7 @@ class VendorSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         if value:
             # Check for duplicate email within the same user's vendors
-            user = self.context['request'].user
+            user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
             queryset = Vendor.objects.filter(email=value, created_by=user)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
@@ -957,7 +957,7 @@ class VendorSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         vendor = Vendor.objects.create(**validated_data)
         
@@ -1000,7 +1000,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         if value:
             # Check for duplicate email within the same user's customers
-            user = self.context['request'].user
+            user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
             queryset = Customer.objects.filter(email=value, created_by=user)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
@@ -1010,7 +1010,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         customer = super().create(validated_data)
         

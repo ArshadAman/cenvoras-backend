@@ -1,6 +1,20 @@
 from django.http import JsonResponse
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
+
+def _resolve_permission_level(permissions, module):
+    alias_map = {
+        'sales': ['sales'],
+        'purchases': ['purchases', 'purchase'],
+        'inventory': ['inventory'],
+        'financials': ['financials', 'finance', 'financial'],
+    }
+    for key in alias_map.get(module, [module]):
+        value = permissions.get(key)
+        if value in {'none', 'view', 'edit'}:
+            return value
+    return 'none'
+
 class ManagerPermissionMiddleware:
     """
     Enforces granular permissions for users with the 'manager' role globally.
@@ -27,7 +41,7 @@ class ManagerPermissionMiddleware:
             except Exception:
                 pass
 
-        if hasattr(request, 'user') and request.user.is_authenticated and getattr(request.user, 'role', '') == 'manager':
+        if hasattr(request, 'user') and request.user.is_authenticated and getattr(request.user, 'role', '') != 'admin':
             permissions = getattr(request.user, 'permissions', {}) or {}
             if not isinstance(permissions, dict):
                 permissions = {}
@@ -58,7 +72,7 @@ class ManagerPermissionMiddleware:
                 module = 'financials'
             
             if module:
-                perm_level = permissions.get(module, 'none')
+                perm_level = _resolve_permission_level(permissions, module)
                 
                 if perm_level == 'none':
                     return JsonResponse({'success': False, 'error': f"You don't have permission to access the {module} module."}, status=403)

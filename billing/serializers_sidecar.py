@@ -75,7 +75,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         customer_name = validated_data.pop('customer_name', None)
         customer_email = validated_data.pop('customer_email', None) or ''
         customer_phone = validated_data.pop('customer_phone', None) or ''
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
         if not customer_name:
             raise serializers.ValidationError({'customer_name': 'Customer name is required.'})
@@ -95,7 +95,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items')
         customer = self._resolve_customer(validated_data)
         validated_data['customer'] = customer
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         order = SalesOrder.objects.create(**validated_data)
         
@@ -147,7 +147,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         challan = DeliveryChallan.objects.create(**validated_data)
         
@@ -176,7 +176,7 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         indent = PurchaseIndent.objects.create(**validated_data)
         

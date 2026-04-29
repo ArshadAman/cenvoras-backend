@@ -457,6 +457,11 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                         tax=data.get('tax', 0),
                         created_by=user,
                     )
+                    # Mark product as created during invoice flow so stock can be adjusted later
+                    try:
+                        setattr(product, '_created_from_invoice', True)
+                    except Exception:
+                        pass
                     print("DEBUG SalesInvoiceItemSerializer: New product created:", product.id)
                 except Exception as e:
                     error_msg = f'Failed to create product: {str(e)}'
@@ -788,11 +793,38 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             sales_invoice = SalesInvoice.objects.create(**validated_data)
             print("DEBUG SalesInvoiceSerializer: Sales invoice created:", sales_invoice.id)
             
+            # Collect adjustments for products that were created during this invoice
+            negative_adjustments = []
             for i, item_data in enumerate(items_data):
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Creating item {i+1}:", item_data)
-                SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
+                created_item = SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
+
+                # If the product was created during the invoice flow, schedule a negative adjustment
+                product_obj = item_data.get('product')
+                try:
+                    was_created = bool(getattr(product_obj, '_created_from_invoice', False))
+                except Exception:
+                    was_created = False
+
+                if was_created:
+                    # Compute qty in base unit (respect conversion if necessary)
+                    qty = Decimal(str(item_data.get('quantity', 0) or 0)) + Decimal(str(item_data.get('free_quantity', 0) or 0))
+                    try:
+                        # If product has conversion fields, fetch minimal info safely
+                        prod = product_obj
+                        if getattr(prod, 'secondary_unit', None) and item_data.get('unit') == getattr(prod, 'secondary_unit'):
+                            qty = qty * getattr(prod, 'conversion_factor', 1)
+                    except Exception:
+                        pass
+
+                    negative_adjustments.append({
+                        'product_id': created_item.product_id,
+                        'qty': qty,
+                        'batch_id': getattr(created_item.batch, 'id', None),
+                        'warehouse_id': getattr(sales_invoice, 'warehouse_id', None),
+                    })
             
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
@@ -828,6 +860,53 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 )
 
             transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
+
+                # If any products were created on-the-fly during this save, allow stock to go negative
+                if negative_adjustments:
+                    def _apply_negative_adjustments(adjustments):
+                        try:
+                            from django.db.models import F as _F
+                            from inventory.models import StockPoint as _StockPoint, Warehouse as _Warehouse
+                            for adj in adjustments:
+                                pid = adj.get('product_id')
+                                qty = adj.get('qty') or 0
+                                batch_id = adj.get('batch_id')
+                                warehouse_id = adj.get('warehouse_id')
+
+                                # Decrement product stock (allow negative)
+                                Product.objects.filter(pk=pid).update(stock=F('stock') - qty)
+
+                                # Decrement stock point if batch present
+                                if batch_id:
+                                    target_warehouse = None
+                                    if warehouse_id:
+                                        try:
+                                            target_warehouse = _Warehouse.objects.get(pk=warehouse_id)
+                                        except Exception:
+                                            target_warehouse = None
+                                    if not target_warehouse:
+                                        # Fallback to any warehouse for the invoice owner
+                                        try:
+                                            owner = sales_invoice.created_by
+                                            target_warehouse = _Warehouse.objects.filter(created_by=owner, is_active=True).first()
+                                        except Exception:
+                                            target_warehouse = None
+
+                                    if target_warehouse:
+                                        sp = _StockPoint.objects.filter(batch_id=batch_id, warehouse=target_warehouse).first()
+                                        if sp:
+                                            _StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - qty)
+                                        else:
+                                            # Create with negative quantity if not exists
+                                            try:
+                                                _StockPoint.objects.create(batch_id=batch_id, warehouse=target_warehouse, quantity=(0 - qty))
+                                            except Exception:
+                                                pass
+                        except Exception:
+                            pass
+
+                    # Schedule after commit so signals (which clamp) run first; this will push stock negative as required
+                    transaction.on_commit(lambda adj=negative_adjustments: _apply_negative_adjustments(adj))
                 
             return sales_invoice
         except Exception as e:

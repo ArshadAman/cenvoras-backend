@@ -191,7 +191,15 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
             
             data['batch'] = batch
 
-        return super().to_internal_value(data)
+        validated_data = super().to_internal_value(data)
+        if 'batch' in data:
+            validated_data['batch'] = data['batch']
+        
+        # Remove write-only virtual fields that aren't in the model
+        for field in ['batch_number', 'expiry_date', 'mrp']:
+            validated_data.pop(field, None)
+            
+        return validated_data
 
 class PurchaseBillSerializer(serializers.ModelSerializer):
     items = PurchaseBillItemSerializer(many=True)
@@ -276,6 +284,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             item_data['amount'] = self._calculate_line_amount(item_data)
+            # Ensure price is passed as 'price' to the model (serializer uses 'price' field)
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
 
         # Refresh payment status in case amount_paid was provided
@@ -323,6 +332,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         if items_data:
             instance.items.all().delete()
             for item_data in items_data:
+                item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
             round_off = validated_data.get('round_off', instance.round_off)

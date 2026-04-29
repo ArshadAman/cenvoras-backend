@@ -114,6 +114,7 @@ class CustomerField(serializers.Field):
 
 class PurchaseBillItemSerializer(serializers.ModelSerializer):
     product = ProductField()
+    product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
@@ -126,10 +127,20 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseBillItem
         fields = [
-            'product', 'hsn_sac_code', 'unit',
+            'product', 'product_detail', 'hsn_sac_code', 'unit',
             'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
             'batch_number', 'expiry_date', 'mrp'
         ]
+
+    def get_product_detail(self, obj):
+        if not obj.product:
+            return None
+        return {
+            "id": str(obj.product.id),
+            "name": obj.product.name,
+            "hsn_sac_code": obj.product.hsn_sac_code,
+            "unit": obj.product.unit,
+        }
 
     def to_internal_value(self, data):
         print("DEBUG product value:", data.get('product'), type(data.get('product')))

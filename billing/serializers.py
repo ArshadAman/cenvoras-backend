@@ -861,52 +861,52 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
             transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
 
-                # If any products were created on-the-fly during this save, allow stock to go negative
-                if negative_adjustments:
-                    def _apply_negative_adjustments(adjustments):
-                        try:
-                            from django.db.models import F as _F
-                            from inventory.models import StockPoint as _StockPoint, Warehouse as _Warehouse
-                            for adj in adjustments:
-                                pid = adj.get('product_id')
-                                qty = adj.get('qty') or 0
-                                batch_id = adj.get('batch_id')
-                                warehouse_id = adj.get('warehouse_id')
+            # If any products were created on-the-fly during this save, allow stock to go negative
+            if negative_adjustments:
+                def _apply_negative_adjustments(adjustments):
+                    try:
+                        from django.db.models import F as _F
+                        from inventory.models import StockPoint as _StockPoint, Warehouse as _Warehouse
+                        for adj in adjustments:
+                            pid = adj.get('product_id')
+                            qty = adj.get('qty') or 0
+                            batch_id = adj.get('batch_id')
+                            warehouse_id = adj.get('warehouse_id')
 
-                                # Decrement product stock (allow negative)
-                                Product.objects.filter(pk=pid).update(stock=F('stock') - qty)
+                            # Decrement product stock (allow negative)
+                            Product.objects.filter(pk=pid).update(stock=F('stock') - qty)
 
-                                # Decrement stock point if batch present
-                                if batch_id:
-                                    target_warehouse = None
-                                    if warehouse_id:
+                            # Decrement stock point if batch present
+                            if batch_id:
+                                target_warehouse = None
+                                if warehouse_id:
+                                    try:
+                                        target_warehouse = _Warehouse.objects.get(pk=warehouse_id)
+                                    except Exception:
+                                        target_warehouse = None
+                                if not target_warehouse:
+                                    # Fallback to any warehouse for the invoice owner
+                                    try:
+                                        owner = sales_invoice.created_by
+                                        target_warehouse = _Warehouse.objects.filter(created_by=owner, is_active=True).first()
+                                    except Exception:
+                                        target_warehouse = None
+
+                                if target_warehouse:
+                                    sp = _StockPoint.objects.filter(batch_id=batch_id, warehouse=target_warehouse).first()
+                                    if sp:
+                                        _StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - qty)
+                                    else:
+                                        # Create with negative quantity if not exists
                                         try:
-                                            target_warehouse = _Warehouse.objects.get(pk=warehouse_id)
+                                            _StockPoint.objects.create(batch_id=batch_id, warehouse=target_warehouse, quantity=(0 - qty))
                                         except Exception:
-                                            target_warehouse = None
-                                    if not target_warehouse:
-                                        # Fallback to any warehouse for the invoice owner
-                                        try:
-                                            owner = sales_invoice.created_by
-                                            target_warehouse = _Warehouse.objects.filter(created_by=owner, is_active=True).first()
-                                        except Exception:
-                                            target_warehouse = None
+                                            pass
+                    except Exception:
+                        pass
 
-                                    if target_warehouse:
-                                        sp = _StockPoint.objects.filter(batch_id=batch_id, warehouse=target_warehouse).first()
-                                        if sp:
-                                            _StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - qty)
-                                        else:
-                                            # Create with negative quantity if not exists
-                                            try:
-                                                _StockPoint.objects.create(batch_id=batch_id, warehouse=target_warehouse, quantity=(0 - qty))
-                                            except Exception:
-                                                pass
-                        except Exception:
-                            pass
-
-                    # Schedule after commit so signals (which clamp) run first; this will push stock negative as required
-                    transaction.on_commit(lambda adj=negative_adjustments: _apply_negative_adjustments(adj))
+                # Schedule after commit so signals (which clamp) run first; this will push stock negative as required
+                transaction.on_commit(lambda adj=negative_adjustments: _apply_negative_adjustments(adj))
                 
             return sales_invoice
         except Exception as e:

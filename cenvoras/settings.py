@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'integration',
     'reports',
     'audit_log',
+    'references',
     'cloudinary',
     'cloudinary_storage',
     'dbbackup',

@@ -40,6 +40,12 @@ urlpatterns = [
     path('api/reports/', include('reports.urls')),
     path('api/audit/', include('audit_log.urls')),
     path('api/ai/', include('ai_assistant.urls')),
+    path('api/references/', include('references.urls')),
+    
+    # SEO pages (public)
+    path('hsn/', include('references.urls')),
+    path('gst-rate/', include('references.urls')),
+    
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0) if schema_public else docs_disabled_view, name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0) if schema_public else docs_disabled_view, name='schema-redoc'),
     

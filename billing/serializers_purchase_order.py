@@ -27,7 +27,7 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
-    items = PurchaseOrderItemSerializer(many=True, read_only=True)
+    items = PurchaseOrderItemSerializer(many=True, required=False)
     vendor = VendorSimpleSerializer(read_only=True)
     vendor_name = serializers.SerializerMethodField()
 

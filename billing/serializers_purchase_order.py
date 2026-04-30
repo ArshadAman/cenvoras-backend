@@ -15,10 +15,11 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     # replace with class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     product = serializers.PrimaryKeyRelatedField(read_only=True)
     product_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    product_display_name = serializers.CharField(source='product.name', read_only=True)
 
     class Meta:
         model = PurchaseOrderItem
-        fields = ['id', 'product', 'product_name', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
+        fields = ['id', 'product', 'product_name', 'product_display_name', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

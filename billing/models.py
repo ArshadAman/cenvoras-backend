@@ -117,6 +117,47 @@ class PurchaseBill(models.Model):
             self.save(update_fields=['payment_status'])
         return status_value
 
+
+class PurchaseOrder(models.Model):
+    """A vendor-facing purchase order. Stock is not affected until converted/received."""
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('sent', 'Sent'),
+        ('confirmed', 'Confirmed'),
+        ('partially_received', 'Partially Received'),
+        ('received', 'Received'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    po_number = models.CharField(max_length=100, blank=True, null=True)
+    vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, null=True, blank=True)
+    expected_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
+    notes = models.TextField(blank=True, null=True)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"PO-{self.po_number or str(self.id)[:8]}"
+
+
+class PurchaseOrderItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_order = models.ForeignKey(PurchaseOrder, related_name='items', on_delete=models.CASCADE)
+    product = models.ForeignKey('inventory.Product', on_delete=models.PROTECT)
+    batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
+    quantity = models.PositiveIntegerField()
+    unit = models.CharField(max_length=20, blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.product.name} x{self.quantity}"
+
 class PurchaseBillItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     purchase_bill = models.ForeignKey(PurchaseBill, related_name='items', on_delete=models.CASCADE)

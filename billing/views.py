@@ -10,8 +10,9 @@ from rest_framework.response import Response
 
 from inventory.serializers import ProductSerializer
 
-from .models import PurchaseBill, PurchaseBillItem, SalesInvoice
+from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, PurchaseOrder
 from .serializers import PurchaseBillSerializer, SalesInvoiceSerializer
+from .serializers_purchase_order import PurchaseOrderSerializer
 
 
 @api_view(['GET', 'POST'])
@@ -115,6 +116,108 @@ def vendor_products(request):
     products = Product.objects.filter(id__in=product_ids)
     serializer = ProductSerializer(products, many=True)
     return Response(serializer.data)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def purchase_order_list_create(request):
+    tenant = request.user.active_tenant
+
+    if request.method == 'GET':
+        orders = (
+            PurchaseOrder.objects.filter(created_by=tenant)
+            .order_by('-created_at')
+            .prefetch_related('items__product')
+        )
+        serializer = PurchaseOrderSerializer(orders, many=True)
+        return Response({'success': True, 'data': serializer.data})
+
+    serializer = PurchaseOrderSerializer(data=request.data, context={'request': request})
+    if serializer.is_valid():
+        serializer.save(created_by=tenant)
+        return Response(
+            {'success': True, 'message': 'Purchase order created successfully.', 'data': serializer.data},
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(
+        {'success': False, 'message': 'Validation error.', 'errors': serializer.errors},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def purchase_order_detail(request, pk):
+    tenant = request.user.active_tenant
+    try:
+        po = PurchaseOrder.objects.prefetch_related('items__product').get(pk=pk, created_by=tenant)
+    except PurchaseOrder.DoesNotExist:
+        return Response({'success': False, 'message': 'Purchase order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = PurchaseOrderSerializer(po)
+        return Response({'success': True, 'data': serializer.data})
+
+    if request.method in ['PUT', 'PATCH']:
+        if po.status not in ['draft', 'sent']:
+            return Response({'success': False, 'message': 'Only draft or sent POs can be edited.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = PurchaseOrderSerializer(po, data=request.data, partial=(request.method == 'PATCH'), context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'success': True, 'message': 'Purchase order updated successfully.', 'data': serializer.data})
+        return Response({'success': False, 'message': 'Validation error.', 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    # DELETE
+    if po.status not in ['draft', 'cancelled']:
+        return Response({'success': False, 'message': 'Only draft or cancelled POs can be deleted.'}, status=status.HTTP_400_BAD_REQUEST)
+    po.delete()
+    return Response({'success': True, 'message': 'Purchase order deleted.'}, status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def purchase_order_convert_to_bill(request, pk):
+    """Convert a PurchaseOrder into a PurchaseBill (marking as received)."""
+    tenant = request.user.active_tenant
+    try:
+        po = PurchaseOrder.objects.prefetch_related('items__product').get(pk=pk, created_by=tenant)
+    except PurchaseOrder.DoesNotExist:
+        return Response({'success': False, 'message': 'Purchase order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if po.status == 'received':
+        return Response({'success': False, 'message': 'Purchase order already received.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Create PurchaseBill from PO
+    bill = PurchaseBill.objects.create(
+        bill_number = f'PB-{str(po.id)[:8]}',
+        bill_date = timezone.now().date(),
+        vendor = po.vendor,
+        vendor_name = po.vendor.name if po.vendor else '',
+        total_amount = po.total_amount or 0,
+        created_by = tenant,
+    )
+
+    items_created = 0
+    for item in po.items.all():
+        PurchaseBillItem.objects.create(
+            purchase_bill = bill,
+            product = item.product,
+            batch = item.batch,
+            quantity = item.quantity,
+            unit = item.unit,
+            price = item.price,
+            discount = item.discount,
+            tax = item.tax,
+            amount = item.amount,
+        )
+        items_created += 1
+
+    # Mark PO as received
+    po.status = 'received'
+    po.save(update_fields=['status'])
+
+    serializer = PurchaseBillSerializer(bill)
+    return Response({'success': True, 'message': 'Purchase order converted to bill.', 'data': serializer.data})
 
 
 @api_view(['GET', 'POST'])

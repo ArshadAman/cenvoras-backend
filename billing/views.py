@@ -7,6 +7,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+import logging
 
 from inventory.serializers import ProductSerializer
 
@@ -132,17 +133,31 @@ def purchase_order_list_create(request):
         serializer = PurchaseOrderSerializer(orders, many=True)
         return Response({'success': True, 'data': serializer.data})
 
-    serializer = PurchaseOrderSerializer(data=request.data, context={'request': request})
-    if serializer.is_valid():
-        serializer.save(created_by=tenant)
+    # Wrap POST handling to capture unexpected server errors for debugging.
+    try:
+        serializer = PurchaseOrderSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save(created_by=tenant)
+            return Response(
+                {'success': True, 'message': 'Purchase order created successfully.', 'data': serializer.data},
+                status=status.HTTP_201_CREATED,
+            )
         return Response(
-            {'success': True, 'message': 'Purchase order created successfully.', 'data': serializer.data},
-            status=status.HTTP_201_CREATED,
+            {'success': False, 'message': 'Validation error.', 'errors': serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
         )
-    return Response(
-        {'success': False, 'message': 'Validation error.', 'errors': serializer.errors},
-        status=status.HTTP_400_BAD_REQUEST,
-    )
+    except Exception as exc:
+        # Log full exception with traceback to server logs for diagnosis
+        logging.exception('Unhandled error creating purchase order')
+        # Return limited details to the client for debugging in development only
+        return Response(
+            {
+                'success': False,
+                'message': 'Internal server error while creating purchase order.',
+                'details': str(exc),
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])

@@ -4,7 +4,9 @@ from inventory.serializers import ProductSerializer
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
-    product = serializers.PrimaryKeyRelatedField(queryset=None)
+    # instantiate as read_only to avoid DRF assertion at import time;
+    # replace with a proper field in __init__ when apps are ready
+    product = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = PurchaseOrderItem
@@ -13,7 +15,8 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         from inventory.models import Product
-        self.fields['product'].queryset = Product.objects.all()
+        from rest_framework.relations import PrimaryKeyRelatedField
+        self.fields['product'] = PrimaryKeyRelatedField(queryset=Product.objects.all())
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):

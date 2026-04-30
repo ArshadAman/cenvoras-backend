@@ -1,6 +1,13 @@
 from rest_framework import serializers
-from .models import PurchaseOrder, PurchaseOrderItem
+from .models import PurchaseOrder, PurchaseOrderItem, Vendor
 from inventory.serializers import ProductSerializer
+
+
+class VendorSimpleSerializer(serializers.ModelSerializer):
+    """Simple vendor serializer for nested representation."""
+    class Meta:
+        model = Vendor
+        fields = ['id', 'name', 'email', 'phone', 'gstin']
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
@@ -20,11 +27,17 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
-    items = PurchaseOrderItemSerializer(many=True)
+    items = PurchaseOrderItemSerializer(many=True, read_only=True)
+    vendor = VendorSimpleSerializer(read_only=True)
+    vendor_name = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseOrder
-        fields = ['id', 'po_number', 'vendor', 'expected_date', 'status', 'notes', 'total_amount', 'items']
+        fields = ['id', 'po_number', 'vendor', 'vendor_name', 'expected_date', 'status', 'notes', 'total_amount', 'items', 'created_at']
+
+    def get_vendor_name(self, obj):
+        """Return vendor name or empty string if vendor is null."""
+        return obj.vendor.name if obj.vendor else 'Unspecified Vendor'
 
     def create(self, validated_data):
         items = validated_data.pop('items', [])

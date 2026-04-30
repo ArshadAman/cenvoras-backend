@@ -11,20 +11,23 @@ from cenvoras.cache_utils import (
     CACHE_TTL_MEDIUM,
     cache_get_or_set,
     global_cache_key,
+    tenant_cache_key,
 )
 
-def get_stock_valuation():
+def get_stock_valuation(tenant=None):
     """
     Calculate current stock valuation based on Weighted Average.
     """
-    cache_key = global_cache_key('reports', 'stock-valuation')
+    cache_key = tenant_cache_key('reports', getattr(tenant, 'id', None), 'stock-valuation') if tenant else global_cache_key('reports', 'stock-valuation')
 
     def build_value():
         valuation = []
         total_value = Decimal('0.00')
 
         # Product.stock is a cached field, we can use it directly
-        products = Product.objects.all().select_related('meta')
+        products = Product.objects.select_related('meta')
+        if tenant:
+            products = products.filter(created_by=tenant)
 
         for product in products:
             stock = Decimal(str(product.stock or 0))
@@ -53,11 +56,11 @@ def get_stock_valuation():
 
     return cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_value)
 
-def get_expiry_report(days_threshold=30):
+def get_expiry_report(days_threshold=30, tenant=None):
     """
     Get batches expiring within `days_threshold` that have stock.
     """
-    cache_key = global_cache_key('reports', 'expiry-report', f'days-{days_threshold}')
+    cache_key = tenant_cache_key('reports', getattr(tenant, 'id', None), 'expiry-report', f'days-{days_threshold}') if tenant else global_cache_key('reports', 'expiry-report', f'days-{days_threshold}')
 
     def build_report():
         today = timezone.now().date()
@@ -70,6 +73,8 @@ def get_expiry_report(days_threshold=30):
         ).distinct().select_related('product').annotate(
             total_stock=Coalesce(Sum('stock_points__quantity'), 0)
         )
+        if tenant:
+            batches = batches.filter(product__created_by=tenant)
 
         report = []
         for batch in batches:
@@ -91,18 +96,20 @@ def get_expiry_report(days_threshold=30):
 
     return cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_report)
 
-def get_item_wise_profit(start_date, end_date):
+def get_item_wise_profit(start_date, end_date, tenant=None):
     """
     Calculate Gross Profit per Item: Sales - Cost of Goods Sold (COGS).
     COGS = Avg Purchase Price * Qty Sold.
     """
-    cache_key = global_cache_key('reports', 'item-wise-profit', str(start_date), str(end_date))
+    cache_key = tenant_cache_key('reports', getattr(tenant, 'id', None), 'item-wise-profit', str(start_date), str(end_date)) if tenant else global_cache_key('reports', 'item-wise-profit', str(start_date), str(end_date))
 
     def build_report():
         # 1. Get all sales in date range
         sales = SalesInvoiceItem.objects.filter(
             sales_invoice__invoice_date__range=[start_date, end_date]
         ).select_related('product', 'batch')
+        if tenant:
+            sales = sales.filter(sales_invoice__created_by=tenant)
 
         item_stats = {}
 
@@ -167,7 +174,7 @@ def get_item_wise_profit(start_date, end_date):
 
     return cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_report)
 
-def get_stock_ledger(product_id, start_date=None, end_date=None):
+def get_stock_ledger(product_id, start_date=None, end_date=None, tenant=None):
     """
     Generate a chronological item cardex / stock ledger for a specific product.
     Matches all In/Out movements across bills, invoices, returns, and journals.
@@ -176,13 +183,19 @@ def get_stock_ledger(product_id, start_date=None, end_date=None):
     from billing.models_returns import CreditNoteItem, DebitNoteItem
     from inventory.models_sidecar import StockJournalItem
     
-    cache_key = global_cache_key('reports', 'stock-ledger', product_id, str(start_date), str(end_date))
+    cache_key = tenant_cache_key('reports', getattr(tenant, 'id', None), 'stock-ledger', product_id, str(start_date), str(end_date)) if tenant else global_cache_key('reports', 'stock-ledger', product_id, str(start_date), str(end_date))
 
     def build_ledger():
         transactions = []
 
+        product_filter = {'product_id': product_id}
+        if tenant:
+            product_filter['product__created_by'] = tenant
+
         # Purchases (In)
-        purchases = PurchaseBillItem.objects.filter(product_id=product_id).select_related('purchase_bill', 'batch')
+        purchases = PurchaseBillItem.objects.filter(**product_filter).select_related('purchase_bill', 'batch')
+        if tenant:
+            purchases = purchases.filter(purchase_bill__created_by=tenant)
         for p in purchases:
             transactions.append({
                 'date': p.purchase_bill.bill_date,
@@ -194,7 +207,9 @@ def get_stock_ledger(product_id, start_date=None, end_date=None):
             })
 
         # Sales (Out)
-        sales = SalesInvoiceItem.objects.filter(product_id=product_id).select_related('sales_invoice', 'batch')
+        sales = SalesInvoiceItem.objects.filter(**product_filter).select_related('sales_invoice', 'batch')
+        if tenant:
+            sales = sales.filter(sales_invoice__created_by=tenant)
         for s in sales:
             transactions.append({
                 'date': s.sales_invoice.invoice_date,
@@ -206,7 +221,9 @@ def get_stock_ledger(product_id, start_date=None, end_date=None):
             })
 
         # Credit Notes / Sales Return (In)
-        cnotes = CreditNoteItem.objects.filter(product_id=product_id).select_related('credit_note', 'batch')
+        cnotes = CreditNoteItem.objects.filter(**product_filter).select_related('credit_note', 'batch')
+        if tenant:
+            cnotes = cnotes.filter(credit_note__created_by=tenant)
         for c in cnotes:
             transactions.append({
                 'date': c.credit_note.date,
@@ -218,7 +235,9 @@ def get_stock_ledger(product_id, start_date=None, end_date=None):
             })
 
         # Debit Notes / Purchase Return (Out)
-        dnotes = DebitNoteItem.objects.filter(product_id=product_id).select_related('debit_note', 'batch')
+        dnotes = DebitNoteItem.objects.filter(**product_filter).select_related('debit_note', 'batch')
+        if tenant:
+            dnotes = dnotes.filter(debit_note__created_by=tenant)
         for d in dnotes:
             transactions.append({
                 'date': d.debit_note.date,
@@ -230,7 +249,9 @@ def get_stock_ledger(product_id, start_date=None, end_date=None):
             })
 
         # Stock Journal (In/Out depending on qty sign)
-        journals = StockJournalItem.objects.filter(product_id=product_id).select_related('journal', 'batch')
+        journals = StockJournalItem.objects.filter(**product_filter).select_related('journal', 'batch')
+        if tenant:
+            journals = journals.filter(journal__created_by=tenant)
         for j in journals:
             transactions.append({
                 'date': j.journal.date,

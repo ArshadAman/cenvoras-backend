@@ -11,9 +11,6 @@ class VendorSimpleSerializer(serializers.ModelSerializer):
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
-    # instantiate as read_only to avoid DRF assertion at import time;
-    # replace with class PurchaseOrderItemSerializer(serializers.ModelSerializer):
-    product = serializers.PrimaryKeyRelatedField(read_only=True)
     product_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     product_display_name = serializers.CharField(source='product.name', read_only=True)
 
@@ -48,7 +45,10 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
                 )
             mutable['product'] = str(product_obj.id)
         
-        return super().to_internal_value(mutable)
+        ret = super().to_internal_value(mutable)
+        if not ret.get('product'):
+            raise serializers.ValidationError({'product': 'Product is required and could not be resolved.'})
+        return ret
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):

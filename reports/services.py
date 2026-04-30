@@ -27,10 +27,12 @@ def get_stock_valuation():
         products = Product.objects.all().select_related('meta')
 
         for product in products:
-            stock = product.stock
-            # Use sale_price as fallback for now if price (cost) is 0
-            avg_cost = product.price if product.price > 0 else product.sale_price
+            stock = Decimal(str(product.stock or 0))
+            cost_price = Decimal(str(product.price or 0))
+            sale_price = Decimal(str(product.sale_price or 0))
 
+            # Use sale_price as fallback if purchase cost is missing or zero.
+            avg_cost = cost_price if cost_price > 0 else sale_price
             value = stock * avg_cost
             total_value += value
 

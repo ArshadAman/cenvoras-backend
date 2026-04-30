@@ -35,7 +35,7 @@ class Product(models.Model):
     sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, default=None)
     tax = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # GST %
     warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
-    stock = models.PositiveIntegerField(default=0, help_text="Global stock count (Cached)")
+    stock = models.IntegerField(default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
     low_stock_alert = models.PositiveIntegerField(default=0)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
 

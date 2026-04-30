@@ -62,7 +62,7 @@ def decrease_stock_on_sale(sender, instance, created, **kwargs):
             print(f"DEBUG: Converted sale qty {total_qty} {instance.unit} to {qty_to_remove} {product.unit}")
 
         # ATOMIC UPDATE: Product Stock
-        Product.objects.filter(pk=product_id).update(stock=Greatest(F('stock') - qty_to_remove, 0))
+        Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
 
         # Update StockPoint
         if instance.batch:
@@ -100,7 +100,7 @@ def revert_financials_on_sale_item_delete(sender, instance, **kwargs):
 @receiver(post_delete, sender=PurchaseBillItem)
 def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
     # ATOMIC REVERT
-    Product.objects.filter(pk=instance.product_id).update(stock=Greatest(F('stock') - instance.quantity, 0))
+    Product.objects.filter(pk=instance.product_id).update(stock=F('stock') - instance.quantity)
     
     if instance.batch:
         try:

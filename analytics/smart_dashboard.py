@@ -136,13 +136,21 @@ class SmartDashboard:
         for item in sales_items:
             qty = Decimal(str(item.quantity))
             sale_price = Decimal(str(item.price))
-            line_revenue = Decimal(str(item.amount)) if item.amount is not None else (qty * sale_price)
+            discount = Decimal(str(item.discount or 0))
             
-            # Get cost price from batch or product
-            if item.batch:
-                cost_price = Decimal(str(item.batch.cost_price or item.product.price or 0))
+            # Revenue = (quantity * price - discount), before tax
+            base_amount = qty * sale_price
+            discount_amount = (base_amount * discount) / Decimal('100')
+            line_revenue = base_amount - discount_amount
+            
+            # Cost Price: batch.cost_price -> product.price -> product.sale_price (fallback)
+            if item.batch and item.batch.cost_price:
+                cost_price = Decimal(str(item.batch.cost_price))
+            elif item.product.price:
+                cost_price = Decimal(str(item.product.price))
             else:
-                cost_price = Decimal(str(item.product.price or 0))
+                # Fallback to sale_price if no cost data
+                cost_price = Decimal(str(item.product.sale_price or 0))
             
             total_revenue += line_revenue
             total_cost += qty * cost_price

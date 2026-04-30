@@ -100,7 +100,7 @@ def get_item_wise_profit(start_date, end_date):
         # 1. Get all sales in date range
         sales = SalesInvoiceItem.objects.filter(
             sales_invoice__invoice_date__range=[start_date, end_date]
-        ).select_related('product')
+        ).select_related('product', 'batch')
 
         item_stats = {}
 
@@ -115,12 +115,27 @@ def get_item_wise_profit(start_date, end_date):
                 }
 
             stats = item_stats[pid]
+            qty = Decimal(str(sale.quantity))
             stats['qty_sold'] += sale.quantity
-            stats['revenue'] += sale.amount
+            
+            # Revenue = (quantity * price - discount), before tax
+            sale_price = Decimal(str(sale.price))
+            discount = Decimal(str(sale.discount or 0))
+            base_amount = qty * sale_price
+            discount_amount = (base_amount * discount) / Decimal('100')
+            line_revenue = base_amount - discount_amount
+            stats['revenue'] += line_revenue
 
-            # COGS Estimate: Use product.price (Purchase Price) * Qty
-            purchase_price = sale.product.price
-            stats['cogs'] += (purchase_price * sale.quantity)
+            # COGS: batch.cost_price -> product.price -> product.sale_price (fallback)
+            if sale.batch and sale.batch.cost_price:
+                cost_price = Decimal(str(sale.batch.cost_price))
+            elif sale.product.price:
+                cost_price = Decimal(str(sale.product.price))
+            else:
+                # Fallback to sale_price if no cost data
+                cost_price = Decimal(str(sale.product.sale_price or 0))
+            
+            stats['cogs'] += (cost_price * qty)
 
         report = []
         total_revenue = Decimal('0.00')

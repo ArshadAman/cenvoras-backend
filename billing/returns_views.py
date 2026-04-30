@@ -133,7 +133,7 @@ class DebitNoteSerializer(serializers.ModelSerializer):
             # Decrease stock (goods being returned to vendor)
             qty = item_data['quantity']
             Product.objects.filter(pk=item_data['product'].pk).update(
-                stock=Greatest(F('stock') - qty, 0)
+                stock=F('stock') - qty
             )
 
             if item_data.get('batch') and source_warehouse:

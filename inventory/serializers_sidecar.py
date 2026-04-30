@@ -12,13 +12,16 @@ class ProductMetaSerializer(serializers.ModelSerializer):
     is_narcotic = serializers.BooleanField(required=False, allow_null=True)
     is_new_launch = serializers.BooleanField(required=False, allow_null=True)
     expiry_date = serializers.DateField(required=False, allow_null=True)
+    temperature = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    storage_condition = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = ProductMeta
         fields = [
             'barcode', 'expiry_date', 'secondary_stock', 'tags', 'is_h1', 'is_narcotic', 
             'bag_weight', 'tare_weight', 'mandi_tax', 'labour_charge', 
-            'is_new_launch', 'salt_composition', 'bundle_items'
+            'is_new_launch', 'salt_composition', 'bundle_items',
+            'temperature', 'storage_condition'
         ]
 
 class BillOfMaterialSerializer(serializers.ModelSerializer):

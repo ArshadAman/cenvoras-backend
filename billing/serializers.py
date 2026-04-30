@@ -376,13 +376,17 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'product_detail', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
 
     def get_product_detail(self, obj):
-        return {
+        detail = {
             "id": str(obj.product.id),
             "name": obj.product.name,
             "description": obj.product.description,
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
         }
+        if hasattr(obj.product, 'meta'):
+            detail['storage_condition'] = obj.product.meta.storage_condition
+            detail['temperature'] = obj.product.meta.temperature
+        return detail
 
     def to_internal_value(self, data):
         print("DEBUG SalesInvoiceItemSerializer: Processing data:", data)

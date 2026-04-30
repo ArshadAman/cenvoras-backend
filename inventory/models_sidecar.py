@@ -51,6 +51,11 @@ class ProductMeta(models.Model):
     is_returnable_packaging = models.BooleanField(default=False, help_text="Product uses returnable crates/containers")
     crate_qty = models.PositiveIntegerField(default=0, help_text="Number of crates/containers issued")
     crate_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Deposit rate per crate")
+
+    # Storage Information
+    temperature = models.CharField(max_length=50, blank=True, null=True, help_text="Required storage temperature (e.g., '2-8 °C')")
+    storage_condition = models.CharField(max_length=150, blank=True, null=True, help_text="Specific storage conditions (e.g., 'Store in a cool, dry place')")
+
     
     def __str__(self):
         return f"Meta for {self.product.name}"

@@ -2,7 +2,9 @@ from django.urls import path
 from .views import (
     purchase_bill_detail, purchase_bill_update_delete,
     sales_invoice_detail, sales_invoice_list_create, sales_invoice_update_delete, purchase_bill_list_create,
-    vendor_products, get_next_invoice_number, sales_summary_analytics, recalculate_invoice_totals
+    vendor_products, get_next_invoice_number, sales_summary_analytics, recalculate_invoice_totals,
+    # Purchase Order views
+    purchase_order_list_create, purchase_order_detail, purchase_order_convert_to_bill,
 )
 from .csv_views import (
     upload_sales_invoices_csv, export_sales_invoices_csv, sales_csv_job_status, download_sales_csv

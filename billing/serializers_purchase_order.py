@@ -92,6 +92,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         validated_data['vendor'] = vendor
         po = PurchaseOrder.objects.create(**validated_data)
         for item in items:
+            item.pop('product_name', None)
             PurchaseOrderItem.objects.create(purchase_order=po, **item)
         return po
 
@@ -107,5 +108,6 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if items is not None:
             instance.items.all().delete()
             for item in items:
+                item.pop('product_name', None)
                 PurchaseOrderItem.objects.create(purchase_order=instance, **item)
         return instance

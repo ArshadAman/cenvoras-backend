@@ -278,7 +278,7 @@ WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN', '')
 WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 
 # Gemini AI (load from environment variables)
-GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip('"').strip("'")
 
 # Cashfree Payments
 CASHFREE_CLIENT_ID = os.environ.get('CASHFREE_CLIENT_ID', '')

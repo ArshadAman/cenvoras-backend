@@ -9,7 +9,7 @@ from django.core.cache import cache
 class GeminiService:
     def __init__(self):
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         self.rate_limiter = RateLimiter()
     
     def parse_command(self, user_input, context=None):
@@ -151,18 +151,41 @@ gemini_service = GeminiService()
 
 def call_gemini(question, context, user=None):
     """
-    Standard call to Gemini for natural language chat.
+    Standard call to Gemini for natural language chat using the SDK.
     """
-    prompt = f"""
-    You are Cenvora AI, a powerful ERP assistant. 
-    Use the following business context to answer the user's question accurately.
+    business_name = getattr(user, 'business_name', user.username) if user else "Cenvora User"
+    today_date = context.get('date', datetime.now().date().isoformat())
     
-    Context: {json.dumps(context)}
-    
-    Question: {question}
-    
-    Answer concisely and professionally. Use markdown for tables and bold text.
-    """
+    system_prompt = (
+        "You are Cenvora AI, an expert business advisor built into an ERP system. "
+        "RULES:\n"
+        "- NEVER greet the user or introduce yourself\n"
+        "- NEVER repeat the question back\n"
+        "- NEVER start with 'Hello', 'Hi', 'Great question', etc.\n"
+        "- Jump STRAIGHT into the answer\n"
+        "- Be concise and actionable — no fluff\n"
+        "- Use markdown: **bold**, bullet points, numbered lists\n"
+        "- Use ₹ for currency\n"
+        "- Give specific advice based on the actual numbers in the data\n"
+        "- If asked for strategy, give concrete steps, not generic advice\n\n"
+        "CAPABILITIES:\n"
+        "1. **Warranty lookup** — Check warranty status by invoice number, customer name, or product name\n"
+        "2. **Expiring products** — List products expiring within 30 days with batch details\n"
+        "3. **Sales summary** — Today, this week, this month, comparisons with last month\n"
+        "4. **Business summary** — Revenue, purchases, margins, inventory value, pending payments\n"
+        "5. **Monthly summary** — Month-over-month comparison with growth metrics\n"
+        "6. **Create invoice guidance** — Suggest available in-stock products with prices and GST\n"
+        "7. **Debit/Credit notes** — Summarize this month's notes\n"
+        "8. **Stock information** — Product stock levels, low stock alerts, inventory valuation\n"
+        "9. **Customer & Vendor info** — Names, emails, phones, outstanding balances\n"
+        "10. **GST filing assistant** — Generate GSTR-1/GSTR-3B draft data from invoice data\n"
+        "11. **AI insights** — Compare this month vs last month, identify trends, give growth advice\n\n"
+        f"Business: {business_name}\n"
+        f"Date: {today_date}\n\n"
+        f"LIVE DATA:\n{json.dumps(context, indent=2)}"
+    )
+
+    prompt = f"{system_prompt}\n\nUser Question: {question}"
     
     try:
         response = gemini_service.model.generate_content(prompt)

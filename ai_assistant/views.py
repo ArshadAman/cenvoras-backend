@@ -12,6 +12,7 @@ from datetime import timedelta
 import json
 import logging
 from subscription.services import can_use_feature
+from .services.gemini_service import call_gemini
 from .services.command_parser import command_parser
 
 
@@ -262,79 +263,10 @@ def gather_business_context(user):
     }
 
 
-def call_gemini(question, business_context, user):
-    """Call Gemini 2.5 Flash API."""
-    import requests
 
-    system_prompt = (
-        "You are Cenvora AI, an expert business advisor built into an ERP system. "
-        "RULES:\n"
-        "- NEVER greet the user or introduce yourself\n"
-        "- NEVER repeat the question back\n"
-        "- NEVER start with 'Hello', 'Hi', 'Great question', etc.\n"
-        "- Jump STRAIGHT into the answer\n"
-        "- Be concise and actionable — no fluff\n"
-        "- Use markdown: **bold**, bullet points, numbered lists\n"
-        "- Use ₹ for currency\n"
-        "- Give specific advice based on the actual numbers in the data\n"
-        "- If asked for strategy, give concrete steps, not generic advice\n\n"
-        "CAPABILITIES:\n"
-        "1. **Warranty lookup** — Check warranty status by invoice number, customer name, or product name\n"
-        "2. **Expiring products** — List products expiring within 30 days with batch details\n"
-        "3. **Sales summary** — Today, this week, this month, comparisons with last month\n"
-        "4. **Business summary** — Revenue, purchases, margins, inventory value, pending payments\n"
-        "5. **Monthly summary** — Month-over-month comparison with growth metrics\n"
-        "6. **Create invoice guidance** — Suggest available in-stock products with prices and GST\n"
-        "7. **Debit/Credit notes** — Summarize this month's notes\n"
-        "8. **Stock information** — Product stock levels, low stock alerts, inventory valuation\n"
-        "9. **Customer & Vendor info** — Names, emails, phones, outstanding balances\n"
-        "10. **GST filing assistant** — Generate GSTR-1/GSTR-3B draft data from invoice data\n"
-        "11. **AI insights** — Compare this month vs last month, identify trends, give growth advice\n\n"
-        f"Business: {getattr(user, 'business_name', user.username)}\n"
-        f"Date: {business_context['date']}\n\n"
-        f"LIVE DATA:\n{json.dumps(business_context, indent=2)}"
-    )
+# The call_gemini function has been moved to services/gemini_service.py
+# and is imported at the top of this file.
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": f"{system_prompt}\n\nUser question: {question}"}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 1500,
-        }
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-
-        # Extract text from Gemini response
-        candidates = data.get('candidates', [])
-        if candidates:
-            parts = candidates[0].get('content', {}).get('parts', [])
-            if parts:
-                return parts[0].get('text', 'No response generated.')
-
-        return "Sorry, I couldn't generate a response. Please try again."
-
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"HTTP Error: {e}\nResponse: {e.response.text}"
-        logger.error(error_msg)
-        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Gemini API error: {e}")
-        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
 
 
 class AIChatView(APIView):

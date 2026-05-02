@@ -12,8 +12,8 @@ from datetime import timedelta
 import json
 import logging
 from subscription.services import can_use_feature
-from .services.gemini_service import call_gemini
 from .services.command_parser import command_parser
+
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +389,7 @@ class AIChatView(APIView):
                         "invoice_id": result['invoice_id'],
                         "invoice_number": result['invoice_number']
                     }
-                    answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,}**.\n\nYou can view it using the button below."
+                    answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,.2f}**.\n\nYou can view it using the button below."
                 else:
                     # Fallback to draft if direct creation fails (e.g. missing info)
                     action = parsed

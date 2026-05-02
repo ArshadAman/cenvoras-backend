@@ -40,8 +40,10 @@ def create_invoice_from_ai(user, entities, request=None):
     
     # Ensure invoice number
     if not data.get('invoice_number'):
-        prefix = getattr(user.profile, 'invoice_prefix', 'INV-') if hasattr(user, 'profile') else 'INV-'
+        profile = getattr(user, 'profile', None)
+        prefix = getattr(profile, 'invoice_prefix', 'INV-') or 'INV-'
         data['invoice_number'] = get_next_invoice_number_internal(user, prefix)
+
     
     # Ensure date
     if not data.get('invoice_date'):
@@ -67,8 +69,9 @@ def create_invoice_from_ai(user, entities, request=None):
                 "invoice_id": str(invoice.id),
                 "invoice_number": invoice.invoice_number,
                 "customer_name": invoice.customer_name,
-                "total_amount": float(invoice.total_amount)
+                "total_amount": round(float(invoice.total_amount), 2)
             }
+
         else:
             logger.warning(f"AI Invoice Validation Failed: {serializer.errors}")
             return {

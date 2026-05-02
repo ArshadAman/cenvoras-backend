@@ -36,11 +36,17 @@ class GeminiService:
             self.rate_limiter.record_request()
             
             # Parse JSON response
-            result = json.loads(response.text)
+            text = response.text.strip()
+            if text.startswith('```json'):
+                text = text[7:]
+            if text.endswith('```'):
+                text = text[:-3]
+            result = json.loads(text.strip())
             
             # Cache for 1 hour
             cache.set(cache_key, result, timeout=3600)
             return result
+
             
         except json.JSONDecodeError:
             return {

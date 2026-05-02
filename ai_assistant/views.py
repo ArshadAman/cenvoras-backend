@@ -318,12 +318,38 @@ class AIChatView(APIView):
         
         # If we have an active session, process the selection
         if session_state and session_state.get('step') == 'SELECT_CUSTOMER':
-            # Check if input matches one of the options or a name
-            # For simplicity, if it's not 'Create New', we'll try to find the match
-            if question.lower() == 'create new customer' or 'new' in question.lower():
+            selected_id = None
+            if "CHOOSE_CUSTOMER:" in question:
+                selected_id = question.split("CHOOSE_CUSTOMER:")[1].strip()
+            
+            if question.lower() == 'create new customer' or 'new' in question.lower() or selected_id == "new":
                 # Proceed to draft or ask more questions
                 cache.delete(session_key)
+            elif selected_id:
+                from .services.invoice_service import create_invoice_from_ai
+                from billing.models import Customer
+                try:
+                    customer = Customer.objects.get(id=selected_id, created_by=getattr(user, 'active_tenant', user))
+                    entities = session_state.get('entities', {})
+                    entities['customer_name'] = customer.name
+                    entities['customer_id'] = str(customer.id)
+                    cache.delete(session_key)
+                    
+                    # Proceed to create
+                    result = create_invoice_from_ai(user, entities, request=self.request)
+                    if result['status'] == 'success':
+                        action = {
+                            "intent": "create_invoice",
+                            "status": "success",
+                            "invoice_id": result['invoice_id'],
+                            "invoice_number": result['invoice_number']
+                        }
+                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
+                        return Response({"answer": answer, "action": action})
+                except Customer.DoesNotExist:
+                    cache.delete(session_key)
             else:
+                # Fallback to name search if they typed instead of clicking
                 from .services.invoice_service import search_customers, create_invoice_from_ai
                 matches = search_customers(user, question)
                 if matches.count() == 1:
@@ -356,7 +382,16 @@ class AIChatView(APIView):
                 
                 if matches.count() > 1:
                     # Multiple matches found, ask user to select
-                    options = [{"id": str(m.id), "name": m.name, "detail": m.address or m.phone or "No details"} for m in matches]
+                    options = []
+                    for m in matches:
+                        addr_parts = [p for p in [m.address, m.get_state_display() if hasattr(m, 'get_state_display') else m.state] if p]
+                        detail = ", ".join(addr_parts) or m.phone or "No location details"
+                        options.append({
+                            "id": str(m.id), 
+                            "name": m.name, 
+                            "detail": detail
+                        })
+                    
                     options.append({"id": "new", "name": "Create New Customer", "detail": f"Add '{customer_name}' as a new record"})
                     
                     action = {

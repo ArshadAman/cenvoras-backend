@@ -139,7 +139,7 @@ def get_effective_plan_code(user: User) -> str:
 
     tenant = get_tenant(user)
     if _is_legacy_trial_active(tenant):
-        return 'starter'
+        return 'pro'
 
     plan = get_tenant_plan(user)
     if plan:

@@ -155,6 +155,7 @@ def plan_catalog(request):
 			'name': plan.name,
 			'description': plan.description,
 			'monthly_price': str(plan.monthly_price),
+			'original_monthly_price': str(plan.original_monthly_price),
 			'quarterly_price': str(plan.get_price_for_cycle(BillingCycle.QUARTERLY)),
 			'yearly_price': str(plan.get_price_for_cycle(BillingCycle.YEARLY)),
 			'max_managers': plan.max_managers,

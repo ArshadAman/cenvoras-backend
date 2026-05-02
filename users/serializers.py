@@ -104,9 +104,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_plan_name(self, obj):
         if is_vip_user(obj):
             return "Business"
+        
+        plan_code = get_effective_plan_code(obj)
         plan = get_tenant_plan(obj)
+        
         if plan:
             return plan.name
+            
+        # Fallback for trial users or other states without a Plan object
+        if plan_code == 'pro':
+            return "Pro"
+        if plan_code == 'business':
+            return "Business"
         return "Starter"
 
     def get_plan_code(self, obj):

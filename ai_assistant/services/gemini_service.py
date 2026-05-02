@@ -9,7 +9,7 @@ from django.core.cache import cache
 class GeminiService:
     def __init__(self):
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash-lite')
         self.rate_limiter = RateLimiter()
     
     def parse_command(self, user_input, context=None):

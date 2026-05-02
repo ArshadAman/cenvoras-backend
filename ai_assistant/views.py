@@ -500,7 +500,7 @@ class AIChatView(APIView):
 
         return (
             "⚠️ **Demo Mode** — No Gemini API key configured.\n\n"
-            "Add your key to `settings.py`:\n"
+            "Add your key to the `.env` file:\n"
             "`GEMINI_API_KEY = 'your_key'`\n\n"
             "I can answer: *sales, purchases, warranty, expiry, GST, stock, customers, vendors, business summary, create invoice, credit/debit notes*"
         )

@@ -12,6 +12,8 @@ from datetime import timedelta
 import json
 import logging
 from subscription.services import can_use_feature
+from .services.gemini_service import call_gemini
+from .services.command_parser import command_parser
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +372,37 @@ class AIChatView(APIView):
 
         # Call Gemini 2.5 Flash
         answer = call_gemini(question, context, user)
-        return Response({"answer": answer, "question": question, "mode": "gemini"})
+        
+        # Action Detection (Internal Enhancement)
+        action = None
+        action_keywords = ['create', 'make', 'new', 'invoice', 'bill', 'add', 'customer', 'product']
+        if any(kw in question.lower() for kw in action_keywords):
+            parsed = command_parser.parse(question, context)
+            if parsed and parsed.get('intent') == 'create_invoice' and parsed.get('confidence', 0) > 0.6:
+                from .services.invoice_service import create_invoice_from_ai
+                result = create_invoice_from_ai(user, parsed['entities'], request=self.request)
+                
+                if result['status'] == 'success':
+                    action = {
+                        "intent": "create_invoice",
+                        "status": "success",
+                        "invoice_id": result['invoice_id'],
+                        "invoice_number": result['invoice_number']
+                    }
+                    answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,}**.\n\nYou can view it using the button below."
+                else:
+                    # Fallback to draft if direct creation fails (e.g. missing info)
+                    action = parsed
+                    action['status'] = 'draft'
+            elif parsed and parsed.get('intent') != 'general_query' and parsed.get('confidence', 0) > 0.6:
+                action = parsed
+
+        return Response({
+            "answer": answer, 
+            "question": question, 
+            "mode": "gemini",
+            "action": action
+        })
 
     def demo_response(self, q, ctx):
         """Fallback when no Gemini key is configured."""

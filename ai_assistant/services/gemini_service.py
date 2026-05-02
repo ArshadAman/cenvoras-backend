@@ -79,25 +79,35 @@ class GeminiService:
         - delete_invoice
         - general_query
         
-        Extract entities like:
-        - customer_name
-        - product_name
-        - quantity
-        - price
-        - amount
-        - date
-        - phone
-        - email
-        - address
-        - time_period (last week, this month, etc.)
-        
+        Analyze this user input for a business ERP system.
+        Context: {context if context else 'No context provided'}
+        Input: "{user_input}"
+
+        Possible Intents:
+        - create_invoice: User wants to create a sales bill/invoice.
+        - check_stock: User asking about inventory levels.
+        - sales_summary: User asking for sales performance/metrics.
+        - general_query: Anything else.
+
+        If the intent is 'create_invoice', extract:
+        - customer_name: The name of the customer.
+        - customer_email: Any email mentioned.
+        - items: A list of objects with:
+            - product_name: Name of the product.
+            - quantity: Number of units (default 1).
+            - price: Unit price if mentioned (else null).
+
         Respond ONLY with valid JSON:
         {{
             "intent": "detected_intent",
             "entities": {{
-                "entity_name": "entity_value"
+                "customer_name": "...",
+                "customer_email": "...",
+                "items": [
+                    {{"product_name": "...", "quantity": 1, "price": 500}}
+                ]
             }},
-            "confidence": 0.95,
+            "confidence": 0.0 to 1.0,
             "clarification_needed": false,
             "clarification_question": "optional question if unclear"
         }}
@@ -132,3 +142,24 @@ class RateLimiter:
 
 # Initialize global service
 gemini_service = GeminiService()
+
+def call_gemini(question, context, user=None):
+    """
+    Standard call to Gemini for natural language chat.
+    """
+    prompt = f"""
+    You are Cenvora AI, a powerful ERP assistant. 
+    Use the following business context to answer the user's question accurately.
+    
+    Context: {json.dumps(context)}
+    
+    Question: {question}
+    
+    Answer concisely and professionally. Use markdown for tables and bold text.
+    """
+    
+    try:
+        response = gemini_service.model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"I'm sorry, I'm having trouble connecting to my brain right now. ({str(e)})"

@@ -225,11 +225,18 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 	# If it's the same plan and cycle, it's a renewal
 	current_cycle = getattr(subscription, 'billing_cycle', BillingCycle.MONTHLY)
 	if target_code == current_code and target_cycle == current_cycle and active_until:
+		target_price_full = target_plan.get_price_for_cycle(target_cycle)
+		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		if base_price_before_discount <= 0:
+			base_price_before_discount = target_price_full
+
 		return {
 			'payment_required': True,
 			'action': SubscriptionPaymentAction.RENEW,
 			'apply_immediately': False,
-			'amount': _quantize_money(target_plan.get_price_for_cycle(target_cycle)),
+			'amount': _quantize_money(target_price_full),
+			'base_price_before_discount': base_price_before_discount,
+			'new_plan_full_price': target_price_full,
 			'billing_cycle': target_cycle,
 			'source_plan_code': current_code,
 			'summary': f"Renew {target_plan.name} ({target_cycle}) for another period.",
@@ -248,8 +255,12 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 		
 		unused_value = _quantize_money(current_price * remaining_ratio)
 		
-		target_price = target_plan.get_price_for_cycle(target_cycle)
-		amount = max(Decimal('0.00'), target_price - unused_value)
+		target_price_full = target_plan.get_price_for_cycle(target_cycle)
+		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		if base_price_before_discount <= 0:
+			base_price_before_discount = target_price_full
+
+		amount = max(Decimal('0.00'), target_price_full - unused_value)
 		
 		if amount < Decimal('1.00') and amount > Decimal('0.00'):
 			amount = Decimal('1.00')
@@ -259,17 +270,29 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 			'action': SubscriptionPaymentAction.UPGRADE_NOW,
 			'apply_immediately': True,
 			'amount': amount,
+			'base_price_before_discount': base_price_before_discount,
+			'new_plan_full_price': target_price_full,
+			'credit': unused_value,
+			'days_used': int((now - subscription.current_period_start).days),
+			'current_daily_rate': _quantize_money(current_price / Decimal(total_seconds) * Decimal(86400)),
 			'billing_cycle': target_cycle,
 			'source_plan_code': current_code,
 			'summary': f"Upgrade now to {target_plan.name} ({target_cycle}). Remaining {current_plan.name} value (₹{unused_value}) credited.",
 		}
 
 	if target_rank >= current_rank:
+		target_price_full = target_plan.get_price_for_cycle(target_cycle)
+		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		if base_price_before_discount <= 0:
+			base_price_before_discount = target_price_full
+
 		return {
 			'payment_required': True,
 			'action': SubscriptionPaymentAction.ACTIVATE,
 			'apply_immediately': True,
-			'amount': _quantize_money(target_plan.get_price_for_cycle(target_cycle)),
+			'amount': _quantize_money(target_price_full),
+			'base_price_before_discount': base_price_before_discount,
+			'new_plan_full_price': target_price_full,
 			'billing_cycle': target_cycle,
 			'source_plan_code': current_code,
 			'summary': f"Activate {target_plan.name} ({target_cycle}) immediately.",
@@ -286,11 +309,18 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 			'summary': 'Downgrades are not available from profile. Renew the current plan or upgrade to a higher plan.',
 		}
 
+	target_price_full = target_plan.get_price_for_cycle(target_cycle)
+	base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+	if base_price_before_discount <= 0:
+		base_price_before_discount = target_price_full
+
 	return {
 		'payment_required': True,
 		'action': SubscriptionPaymentAction.ACTIVATE,
 		'apply_immediately': True,
-		'amount': _quantize_money(target_plan.get_price_for_cycle(target_cycle)),
+		'amount': _quantize_money(target_price_full),
+		'base_price_before_discount': base_price_before_discount,
+		'new_plan_full_price': target_price_full,
 		'billing_cycle': target_cycle,
 		'source_plan_code': current_code,
 		'summary': f"Activate {target_plan.name} ({target_cycle}) immediately.",
@@ -341,6 +371,11 @@ def plan_change_quote(request):
 			'action': quote['action'],
 			'apply_immediately': quote.get('apply_immediately', False),
 			'amount': str(quote['amount']),
+			'base_price_before_discount': str(quote.get('base_price_before_discount', quote['amount'])),
+			'new_plan_full_price': str(quote.get('new_plan_full_price', quote['amount'])),
+			'credit': str(quote.get('credit', '0.00')),
+			'days_used': quote.get('days_used', 0),
+			'current_daily_rate': str(quote.get('current_daily_rate', '0.00')),
 			'effective_at': quote.get('effective_at'),
 			'summary': quote.get('summary', ''),
 		}

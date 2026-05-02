@@ -1,12 +1,8 @@
 from pathlib import Path
 import os
-from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Load environment variables from .env file
-load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 
 # Quick-start development settings - unsuitable for production
@@ -282,7 +278,7 @@ WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN', '')
 WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 
 # Gemini AI (load from environment variables)
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
 
 # Cashfree Payments
 CASHFREE_CLIENT_ID = os.environ.get('CASHFREE_CLIENT_ID', '')

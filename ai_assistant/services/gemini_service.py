@@ -95,13 +95,10 @@ class GeminiService:
         - sales_summary: User asking for sales performance/metrics.
         - general_query: Anything else.
 
-        If the intent is 'create_invoice', extract:
-        - customer_name: The name of the customer.
-        - customer_email: Any email mentioned.
-        - items: A list of objects with:
-            - product_name: Name of the product.
-            - quantity: Number of units (default 1).
-            - price: Unit price if mentioned (else null).
+        Rules for 'create_invoice':
+        1. If customer name is mentioned but ambiguous (e.g. "Bill to Aman"), set "clarification_needed": true.
+        2. If items are mentioned without quantity or price (and not in context), set "clarification_needed": true.
+        3. If the user is responding to a previous choice, detect the selection.
 
         Respond ONLY with valid JSON:
         {{
@@ -114,9 +111,10 @@ class GeminiService:
                 ]
             }},
             "confidence": 0.0 to 1.0,
-            "clarification_needed": false,
+            "clarification_needed": true/false,
             "clarification_question": "optional question if unclear"
         }}
+
         """
 
 class RateLimiter:

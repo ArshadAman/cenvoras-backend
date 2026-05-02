@@ -11,6 +11,7 @@ from django.db.models import Sum, Count, F, Q
 from datetime import timedelta
 import json
 import logging
+from django.core.cache import cache
 from subscription.services import can_use_feature
 from .services.gemini_service import call_gemini
 from .services.command_parser import command_parser
@@ -302,32 +303,114 @@ class AIChatView(APIView):
                 "mode": "demo"
             })
 
-        # Call Gemini 2.5 Flash
+        # Check for active interactive session
+        session_key = f"ai_chat_state_{user.id}"
+        session_state = cache.get(session_key)
+
+        # 1. Get business context
+        context = gather_business_context(user)
+        
+        # 2. Get AI Response
         answer = call_gemini(question, context, user)
         
-        # Action Detection (Internal Enhancement)
+        # 3. Process Intent / State
         action = None
-        action_keywords = ['create', 'make', 'new', 'invoice', 'bill', 'add', 'customer', 'product']
-        if any(kw in question.lower() for kw in action_keywords):
-            parsed = command_parser.parse(question, context)
-            if parsed and parsed.get('intent') == 'create_invoice' and parsed.get('confidence', 0) > 0.6:
-                from .services.invoice_service import create_invoice_from_ai
-                result = create_invoice_from_ai(user, parsed['entities'], request=self.request)
+        
+        # If we have an active session, process the selection
+        if session_state and session_state.get('step') == 'SELECT_CUSTOMER':
+            # Check if input matches one of the options or a name
+            # For simplicity, if it's not 'Create New', we'll try to find the match
+            if question.lower() == 'create new customer' or 'new' in question.lower():
+                # Proceed to draft or ask more questions
+                cache.delete(session_key)
+            else:
+                from .services.invoice_service import search_customers, create_invoice_from_ai
+                matches = search_customers(user, question)
+                if matches.count() == 1:
+                    entities = session_state.get('entities', {})
+                    entities['customer_name'] = matches[0].name
+                    entities['customer_id'] = str(matches[0].id)
+                    cache.delete(session_key)
+                    # Proceed to create
+                    result = create_invoice_from_ai(user, entities, request=self.request)
+                    if result['status'] == 'success':
+                        action = {
+                            "intent": "create_invoice",
+                            "status": "success",
+                            "invoice_id": result['invoice_id'],
+                            "invoice_number": result['invoice_number']
+                        }
+                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
+                        return Response({"answer": answer, "action": action})
+
+        # Parse intent
+        parsed = command_parser.parse(question, context)
+        
+        if parsed and parsed.get('intent') == 'create_invoice':
+            entities = parsed.get('entities', {})
+            customer_name = entities.get('customer_name')
+            
+            if customer_name:
+                from .services.invoice_service import search_customers, create_invoice_from_ai
+                matches = search_customers(user, customer_name)
                 
-                if result['status'] == 'success':
+                if matches.count() > 1:
+                    # Multiple matches found, ask user to select
+                    options = [{"id": str(m.id), "name": m.name, "detail": m.address or m.phone or "No details"} for m in matches]
+                    options.append({"id": "new", "name": "Create New Customer", "detail": f"Add '{customer_name}' as a new record"})
+                    
                     action = {
-                        "intent": "create_invoice",
-                        "status": "success",
-                        "invoice_id": result['invoice_id'],
-                        "invoice_number": result['invoice_number']
+                        "intent": "select_option",
+                        "type": "customer",
+                        "options": options,
+                        "entities": entities
                     }
-                    answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,.2f}**.\n\nYou can view it using the button below."
+                    answer = f"I found multiple customers matching **{customer_name}**. Which one should I use for this bill?"
+                    
+                    # Store state in cache
+                    cache.set(session_key, {"step": "SELECT_CUSTOMER", "entities": entities}, timeout=600)
+                elif matches.count() == 1:
+                    # One match found, check items
+                    customer = matches[0]
+                    entities['customer_name'] = customer.name
+                    entities['customer_id'] = str(customer.id)
+                    
+                    # Proceed to direct creation or next check (Items)
+                    # For now, let's stick to the direct creation if it's high confidence
+                    if parsed.get('confidence', 0) > 0.8:
+                        result = create_invoice_from_ai(user, entities, request=self.request)
+                        if result['status'] == 'success':
+                            action = {
+                                "intent": "create_invoice",
+                                "status": "success",
+                                "invoice_id": result['invoice_id'],
+                                "invoice_number": result['invoice_number']
+                            }
+                            answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,.2f}**."
+                        else:
+                            action = parsed
+                            action['status'] = 'draft'
+                    else:
+                        action = parsed
+                        action['status'] = 'draft'
                 else:
-                    # Fallback to draft if direct creation fails (e.g. missing info)
-                    action = parsed
-                    action['status'] = 'draft'
-            elif parsed and parsed.get('intent') != 'general_query' and parsed.get('confidence', 0) > 0.6:
+                    # No matches found, ask to create new or proceed as draft
+                    answer = f"I couldn't find a customer named **{customer_name}**. Should I create a new record for them or prepare a draft?"
+                    action = {
+                        "intent": "select_option",
+                        "type": "customer_not_found",
+                        "options": [
+                            {"id": "new", "name": "Create New Customer", "detail": "Add to your records"},
+                            {"id": "draft", "name": "Prepare Draft", "detail": "I'll open the form for you"}
+                        ],
+                        "entities": entities
+                    }
+            else:
+                # No customer name mentioned
                 action = parsed
+                action['status'] = 'draft'
+        elif parsed and parsed.get('intent') != 'general_query' and parsed.get('confidence', 0) > 0.6:
+            action = parsed
 
         return Response({
             "answer": answer, 

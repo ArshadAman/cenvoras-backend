@@ -1,10 +1,27 @@
+from django.db.models import Q
 from django.utils import timezone
-from billing.models import SalesInvoice
+from billing.models import SalesInvoice, Customer
+from inventory.models import Product
 from billing.serializers import SalesInvoiceSerializer
 from decimal import Decimal
 import logging
 
 logger = logging.getLogger(__name__)
+
+def search_customers(user, query):
+    tenant = getattr(user, 'active_tenant', user)
+    return Customer.objects.filter(
+        Q(name__icontains=query) | Q(phone__icontains=query),
+        created_by=tenant
+    )[:5]
+
+def search_products(user, query):
+    tenant = getattr(user, 'active_tenant', user)
+    return Product.objects.filter(
+        name__icontains=query,
+        created_by=tenant
+    )[:5]
+
 
 def get_next_invoice_number_internal(user, prefix='INV-'):
     tenant = getattr(user, 'active_tenant', user)

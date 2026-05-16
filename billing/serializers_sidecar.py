@@ -56,6 +56,41 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
         model = SalesOrderItem
         fields = ['id', 'product', 'product_name', 'quantity', 'price', 'amount']
 
+    def to_internal_value(self, data):
+        # Allow passing product name instead of UUID
+        product_value = data.get('product')
+        if not product_value:
+            raise serializers.ValidationError({'product': 'Product is required.'})
+
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        product_obj = None
+
+        try:
+            # Try UUID first
+            product_uuid = UUID(str(product_value))
+            product_obj = Product.objects.filter(id=product_uuid, created_by=user).first()
+        except (ValueError, TypeError):
+            # Try name
+            product_obj = Product.objects.filter(name__iexact=str(product_value).strip(), created_by=user).first()
+            
+            if not product_obj:
+                # If product doesn't exist, we might want to create it if plan allows, 
+                # but for Sales Order we'll just fail if it's not found for now 
+                # to keep it consistent with other non-accounting vouchers unless specified.
+                # Actually, let's auto-create it if possible to match Sales Invoice behavior.
+                can_auto_create = can_auto_create_inventory_product(user)
+                if can_auto_create:
+                    product_obj = Product.objects.create(
+                        name=str(product_value).strip(),
+                        price=data.get('price', 0),
+                        created_by=user
+                    )
+                else:
+                    raise serializers.ValidationError({'product': f'Product "{product_value}" not found in inventory.'})
+
+        data['product'] = product_obj.id
+        return super().to_internal_value(data)
+
 class SalesOrderSerializer(serializers.ModelSerializer):
     items = SalesOrderItemSerializer(many=True)
     customer_name = serializers.CharField(write_only=True, required=True)

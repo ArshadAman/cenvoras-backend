@@ -80,3 +80,40 @@ class ManagerPermissionMiddleware:
                     return JsonResponse({'success': False, 'error': f"You only have view access for the {module} module."}, status=403)
                 
         return self.get_response(request)
+
+class RegionalContextMiddleware:
+    """
+    Dynamically sets the active timezone and attaches country/currency to the request
+    based on the authenticated user's shop profile.
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from django.utils import timezone
+        
+        # Default fallback
+        request.country = 'IN'
+        request.currency = 'INR'
+        
+        if hasattr(request, 'user') and request.user.is_authenticated:
+            # The active_tenant property gets the parent if the user is a team member
+            tenant = getattr(request.user, 'active_tenant', request.user)
+            country = getattr(tenant, 'country', 'IN')
+            currency = getattr(tenant, 'currency', 'INR')
+            
+            request.country = country
+            request.currency = currency
+            
+            if country == 'AE':
+                timezone.activate('Asia/Dubai')
+            else:
+                timezone.activate('Asia/Kolkata')
+        
+        response = self.get_response(request)
+        
+        # Cleanup
+        from django.utils import timezone
+        timezone.deactivate()
+        
+        return response

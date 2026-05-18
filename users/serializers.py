@@ -133,7 +133,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
-            'parent_business_name', 'plan_name', 'plan_code', 'max_managers'
+            'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
+            'country', 'currency', 'trn', 'is_vat_registered'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -153,7 +154,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'first_name', 'last_name', 'phone', 'business_name', 
             'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
-            'new_password', 'confirm_new_password'
+            'new_password', 'confirm_new_password',
+            'country', 'currency', 'trn', 'is_vat_registered'
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -165,6 +167,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_invoice_prefix(self, value):
@@ -219,6 +222,16 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             if User.objects.filter(phone=phone).exclude(id=user.id).exists():
                 raise serializers.ValidationError({
                     'phone': 'A user with this phone number already exists.'
+                })
+        
+        # TRN Validation
+        country = attrs.get('country', user.country)
+        trn = attrs.get('trn', user.trn)
+        
+        if country == 'AE' and trn:
+            if len(str(trn)) != 15 or not str(trn).isdigit():
+                raise serializers.ValidationError({
+                    'trn': 'UAE Tax Registration Number (TRN) must be exactly 15 digits.'
                 })
         
         return attrs

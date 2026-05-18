@@ -12,10 +12,12 @@ class QuickSignupSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'gstin', 'state', 'city')
+        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'country', 'trn', 'gstin', 'state', 'city')
         extra_kwargs = {
-            'gstin': {'required': False, 'allow_blank': True},
-            'state': {'required': True, 'allow_blank': False, 'allow_null': False},
+            'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'country': {'required': False},
+            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
@@ -49,7 +51,9 @@ class QuickSignupSerializer(serializers.ModelSerializer):
             email=validated_data['email'],
             phone=validated_data['phone'],
             business_name=validated_data['business_name'],
+            country=validated_data.get('country', 'IN'),
             gstin=validated_data.get('gstin', ''),
+            trn=validated_data.get('trn', ''),
             state=validated_data.get('state'),
             city=validated_data.get('city'),
             password=validated_data['password'],

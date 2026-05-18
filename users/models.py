@@ -38,13 +38,11 @@ class User(AbstractUser):
     dl_number = models.CharField(max_length=50, blank=True, null=True, help_text="DL number (optional)")
     business_address = models.TextField(blank=True, null=True, help_text="Complete business address for invoices")
     
-    from cenvoras.constants import IndianStates
     state = models.CharField(
-        max_length=2, 
-        choices=IndianStates.choices, 
+        max_length=50, 
         blank=True, 
         null=True, 
-        help_text="State for tax calculation (Place of Supply)"
+        help_text="State/Region for tax calculation (Place of Supply)"
     )
     city = models.CharField(
         max_length=100, 

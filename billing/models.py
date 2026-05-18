@@ -27,11 +27,10 @@ class Customer(models.Model):
     allow_credit = models.BooleanField(default=True, help_text="If false, block sales when limit exceeded")
     
     state = models.CharField(
-        max_length=2, 
-        choices=IndianStates.choices, 
+        max_length=50, 
         blank=True, 
         null=True,
-        help_text="Customer's State (Determines IGST vs CGST/SGST)"
+        help_text="Customer's State/Region (Determines Tax Treatment)"
     )
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -74,11 +73,10 @@ class Vendor(models.Model):
     address = models.TextField(blank=True, null=True)
     
     state = models.CharField(
-        max_length=2, 
-        choices=IndianStates.choices, 
+        max_length=50, 
         blank=True, 
         null=True,
-        help_text="Vendor's State (Determines IGST vs CGST/SGST)"
+        help_text="Vendor's State/Region (Determines Tax Treatment)"
     )
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -192,11 +190,10 @@ class SalesInvoice(models.Model):
     
     # Tax fields
     place_of_supply = models.CharField(
-        max_length=2, 
-        choices=IndianStates.choices, 
+        max_length=50, 
         blank=True, 
         null=True,
-        help_text="State code where goods are supplied"
+        help_text="State/Region code where goods are supplied"
     )
     
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)

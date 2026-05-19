@@ -171,6 +171,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
             }
             product, created = Product.objects.get_or_create(
                 name=product_value,
+                created_by=user,
                 defaults=defaults
             )
         data['product'] = product

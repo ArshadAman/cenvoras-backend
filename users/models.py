@@ -71,6 +71,8 @@ class User(AbstractUser):
         ('manager', 'Manager'),
         ('salesman', 'Salesman'),
         ('accountant', 'Accountant'),
+        ('hr', 'HR'),
+        ('employee', 'Employee'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='admin', help_text="User capability role")
     

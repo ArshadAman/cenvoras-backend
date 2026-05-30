@@ -41,6 +41,8 @@ MODULE_FEATURES = {
     'shortage_management': 'shortage_management',
     'priority_support': 'priority_support',
     'team': 'team_management',
+    'hr_basic': 'hr_basic',
+    'hr_payroll': 'hr_payroll',
 }
 
 
@@ -221,6 +223,7 @@ def can_use_feature(user: User, feature_code: str) -> bool:
             'integrations',
             'advanced_reports',
             'team_management',
+            'hr_basic',
         }
         return feature_code in allowed
 
@@ -295,6 +298,8 @@ def get_entitlements(user: User) -> dict[str, Any]:
                 'shortage_management': can_use_feature(user, MODULE_FEATURES['shortage_management']),
                 'priority_support': can_use_feature(user, MODULE_FEATURES['priority_support']),
                 'team': can_use_feature(user, MODULE_FEATURES['team']),
+                'hr_basic': can_use_feature(user, MODULE_FEATURES['hr_basic']),
+                'hr_payroll': can_use_feature(user, MODULE_FEATURES['hr_payroll']),
             },
         }
 

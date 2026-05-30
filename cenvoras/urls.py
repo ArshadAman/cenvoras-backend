@@ -41,6 +41,7 @@ urlpatterns = [
     path('api/audit/', include('audit_log.urls')),
     path('api/ai/', include('ai_assistant.urls')),
     path('api/references/', include('references.urls')),
+    path('api/hr/', include('hr.urls')),
     
     # SEO pages (public)
     path('hsn/', include('references.urls')),

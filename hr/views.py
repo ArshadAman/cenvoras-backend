@@ -60,13 +60,15 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         audit_service.log_update(self.request, updated, before=before, after=after)
 
     def perform_destroy(self, instance):
-        # Block deletion if any employees are assigned to this department
-        assigned_count = Employee.objects.filter(department=instance).count()
+        # Block deletion if any active employees are assigned to this department
+        assigned_count = Employee.objects.filter(department=instance, status='active').count()
         if assigned_count > 0:
             raise ValidationError(
                 f"Cannot delete department '{instance.name}': "
-                f"{assigned_count} employee(s) are assigned to it."
+                f"{assigned_count} active employee(s) are assigned to it."
             )
+        # Delete non-active employees assigned to this department to avoid ProtectedError
+        Employee.objects.filter(department=instance).exclude(status='active').delete()
         audit_service.log_delete(self.request, instance)
         instance.delete()
 
@@ -108,13 +110,15 @@ class DesignationViewSet(viewsets.ModelViewSet):
         audit_service.log_update(self.request, updated, before=before, after=after)
 
     def perform_destroy(self, instance):
-        # Block deletion if any employees are assigned to this designation
-        assigned_count = Employee.objects.filter(designation=instance).count()
+        # Block deletion if any active employees are assigned to this designation
+        assigned_count = Employee.objects.filter(designation=instance, status='active').count()
         if assigned_count > 0:
             raise ValidationError(
                 f"Cannot delete designation '{instance.name}': "
-                f"{assigned_count} employee(s) are assigned to it."
+                f"{assigned_count} active employee(s) are assigned to it."
             )
+        # Delete non-active employees assigned to this designation to avoid ProtectedError
+        Employee.objects.filter(designation=instance).exclude(status='active').delete()
         audit_service.log_delete(self.request, instance)
         instance.delete()
 
@@ -930,3 +934,134 @@ class EmployeeQueryViewSet(viewsets.ModelViewSet):
                     send_query_resolution_email.delay(updated_instance.employee.personal_email, updated_instance.employee.full_name, updated_instance.subject, updated_instance.status)
                 else:
                     send_query_resolution_email(updated_instance.employee.personal_email, updated_instance.employee.full_name, updated_instance.subject, updated_instance.status)
+
+
+from django.db.models import Q
+from .models import EmployeeNotification
+from .serializers import EmployeeNotificationSerializer
+
+class EmployeeNotificationViewSet(viewsets.ModelViewSet):
+    serializer_class = EmployeeNotificationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        
+        if user.role == 'employee':
+            try:
+                employee = Employee.objects.get(user=user)
+                return EmployeeNotification.objects.filter(
+                    tenant=tenant
+                ).filter(
+                    Q(employee__isnull=True) | Q(employee=employee)
+                )
+            except Employee.DoesNotExist:
+                return EmployeeNotification.objects.none()
+                
+        return EmployeeNotification.objects.filter(tenant=tenant)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        
+        if user.role == 'employee':
+            raise ValidationError("Employees cannot send notifications.")
+            
+        instance = serializer.save(tenant=tenant, created_by=user)
+        
+        # Dispatch emails
+        from django.conf import settings
+        from hr.tasks import send_via_integration
+        
+        title = instance.title
+        message = instance.message
+        
+        def get_html_notification(to_name, announcement_title, announcement_message):
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body {{
+                        font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+                        background-color: #08090c;
+                        color: #e2e8f0;
+                        margin: 0;
+                        padding: 0;
+                    }}
+                    .container {{
+                        max-width: 600px;
+                        margin: 40px auto;
+                        background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+                        border: 1px solid rgba(255, 255, 255, 0.08);
+                        border-radius: 24px;
+                        padding: 40px;
+                        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+                    }}
+                    .logo {{
+                        font-size: 24px;
+                        font-weight: 800;
+                        background: linear-gradient(to right, #22d3ee, #6366f1);
+                        -webkit-background-clip: text;
+                        -webkit-text-fill-color: transparent;
+                        margin-bottom: 30px;
+                        letter-spacing: 1px;
+                        text-align: center;
+                    }}
+                    .congrats-title {{
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: #ffffff;
+                        margin-bottom: 20px;
+                        border-left: 4px solid #6366f1;
+                        padding-left: 12px;
+                    }}
+                    .welcome-text {{
+                        font-size: 15px;
+                        line-height: 1.6;
+                        color: #94a3b8;
+                        margin-bottom: 30px;
+                        white-space: pre-wrap;
+                    }}
+                    .footer {{
+                        margin-top: 40px;
+                        font-size: 12px;
+                        color: #475569;
+                        border-top: 1px solid rgba(255, 255, 255, 0.05);
+                        padding-top: 20px;
+                        text-align: center;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="logo">CENVORA</div>
+                    <div class="congrats-title">{announcement_title}</div>
+                    <div class="welcome-text">
+Hello {to_name},
+
+An official notification has been broadcasted by the HR/Admin team:
+
+{announcement_message}
+                    </div>
+                    <div class="footer">
+                        &copy; 2026 Cenvora Cloud. All rights reserved. Sent securely on behalf of {tenant.business_name or 'HR Team'}.
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+        if instance.employee:
+            if instance.employee.personal_email:
+                html = get_html_notification(instance.employee.full_name, title, message)
+                send_via_integration(instance.employee.personal_email, title, message, html_body=html)
+        else:
+            # Broadcast to all active employees
+            active_emps = Employee.objects.filter(tenant=tenant, status='active')
+            for emp in active_emps:
+                if emp.personal_email:
+                    html = get_html_notification(emp.full_name, title, message)
+                    send_via_integration(emp.personal_email, title, message, html_body=html)

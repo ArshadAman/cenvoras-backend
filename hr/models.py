@@ -656,6 +656,7 @@ class EmployeeTask(models.Model):
     description = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     completed_at = models.DateTimeField(null=True, blank=True)
+    deadline = models.DateField(null=True, blank=True)
     assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='assigned_tasks')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -685,4 +686,39 @@ class EmployeeQuery(models.Model):
 
     def __str__(self):
         return f"{self.subject} - {self.employee.full_name}"
+
+
+class EmployeeNotification(models.Model):
+    """
+    Notifications/announcements sent by HR/Admins to one or all employees.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='hr_notifications',
+    )
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+        null=True,
+        blank=True,  # null means broadcasted to ALL employees
+    )
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_notifications'
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        target = self.employee.full_name if self.employee else "ALL"
+        return f"{self.title} to {target}"
 

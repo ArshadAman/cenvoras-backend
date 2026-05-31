@@ -25,7 +25,7 @@ from django.conf import settings
 from hr.models import Employee
 from integration.tasks import send_async_email_notification
 
-def send_via_integration(email, subject, message):
+def send_via_integration(email, subject, message, html_body=None):
     try:
         emp = Employee.objects.filter(personal_email=email).first()
         if emp:
@@ -35,7 +35,8 @@ def send_via_integration(email, subject, message):
                 subject,
                 message,
                 'Employee',
-                str(emp.id)
+                str(emp.id),
+                html_body=html_body
             )
         else:
             print(f"Could not find employee for email: {email}")
@@ -44,9 +45,163 @@ def send_via_integration(email, subject, message):
 
 @shared_task
 def send_employee_account_creation_email(employee_email, name, password, business_name):
+    # Retrieve designation
+    try:
+        emp = Employee.objects.filter(personal_email=employee_email).first()
+        designation = emp.designation.name if (emp and emp.designation) else "Team Member"
+    except Exception:
+        designation = "Team Member"
+
     subject = f"Welcome to {business_name} - Your Account Credentials"
     message = f"Hi {name},\n\nYour account has been created successfully.\n\nLogin Email: {employee_email}\nPassword: {password}\n\nPlease log in and change your password.\n\nBest,\nHR Team"
-    send_via_integration(employee_email, subject, message)
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{
+                font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+                background-color: #08090c;
+                color: #e2e8f0;
+                margin: 0;
+                padding: 0;
+            }}
+            .container {{
+                max-width: 600px;
+                margin: 40px auto;
+                background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 24px;
+                padding: 40px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+                text-align: center;
+            }}
+            .logo {{
+                font-size: 24px;
+                font-weight: 800;
+                background: linear-gradient(to right, #22d3ee, #6366f1);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                margin-bottom: 30px;
+                letter-spacing: 1px;
+            }}
+            .congrats-title {{
+                font-size: 28px;
+                font-weight: 700;
+                color: #ffffff;
+                margin-bottom: 10px;
+            }}
+            .designation-badge {{
+                display: inline-block;
+                background: rgba(99, 102, 241, 0.15);
+                color: #a5b4fc;
+                border: 1px solid rgba(99, 102, 241, 0.3);
+                border-radius: 50px;
+                padding: 6px 16px;
+                font-size: 14px;
+                font-weight: 600;
+                margin-bottom: 24px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }}
+            .welcome-text {{
+                font-size: 16px;
+                line-height: 1.6;
+                color: #94a3b8;
+                margin-bottom: 30px;
+            }}
+            .credential-card {{
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                border-radius: 16px;
+                padding: 24px;
+                margin-bottom: 30px;
+                text-align: left;
+            }}
+            .credential-title {{
+                font-size: 12px;
+                font-weight: 700;
+                color: #64748b;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 12px;
+            }}
+            .credential-row {{
+                margin-bottom: 12px;
+                font-size: 15px;
+            }}
+            .credential-row:last-child {{
+                margin-bottom: 0;
+            }}
+            .label {{
+                color: #64748b;
+                display: inline-block;
+                width: 100px;
+            }}
+            .value {{
+                color: #ffffff;
+                font-family: monospace;
+                font-weight: 600;
+            }}
+            .btn-primary {{
+                display: inline-block;
+                background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
+                color: #0f172a !important;
+                text-decoration: none;
+                font-weight: 700;
+                font-size: 16px;
+                padding: 14px 32px;
+                border-radius: 14px;
+                margin-top: 10px;
+                box-shadow: 0 10px 20px rgba(6, 182, 212, 0.2);
+                transition: transform 0.2s, box-shadow 0.2s;
+            }}
+            .footer {{
+                margin-top: 40px;
+                font-size: 12px;
+                color: #475569;
+                border-top: 1px solid rgba(255, 255, 255, 0.05);
+                padding-top: 20px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="logo">CENVORA</div>
+            <div class="congrats-title">Congratulations, {name}!</div>
+            <div class="designation-badge">{designation}</div>
+            <div class="welcome-text">
+                Welcome to <strong>{business_name}</strong>! We are absolutely thrilled to have you join our team. 
+                Your workspace has been successfully initialized, and your secure portal credentials are ready below.
+            </div>
+            <div class="credential-card">
+                <div class="credential-title">Secure Portal Access</div>
+                <div class="credential-row">
+                    <span class="label">Login Email:</span>
+                    <span class="value">{employee_email}</span>
+                </div>
+                <div class="credential-row">
+                    <span class="label">Password:</span>
+                    <span class="value">{password}</span>
+                </div>
+            </div>
+            <div style="margin: 30px 0;">
+                <a href="https://cenvora.app/login" class="btn-primary">Access Your Portal</a>
+            </div>
+            <div class="welcome-text" style="font-size: 14px; margin-top: 20px;">
+                <em>Note: For security reasons, please log in and update your password immediately upon access.</em>
+            </div>
+            <div class="footer">
+                &copy; 2026 Cenvora Cloud. All rights reserved. Sent securely on behalf of {business_name} HR Team.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    send_via_integration(employee_email, subject, message, html_body=html_body)
 
 @shared_task
 def send_task_assignment_email(employee_email, name, task_title):

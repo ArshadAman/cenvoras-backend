@@ -9,7 +9,7 @@ from .views import (
     SalaryStructureViewSet, SalaryAssignmentViewSet,
     PayrollRunViewSet, PayslipViewSet,
     PayslipPDFView, HRDashboardView, SetupDefaultsView,
-    EmployeeTaskViewSet, EmployeeQueryViewSet
+    EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet
 )
 
 router = DefaultRouter()
@@ -26,6 +26,7 @@ router.register(r'payroll-runs', PayrollRunViewSet, basename='payroll-run')
 router.register(r'payslips', PayslipViewSet, basename='payslip')
 router.register(r'tasks', EmployeeTaskViewSet, basename='task')
 router.register(r'queries', EmployeeQueryViewSet, basename='query')
+router.register(r'notifications', EmployeeNotificationViewSet, basename='notification')
 
 urlpatterns = [
     path('attendance/bulk/', BulkAttendanceView.as_view(), name='bulk-attendance'),

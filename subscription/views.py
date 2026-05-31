@@ -226,7 +226,7 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 	current_cycle = getattr(subscription, 'billing_cycle', BillingCycle.MONTHLY)
 	if target_code == current_code and target_cycle == current_cycle and active_until:
 		target_price_full = target_plan.get_price_for_cycle(target_cycle)
-		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		base_price_before_discount = Decimal(str(target_plan.original_monthly_price or 0.0)) * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
 		if base_price_before_discount <= 0:
 			base_price_before_discount = target_price_full
 
@@ -256,7 +256,7 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 		unused_value = _quantize_money(current_price * remaining_ratio)
 		
 		target_price_full = target_plan.get_price_for_cycle(target_cycle)
-		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		base_price_before_discount = Decimal(str(target_plan.original_monthly_price or 0.0)) * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
 		if base_price_before_discount <= 0:
 			base_price_before_discount = target_price_full
 
@@ -282,7 +282,7 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 
 	if target_rank >= current_rank:
 		target_price_full = target_plan.get_price_for_cycle(target_cycle)
-		base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		base_price_before_discount = Decimal(str(target_plan.original_monthly_price or 0.0)) * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
 		if base_price_before_discount <= 0:
 			base_price_before_discount = target_price_full
 
@@ -310,7 +310,7 @@ def _calculate_plan_change_quote(subscription, target_plan, now, target_cycle=Bi
 		}
 
 	target_price_full = target_plan.get_price_for_cycle(target_cycle)
-	base_price_before_discount = target_plan.original_monthly_price * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+	base_price_before_discount = Decimal(str(target_plan.original_monthly_price or 0.0)) * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
 	if base_price_before_discount <= 0:
 		base_price_before_discount = target_price_full
 
@@ -356,7 +356,7 @@ def plan_change_quote(request):
 	now = timezone.now()
 	subscription = TenantSubscription.objects.filter(tenant=tenant).select_related('plan').first()
 	if not target_plan:
-		free_plan = Plan(code='free', name='Starter', monthly_price=Decimal('0.00'))
+		free_plan = Plan(code='free', name='Starter', monthly_price=Decimal('0.00'), original_monthly_price=Decimal('0.00'))
 		quote = _calculate_plan_change_quote(subscription, free_plan, now, target_cycle)
 	else:
 		quote = _calculate_plan_change_quote(subscription, target_plan, now, target_cycle)

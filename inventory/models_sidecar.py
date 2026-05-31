@@ -57,6 +57,11 @@ class ProductMeta(models.Model):
     storage_condition = models.CharField(max_length=150, blank=True, null=True, help_text="Specific storage conditions (e.g., 'Store in a cool, dry place')")
 
     
+    def save(self, *args, **kwargs):
+        if self.barcode == '':
+            self.barcode = None
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Meta for {self.product.name}"
 

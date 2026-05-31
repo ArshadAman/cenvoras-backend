@@ -730,6 +730,45 @@ def password_reset_confirm_view(request, uidb64, token):
     except (User.DoesNotExist, ValueError, TypeError):
         return Response({'error': 'Invalid request.'}, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def change_password_view(request):
+    """
+    Endpoint for any authenticated user (including employees) to change their password.
+    """
+    user = request.user
+    current_password = request.data.get('current_password')
+    new_password = request.data.get('new_password')
+    confirm_new_password = request.data.get('confirm_new_password')
+
+    if not current_password or not new_password or not confirm_new_password:
+        return Response(
+            {'error': 'Current password, new password, and confirmation are required.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if new_password != confirm_new_password:
+        return Response(
+            {'confirm_new_password': ['New passwords do not match.']},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if len(new_password) < 8:
+        return Response(
+            {'new_password': ['Password must be at least 8 characters long.']},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not user.check_password(current_password):
+        return Response(
+            {'current_password': ['Current password is incorrect.']},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user.set_password(new_password)
+    user.save(update_fields=['password'])
+    return Response({'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
 from rest_framework import viewsets
 from .serializers import TeamMemberSerializer
 

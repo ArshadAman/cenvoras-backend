@@ -15,6 +15,11 @@ class ProductMetaSerializer(serializers.ModelSerializer):
     temperature = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     storage_condition = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
+    def validate_barcode(self, value):
+        if value == '':
+            return None
+        return value
+
     class Meta:
         model = ProductMeta
         fields = [

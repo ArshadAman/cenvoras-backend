@@ -321,4 +321,4 @@ class EmployeeNotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeNotification
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'created_by']
+        read_only_fields = ['id', 'created_at', 'created_by', 'tenant']

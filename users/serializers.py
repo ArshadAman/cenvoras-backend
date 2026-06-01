@@ -68,7 +68,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'first_name', 'last_name', 'business_name', 'business_address', 
-            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city'
+            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city',
+            'country', 'trn'
         )
         extra_kwargs = {
             'business_name': {'required': True},
@@ -78,6 +79,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'country': {'required': False},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def update(self, instance, validated_data):

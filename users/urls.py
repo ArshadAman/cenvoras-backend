@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    quick_signup_view, CustomTokenObtainPairView, view_profile, update_profile,
+    quick_signup_view, CustomTokenObtainPairView, google_login_view, view_profile, update_profile,
     profile_setup_view, password_reset_request_view, password_reset_confirm_view,
     password_reset_otp_confirm_view, change_password_view
 )
@@ -15,6 +15,7 @@ urlpatterns = [
     # 🚀 Optimized Signup Flow
     path('signup/', quick_signup_view, name='quick_signup'),  # Step 1: Minimal friction signup
     path('login/', CustomTokenObtainPairView.as_view(), name='login'),
+    path('google-login/', google_login_view, name='google_login'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     
     # 👤 Profile Management

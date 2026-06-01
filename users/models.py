@@ -20,7 +20,7 @@ class User(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
     # Core signup fields
-    phone = models.CharField(max_length=15, unique=True, null=True, blank=True, help_text="Phone number for login recovery and communication")
+    phone = models.CharField(max_length=15, null=True, blank=True, help_text="Phone number for login recovery and communication")
     business_name = models.CharField(max_length=100, blank=True, null=True, help_text="Business/Shop name (appears on invoices)")
     invoice_prefix = models.CharField(max_length=20, default='INV-', help_text="Default invoice prefix for this user")
     

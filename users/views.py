@@ -811,3 +811,148 @@ class TeamViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
+@swagger_auto_schema(
+    method='post',
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['credential'],
+        properties={
+            'credential': openapi.Schema(type=openapi.TYPE_STRING, description='Google OAuth 2.0 credential (ID Token)')
+        }
+    ),
+    responses={200: openapi.Response(
+        description="Google Login Successful",
+        examples={
+            "application/json": {
+                "success": True,
+                "message": "Welcome back!",
+                "token": "access_token",
+                "refresh": "refresh_token",
+                "user": {},
+                "is_new_user": False,
+                "profile_completed": True
+            }
+        }
+    ), 400: openapi.Response(
+        description="Invalid Token",
+        examples={
+            "application/json": {
+                "success": False,
+                "error": "Invalid or expired Google token"
+            }
+        }
+    )}
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def google_login_view(request):
+    """
+    POST /api/users/google-login/
+    Receives an ID Token (credential) from Google GIS, validates it, and logs the user in.
+    Creates a new user account if they don't exist yet.
+    """
+    import requests
+    from rest_framework_simplejwt.tokens import RefreshToken
+    
+    credential = request.data.get('credential')
+    if not credential:
+        return Response({'success': False, 'error': 'Credential token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        # Validate ID token using Google's tokeninfo API
+        # This automatically validates expiration and signature
+        response = requests.get(
+            f'https://oauth2.googleapis.com/tokeninfo?id_token={credential}',
+            timeout=10
+        )
+        if response.status_code != 200:
+            return Response({'success': False, 'error': 'Invalid or expired Google token'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        token_info = response.json()
+        
+        # Verify the client ID matches
+        client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None)
+        aud = token_info.get('aud')
+        if client_id and aud != client_id:
+            if not settings.DEBUG:
+                return Response({'success': False, 'error': 'Token audience mismatch'}, status=status.HTTP_400_BAD_REQUEST)
+                
+        email = _normalize_email(token_info.get('email'))
+        if not email:
+            return Response({'success': False, 'error': 'Email not provided by Google account'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        User = get_user_model()
+        user = User.objects.filter(email=email).first()
+        is_new_user = False
+        
+        if user:
+            # Restrict Google Sign-in to business owners / parent admin accounts
+            if user.parent is not None or user.role != 'admin':
+                return Response({
+                    'success': False,
+                    'error': 'Google Sign-in is only available for business owner (admin) accounts. Please sign in with your email and password.'
+                }, status=status.HTTP_403_FORBIDDEN)
+                
+            user.last_login_at = timezone.now()
+            user.save(update_fields=['last_login_at'])
+        else:
+            # Register a new user with basic details from Google token info
+            is_new_user = True
+            first_name = token_info.get('given_name', '')
+            last_name = token_info.get('family_name', '')
+            
+            # Since signup requires simple password, we generate a random secure one
+            import secrets
+            random_password = secrets.token_urlsafe(24)
+            
+            trial_end = timezone.now() + timedelta(days=14)
+            
+            with transaction.atomic():
+                user = User.objects.create_user(
+                    username=email,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    trial_ends_at=trial_end,
+                    password=random_password,
+                    last_login_at=timezone.now(),
+                    role='admin',  # Google OAuth registers new users as business owner admin by default
+                )
+            
+        # Create audit log entry for the login
+        from audit_log.models import AuditLog
+        from audit_log.signals import get_client_ip
+        AuditLog.objects.create(
+            tenant=user.active_tenant,
+            user=user,
+            user_email=user.email,
+            action='LOGIN',
+            model_name='User',
+            object_id=str(user.id),
+            object_repr=str(user),
+            ip_address=get_client_ip(request)
+        )
+        
+        # Generate custom JWT tokens with role, email, username
+        refresh = RefreshToken.for_user(user)
+        refresh['username'] = user.username
+        refresh['email'] = user.email
+        refresh['role'] = user.role
+        
+        return Response({
+            'success': True,
+            'message': 'Welcome to Cenvora!' if not is_new_user else 'Account created successfully with Google!',
+            'token': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserProfileSerializer(user).data,
+            'is_new_user': is_new_user,
+            'profile_completed': user.profile_completed
+        }, status=status.HTTP_200_OK)
+        
+    except requests.RequestException:
+        return Response({'success': False, 'error': 'Failed to communicate with Google authentication server'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as e:
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+

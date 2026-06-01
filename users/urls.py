@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     quick_signup_view, CustomTokenObtainPairView, view_profile, update_profile,
     profile_setup_view, password_reset_request_view, password_reset_confirm_view,
-    password_reset_otp_confirm_view
+    password_reset_otp_confirm_view, change_password_view
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
@@ -21,6 +21,7 @@ urlpatterns = [
     path('profile/', view_profile, name='view_profile'),  # GET: View complete profile
     path('profile/update/', update_profile, name='update_profile'),  # PUT/PATCH: Update profile
     path('profile/setup/', profile_setup_view, name='profile_setup'),  # Step 2: Complete profile inside app
+    path('change-password/', change_password_view, name='change_password'),
     
     # Password Management
     path('password-reset/', password_reset_request_view, name='password_reset_request'),

@@ -6,7 +6,7 @@ from .models import (
     Department, Designation, Employee, AttendanceRecord,
     LeaveType, LeaveBalance, LeaveApplication,
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
-    PayrollRun, Payslip, EmployeeTask, EmployeeQuery
+    PayrollRun, Payslip, EmployeeTask, EmployeeQuery, EmployeeNotification
 )
 
 
@@ -312,3 +312,13 @@ class EmployeeQuerySerializer(serializers.ModelSerializer):
         model = EmployeeQuery
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at', 'resolved_by']
+
+
+class EmployeeNotificationSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+
+    class Meta:
+        model = EmployeeNotification
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'created_by']

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # ---- Transactional Email Async Task ----
 
 @shared_task(bind=True, autoretry_for=(http_requests.RequestException,), retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 3})
-def send_async_email_notification(self, user_id, to_email, subject, body, related_model='', related_id=''):
+def send_async_email_notification(self, user_id, to_email, subject, body, related_model='', related_id='', html_body=None):
     """
     Asynchronously sends an email via transactional email API.
     Set TRANSACTIONAL_EMAIL_API_KEY and TRANSACTIONAL_EMAIL_SENDER_EMAIL in Django settings/.env.
@@ -78,7 +78,7 @@ def send_async_email_notification(self, user_id, to_email, subject, body, relate
             "recipients": [{"email": to_email}],
             "content": {
                 "subject": subject,
-                "html_body": body.replace("\n", "<br>"),
+                "html_body": html_body if html_body else body.replace("\n", "<br>"),
                 "text_body": body,
                 "reply_to": {"email": FROM_EMAIL, "name": FROM_NAME},
             },

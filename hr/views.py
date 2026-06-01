@@ -885,12 +885,16 @@ class EmployeeTaskViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if user.role == 'employee':
-            # Employees can only update status to completed
-            if 'status' in serializer.validated_data and serializer.validated_data['status'] == 'completed':
-                from django.utils import timezone
-                serializer.save(completed_at=timezone.now())
+            # Employees can update status to in_progress or completed
+            status_val = serializer.validated_data.get('status')
+            if status_val in ['in_progress', 'completed']:
+                if status_val == 'completed':
+                    from django.utils import timezone
+                    serializer.save(completed_at=timezone.now())
+                else:
+                    serializer.save()
             else:
-                raise ValidationError("Employees can only mark tasks as completed.")
+                raise ValidationError("Employees can only mark tasks as in progress or completed.")
         else:
             serializer.save()
 

@@ -553,7 +553,7 @@ def create_plan_payment_order(request):
 		'customer_details': {
 			'customer_id': str(tenant.id),
 			'customer_name': 'Cenvora Customer',
-			'customer_email': tenant.email or 'cenvoras@gmail.com',
+			'customer_email': tenant.email or 'support@cenvora.app',
 			'customer_phone': tenant.phone or '9999999999',
 		},
 		'order_note': f"Cenvora Subscription - {quote.get('summary') or f'Plan payment for {plan.name}'}",

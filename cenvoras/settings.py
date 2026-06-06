@@ -358,7 +358,7 @@ BACKUP_CLOUDINARY_TYPE = os.environ.get('BACKUP_CLOUDINARY_TYPE', 'private').str
 BACKUP_SCHEDULE_MINUTE = int(os.environ.get('BACKUP_SCHEDULE_MINUTE', 15))
 BACKUP_MAX_ATTEMPTS = int(os.environ.get('BACKUP_MAX_ATTEMPTS', 3))
 BACKUP_CIRCUIT_OPEN_SECONDS = int(os.environ.get('BACKUP_CIRCUIT_OPEN_SECONDS', 21600))
-BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'cenvoras@gmail.com')
+BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'support@cenvora.app')
 
 # Google OAuth Settings
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip('"').strip("'")

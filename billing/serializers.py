@@ -584,6 +584,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
         data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))
+        data['customer_gstin'] = getattr(customer, 'gstin', None) if customer else data.get('customer_gstin')
         return data
 
     @staticmethod
@@ -676,6 +677,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer_email = data.get('customer_email', '')
         customer_phone = data.get('customer_phone', '')
         customer_address = data.get('customer_address', '')
+        customer_gstin = data.get('customer_gstin', '')
         
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
@@ -703,13 +705,21 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 # Try to find customer by email
                 customer_obj = Customer.objects.get(email=customer_email, created_by=user)
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
-                # Update customer name if different
+                # Update details if different
+                updated = False
                 if customer_obj.name != customer_name:
                     customer_obj.name = customer_name
-                    if customer_phone:
-                        customer_obj.phone = customer_phone
-                    if customer_address:
-                        customer_obj.address = customer_address
+                    updated = True
+                if customer_phone and customer_phone != customer_obj.phone:
+                    customer_obj.phone = customer_phone
+                    updated = True
+                if customer_address and customer_address != customer_obj.address:
+                    customer_obj.address = customer_address
+                    updated = True
+                if customer_gstin and customer_gstin != customer_obj.gstin:
+                    customer_obj.gstin = customer_gstin
+                    updated = True
+                if updated:
                     customer_obj.save()
                     print("DEBUG SalesInvoiceSerializer: Updated customer details")
             except Customer.DoesNotExist:
@@ -721,6 +731,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         email=customer_email,
                         phone=customer_phone,
                         address=customer_address,
+                        gstin=customer_gstin or None,
                         created_by=user,
                     )
                     print("DEBUG SalesInvoiceSerializer: New customer created:", customer_obj.id)
@@ -740,13 +751,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if customer_address and customer_address != customer_obj.address:
                         customer_obj.address = customer_address
                         updated = True
+                    if customer_gstin and customer_gstin != customer_obj.gstin:
+                        customer_obj.gstin = customer_gstin
+                        updated = True
                     if updated:
-                        customer_obj.save(update_fields=['phone', 'address'])
+                        customer_obj.save()
                 else:
                     customer_obj = Customer.objects.create(
                         name=customer_name.strip(),
                         phone=customer_phone or None,
                         address=customer_address or None,
+                        gstin=customer_gstin or None,
                         created_by=user,
                     )
 

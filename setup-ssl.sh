@@ -43,7 +43,7 @@ mkdir -p /etc/letsencrypt/renewal-hooks/post
 cat > /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh <<'EOFHOOK'
 #!/bin/bash
 echo "$(date): Reloading Nginx after certificate renewal..."
-systemctl reload nginx
+docker exec cenvoras-backend-nginx-1 nginx -s reload
 echo "$(date): Nginx reloaded successfully"
 EOFHOOK
 
@@ -53,7 +53,7 @@ echo "✓ Renewal hook created"
 # 5. Setup cron for automatic renewal
 echo ""
 echo "Step 5: Setting up automatic certificate renewal..."
-echo "0 3 * * * root /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'" | tee /etc/cron.d/certbot-cenvoras > /dev/null
+echo "0 3 * * * root /usr/bin/certbot renew --quiet --post-hook 'docker exec cenvoras-backend-nginx-1 nginx -s reload'" | tee /etc/cron.d/certbot-cenvoras > /dev/null
 
 echo "✓ Cron job created (runs daily at 3 AM)"
 

@@ -128,3 +128,27 @@ class SalaryAPITests(APITestCase):
         # Oldest should be the 40000 one
         self.assertEqual(assignments[1].monthly_ctc, Decimal('40000.00'))
         self.assertEqual(assignments[1].computed_components['Basic'], '40000.00')
+
+    def test_increment_salary_with_effective_date_and_no_prior_assignment(self):
+        """Test increment_salary action when employee has no prior assignment and sends effective_date."""
+        url = reverse('employee-increment-salary', kwargs={'pk': self.emp.id})
+        payload = {
+            'new_salary': '75000.00',
+            'effective_date': '2026-09-01',
+            'reason': 'Annual Promotion'
+        }
+        res = self.client.post(url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['new_ctc'], '75000.00')
+
+        # Employee salary assignment should be created and updated
+        assignment = self.emp.salary_assignments.order_by('-effective_from').first()
+        self.assertIsNotNone(assignment)
+        self.assertEqual(assignment.monthly_ctc, Decimal('75000.00'))
+
+        # Salary history should be logged
+        history = self.emp.salary_history.first()
+        self.assertIsNotNone(history)
+        self.assertEqual(history.new_salary, Decimal('75000.00'))
+        self.assertEqual(history.reason, 'Annual Promotion')
+

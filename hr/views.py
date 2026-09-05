@@ -1,11 +1,16 @@
 # HR DRF ViewSets and function-based views — implemented in tasks 6–16
 
+import logging
+from decimal import Decimal
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from rest_framework.decorators import action
 from django.db import transaction
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Department, Designation, Employee, AttendanceRecord,
@@ -230,12 +235,12 @@ class EmployeeViewSet(viewsets.ModelViewSet):
 
         increment_percentage = request.data.get('increment_percentage')
         new_salary_input = request.data.get('new_salary')
-        effective_from = request.data.get('effective_from')
+        effective_from = request.data.get('effective_from') or request.data.get('effective_date')
         reason = request.data.get('reason', '')
         structure_id = request.data.get('salary_structure')
 
         if not effective_from:
-            raise ValidationError("effective_from date is required.")
+            effective_from = timezone.now().date()
 
         latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by('-effective_from').first()
         prev_ctc = latest_assignment.monthly_ctc if latest_assignment else Decimal('0.00')
@@ -248,15 +253,52 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 raise ValidationError("Specified salary structure not found.")
 
         if not target_structure:
-            raise ValidationError("A valid salary structure must be assigned.")
+            target_structure = SalaryStructure.objects.filter(tenant=tenant).first()
+            if not target_structure:
+                target_structure = SalaryStructure.objects.create(
+                    tenant=tenant,
+                    name="Standard Salary Structure",
+                    description="Default company salary structure",
+                )
 
-        from decimal import Decimal
-        if new_salary_input is not None and new_salary_input != '':
+        if not target_structure.components.filter(is_basic=True).exists():
+            SalaryComponent.objects.create(
+                salary_structure=target_structure,
+                name="Basic",
+                type="earning",
+                component_type="pct_gross",
+                value=Decimal('50.00'),
+                is_basic=True,
+                is_taxable=True,
+                order=1
+            )
+            SalaryComponent.objects.create(
+                salary_structure=target_structure,
+                name="HRA",
+                type="earning",
+                component_type="pct_gross",
+                value=Decimal('25.00'),
+                is_basic=False,
+                is_taxable=True,
+                order=2
+            )
+            SalaryComponent.objects.create(
+                salary_structure=target_structure,
+                name="Special Allowance",
+                type="earning",
+                component_type="pct_gross",
+                value=Decimal('25.00'),
+                is_basic=False,
+                is_taxable=True,
+                order=3
+            )
+
+        if new_salary_input is not None and str(new_salary_input).strip() != '':
             try:
                 new_ctc = Decimal(str(new_salary_input)).quantize(Decimal('0.01'))
             except Exception:
                 raise ValidationError("Invalid new_salary format.")
-        elif increment_percentage:
+        elif increment_percentage is not None and str(increment_percentage).strip() != '':
             try:
                 pct = Decimal(str(increment_percentage))
                 new_ctc = (prev_ctc * (Decimal('1.00') + (pct / Decimal('100.0')))).quantize(Decimal('0.01'))
@@ -272,7 +314,23 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             'monthly_ctc': new_ctc
         }
 
-        serializer = EmployeeSalaryAssignmentSerializer(data=data, context={'request': request})
+        existing_assignment = EmployeeSalaryAssignment.objects.filter(
+            employee=instance,
+            effective_from=effective_from
+        ).first()
+
+        if existing_assignment:
+            serializer = EmployeeSalaryAssignmentSerializer(
+                existing_assignment,
+                data=data,
+                partial=True,
+                context={'request': request}
+            )
+        else:
+            serializer = EmployeeSalaryAssignmentSerializer(
+                data=data,
+                context={'request': request}
+            )
         serializer.is_valid(raise_exception=True)
         serializer.save(tenant=tenant)
 
@@ -285,7 +343,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             new_salary=new_ctc,
             salary_structure=target_structure,
             reason=reason or f"Salary revision to ₹{new_ctc}",
-            approved_by=request.user,
+            approved_by=request.user if request.user.is_authenticated else None,
         )
 
         audit_service.log_create(
@@ -301,13 +359,16 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         )
 
         if instance.personal_email:
-            from hr.tasks import send_salary_increment_email
-            from django.conf import settings
-            use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-            if use_celery:
-                send_salary_increment_email.delay(instance.personal_email, instance.full_name, str(new_ctc))
-            else:
-                send_salary_increment_email(instance.personal_email, instance.full_name, str(new_ctc))
+            try:
+                from hr.tasks import send_salary_increment_email
+                from django.conf import settings
+                use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+                if use_celery:
+                    send_salary_increment_email.delay(instance.personal_email, instance.full_name, str(new_ctc))
+                else:
+                    send_salary_increment_email(instance.personal_email, instance.full_name, str(new_ctc))
+            except Exception as email_err:
+                logger.warning(f"Failed to send salary increment email to {instance.personal_email}: {email_err}")
 
         return Response({
             'status': 'Salary updated successfully',

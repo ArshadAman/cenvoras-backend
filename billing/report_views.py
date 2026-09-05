@@ -194,10 +194,24 @@ def item_wise_pl_report(request):
             product_data[pid]['product_name'] = item.product.name
             product_data[pid]['unit'] = item.unit or item.product.unit
             product_data[pid]['qty_sold'] += item.quantity
-            product_data[pid]['revenue'] += float(item.amount)
+            
+            # Revenue = (quantity * price - discount), before tax
+            qty = Decimal(str(item.quantity))
+            sale_price = Decimal(str(item.price))
+            discount = Decimal(str(item.discount or 0))
+            base_amount = qty * sale_price
+            discount_amount = (base_amount * discount) / Decimal('100')
+            line_revenue = base_amount - discount_amount
+            product_data[pid]['revenue'] += float(line_revenue)
 
-            # Cost: use batch cost_price if available, else product.price (purchase price)
-            cost_per_unit = float(item.batch.cost_price) if item.batch and item.batch.cost_price else float(item.product.price)
+            # Cost: batch.cost_price -> product.price -> product.sale_price (fallback)
+            if item.batch and item.batch.cost_price:
+                cost_per_unit = float(item.batch.cost_price)
+            elif item.product.price:
+                cost_per_unit = float(item.product.price)
+            else:
+                # Fallback to sale_price if no cost data
+                cost_per_unit = float(item.product.sale_price or 0)
             product_data[pid]['cost'] += cost_per_unit * item.quantity
 
         results = []

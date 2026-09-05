@@ -4,6 +4,12 @@ import os
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / '.env')
+except ImportError:
+    pass
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
@@ -53,6 +59,8 @@ INSTALLED_APPS = [
     'integration',
     'reports',
     'audit_log',
+    'references',
+    'hr',
     'cloudinary',
     'cloudinary_storage',
     'dbbackup',
@@ -69,6 +77,8 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'audit_log.middleware.AuditMiddleware',
+    'users.middleware.ManagerPermissionMiddleware',
+    'users.middleware.RegionalContextMiddleware',
 ]
 
 # OWASP Security Hardening
@@ -112,40 +122,60 @@ WSGI_APPLICATION = 'cenvoras.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('POSTGRES_DB', 'cenvoras_db'),
-        'USER': os.environ.get('POSTGRES_USER', 'cenvoras_user'),
-        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
-        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
-        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
-        'ATOMIC_REQUESTS': True,
-        'CONN_MAX_AGE': int(os.environ.get('CONN_MAX_AGE', 120)),  # Preserve and reuse TCP connections for 2 minutes
-        'CONN_HEALTH_CHECKS': True,
-        'OPTIONS': {
-            'connect_timeout': int(os.environ.get('POSTGRES_CONNECT_TIMEOUT', 10)),
-            'sslmode': os.environ.get('POSTGRES_SSLMODE', 'prefer'),
-        },
-    }
-}
-
-# Redis Caching
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+if os.environ.get('USE_SQLITE', 'False').lower() == 'true':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+            'ATOMIC_REQUESTS': True,
         }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('POSTGRES_DB', 'cenvoras_db'),
+            'USER': os.environ.get('POSTGRES_USER', 'cenvoras_user'),
+            'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cenvoras_password'),
+            'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),  # 'localhost' for local dev, 'db' for docker
+            'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+            'ATOMIC_REQUESTS': True,
+            'CONN_MAX_AGE': int(os.environ.get('CONN_MAX_AGE', 120)),  # Preserve and reuse TCP connections for 2 minutes
+            'CONN_HEALTH_CHECKS': True,
+            'OPTIONS': {
+                'connect_timeout': int(os.environ.get('POSTGRES_CONNECT_TIMEOUT', 10)),
+                'sslmode': os.environ.get('POSTGRES_SSLMODE', 'prefer'),
+            },
+        }
+    }
+
+# Redis Caching
+if os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'unique-snowflake',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            }
+        }
+    }
 
 # Celery Configuration
 CELERY_BROKER_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
+
+if os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
+    CELERY_TASK_ALWAYS_EAGER = True
 
 
 
@@ -233,6 +263,15 @@ for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
         cors_origins.append(required_origin)
 CORS_ALLOWED_ORIGINS = cors_origins
 
+if DEBUG:
+    CORS_ALLOWED_ORIGINS.extend([
+        'http://localhost:5173',
+        'http://127.0.0.1:5173',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ])
+
+
 raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
 csrf_trusted_origins = [origin.strip() for origin in raw_csrf_trusted.split(',') if origin.strip()]
 for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
@@ -276,7 +315,7 @@ WHATSAPP_API_TOKEN = os.environ.get('WHATSAPP_API_TOKEN', '')
 WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
 
 # Gemini AI (load from environment variables)
-GEMINI_API_KEY = os.environ.get('Gemini_Key', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip('"').strip("'")
 
 # Cashfree Payments
 CASHFREE_CLIENT_ID = os.environ.get('CASHFREE_CLIENT_ID', '')
@@ -319,4 +358,8 @@ BACKUP_CLOUDINARY_TYPE = os.environ.get('BACKUP_CLOUDINARY_TYPE', 'private').str
 BACKUP_SCHEDULE_MINUTE = int(os.environ.get('BACKUP_SCHEDULE_MINUTE', 15))
 BACKUP_MAX_ATTEMPTS = int(os.environ.get('BACKUP_MAX_ATTEMPTS', 3))
 BACKUP_CIRCUIT_OPEN_SECONDS = int(os.environ.get('BACKUP_CIRCUIT_OPEN_SECONDS', 21600))
-BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'cenvoras@gmail.com')
+BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'support@cenvora.app')
+
+# Google OAuth Settings
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip('"').strip("'")
+

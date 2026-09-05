@@ -114,6 +114,7 @@ class CustomerField(serializers.Field):
 
 class PurchaseBillItemSerializer(serializers.ModelSerializer):
     product = ProductField()
+    product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
@@ -126,21 +127,31 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseBillItem
         fields = [
-            'product', 'hsn_sac_code', 'unit',
-            'quantity', 'price', 'amount', 'discount', 'tax',
+            'product', 'product_detail', 'hsn_sac_code', 'unit',
+            'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
             'batch_number', 'expiry_date', 'mrp'
         ]
+
+    def get_product_detail(self, obj):
+        if not obj.product:
+            return None
+        return {
+            "id": str(obj.product.id),
+            "name": obj.product.name,
+            "hsn_sac_code": obj.product.hsn_sac_code,
+            "unit": obj.product.unit,
+        }
 
     def to_internal_value(self, data):
         print("DEBUG product value:", data.get('product'), type(data.get('product')))
         product_value = data.get('product')
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
         try:
             uuid_obj = uuid.UUID(str(product_value))
-            product = Product.objects.get(id=uuid_obj)
+            product = Product.objects.get(id=uuid_obj, created_by=user)
             # Update product fields if present in data
             updated = False
             for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
@@ -160,6 +171,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
             }
             product, created = Product.objects.get_or_create(
                 name=product_value,
+                created_by=user,
                 defaults=defaults
             )
         data['product'] = product
@@ -191,7 +203,15 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
             
             data['batch'] = batch
 
-        return super().to_internal_value(data)
+        validated_data = super().to_internal_value(data)
+        if 'batch' in data:
+            validated_data['batch'] = data['batch']
+        
+        # Remove write-only virtual fields that aren't in the model
+        for field in ['batch_number', 'expiry_date', 'mrp']:
+            validated_data.pop(field, None)
+            
+        return validated_data
 
 class PurchaseBillSerializer(serializers.ModelSerializer):
     items = PurchaseBillItemSerializer(many=True)
@@ -205,7 +225,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
             'warehouse', 'journal',
-            'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta'
+            'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
 
@@ -218,10 +238,23 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'items': 'At least one item is required.'})
         return data
 
+    @staticmethod
+    def _calculate_line_amount(item_data):
+        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
+        price = Decimal(str(item_data.get('price', 0) or 0))
+        discount = Decimal(str(item_data.get('discount', 0) or 0))
+        tax = Decimal(str(item_data.get('tax', 0) or 0))
+
+        base_amount = quantity * price
+        discount_amount = (base_amount * discount) / Decimal('100')
+        taxable_amount = base_amount - discount_amount
+        tax_amount = (taxable_amount * tax) / Decimal('100')
+        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         meta_data = validated_data.pop('meta', None)
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         # Smart Feature: Auto-create/sync vendor details
         vendor_name = validated_data.get('vendor_name')
@@ -230,7 +263,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         if vendor_name:
             try:
-                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
                 updated = False
                 if vendor_address and not vendor.address:
                     vendor.address = vendor_address
@@ -240,29 +273,40 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                     updated = True
                 if updated:
                     vendor.save()
-            except Customer.DoesNotExist:
-                vendor = Customer.objects.create(
+            except Vendor.DoesNotExist:
+                vendor = Vendor.objects.create(
                     name=vendor_name,
                     address=vendor_address,
                     gstin=vendor_gstin,
                     created_by=user
                 )
-                from .models_sidecar import PartyMeta
-                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
+            validated_data['vendor'] = vendor
+        
+        # Recalculate total amount from items to ensure integrity
+        recalculated_total = sum(
+            (self._calculate_line_amount(item) for item in items_data),
+            Decimal('0.00')
+        )
+        validated_data['total_amount'] = recalculated_total
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
         
         purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
+            item_data['amount'] = self._calculate_line_amount(item_data)
+            # Ensure price is passed as 'price' to the model (serializer uses 'price' field)
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+
+        # Refresh payment status in case amount_paid was provided
+        purchase_bill.refresh_payment_status(save=True)
 
         transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         return purchase_bill
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', [])
-        user = self.context['request'].user
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         # Smart Feature: Auto-create/sync vendor details
         vendor_name = validated_data.get('vendor_name', instance.vendor_name)
@@ -271,7 +315,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         if vendor_name:
             try:
-                vendor = Customer.objects.get(name=vendor_name, created_by=user)
+                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
                 updated = False
                 if vendor_address and not vendor.address:
                     vendor.address = vendor_address
@@ -281,15 +325,14 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                     updated = True
                 if updated:
                     vendor.save()
-            except Customer.DoesNotExist:
-                vendor = Customer.objects.create(
+            except Vendor.DoesNotExist:
+                vendor = Vendor.objects.create(
                     name=vendor_name,
                     address=vendor_address,
                     gstin=vendor_gstin,
                     created_by=user
                 )
-                from .models_sidecar import PartyMeta
-                PartyMeta.objects.get_or_create(customer=vendor, defaults={'party_category': 'vendor'})
+            validated_data['vendor'] = vendor
         
         # Update the purchase bill fields
         for attr, value in validated_data.items():
@@ -300,18 +343,17 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         if items_data:
             instance.items.all().delete()
             for item_data in items_data:
+                item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
-            round_off = validated_data.get('round_off', instance.round_off)
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))
+            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
             instance.total_amount = recalculated_total
-            instance.round_off = round_off
-
+            instance.save(update_fields=['total_amount'])
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount
 
             instance.refresh_payment_status(save=False)
-            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
 
         transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
         
@@ -335,13 +377,17 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'product_detail', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
 
     def get_product_detail(self, obj):
-        return {
+        detail = {
             "id": str(obj.product.id),
             "name": obj.product.name,
             "description": obj.product.description,
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
         }
+        if hasattr(obj.product, 'meta'):
+            detail['storage_condition'] = obj.product.meta.storage_condition
+            detail['temperature'] = obj.product.meta.temperature
+        return detail
 
     def to_internal_value(self, data):
         print("DEBUG SalesInvoiceItemSerializer: Processing data:", data)
@@ -374,10 +420,14 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 print("DEBUG SalesInvoiceItemSerializer: Found existing product by UUID:", product.name)
                 # Update product fields if present in data
                 updated = False
-                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                for field in ['hsn_sac_code', 'unit', 'tax']:
                     if field in data and data[field] is not None:
                         setattr(product, field, data[field])
                         updated = True
+                # For sales invoice, price field is sale_price, not cost price
+                if 'price' in data and data['price'] is not None:
+                    product.sale_price = data['price']
+                    updated = True
                 if updated:
                     print("DEBUG SalesInvoiceItemSerializer: Updating product fields")
                     product.save()
@@ -393,10 +443,14 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 print("DEBUG SalesInvoiceItemSerializer: Found existing product by name:", product.name)
                 # Update existing product fields if present in data
                 updated = False
-                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                for field in ['hsn_sac_code', 'unit', 'tax']:
                     if field in data and data[field] is not None:
                         setattr(product, field, data[field])
                         updated = True
+                # For sales invoice, price field is sale_price, not cost price
+                if 'price' in data and data['price'] is not None:
+                    product.sale_price = data['price']
+                    updated = True
                 if updated:
                     print("DEBUG SalesInvoiceItemSerializer: Updating existing product fields")
                     product.save()
@@ -412,10 +466,15 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                         name=product_value,
                         hsn_sac_code=data.get('hsn_sac_code', ''),
                         unit=data.get('unit', 'pcs'),
-                        price=data.get('price', 0),
+                        sale_price=data.get('price', 0),
                         tax=data.get('tax', 0),
                         created_by=user,
                     )
+                    # Mark product as created during invoice flow so stock can be adjusted later
+                    try:
+                        setattr(product, '_created_from_invoice', True)
+                    except Exception:
+                        pass
                     print("DEBUG SalesInvoiceItemSerializer: New product created:", product.id)
                 except Exception as e:
                     error_msg = f'Failed to create product: {str(e)}'
@@ -525,6 +584,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
         data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))
+        data['customer_gstin'] = getattr(customer, 'gstin', None) if customer else data.get('customer_gstin')
         return data
 
     @staticmethod
@@ -545,7 +605,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         Check for Credit Limit violations.
         """
         request = self.context.get('request')
-        user = request.user if request else None
+        user = getattr(request.user, 'active_tenant', request.user) if request else None
         
         # We need to resolve the customer to check their limit
         # Use the customer object resolved in to_internal_value
@@ -617,6 +677,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer_email = data.get('customer_email', '')
         customer_phone = data.get('customer_phone', '')
         customer_address = data.get('customer_address', '')
+        customer_gstin = data.get('customer_gstin', '')
         
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
@@ -644,13 +705,21 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 # Try to find customer by email
                 customer_obj = Customer.objects.get(email=customer_email, created_by=user)
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
-                # Update customer name if different
+                # Update details if different
+                updated = False
                 if customer_obj.name != customer_name:
                     customer_obj.name = customer_name
-                    if customer_phone:
-                        customer_obj.phone = customer_phone
-                    if customer_address:
-                        customer_obj.address = customer_address
+                    updated = True
+                if customer_phone and customer_phone != customer_obj.phone:
+                    customer_obj.phone = customer_phone
+                    updated = True
+                if customer_address and customer_address != customer_obj.address:
+                    customer_obj.address = customer_address
+                    updated = True
+                if customer_gstin and customer_gstin != customer_obj.gstin:
+                    customer_obj.gstin = customer_gstin
+                    updated = True
+                if updated:
                     customer_obj.save()
                     print("DEBUG SalesInvoiceSerializer: Updated customer details")
             except Customer.DoesNotExist:
@@ -662,6 +731,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         email=customer_email,
                         phone=customer_phone,
                         address=customer_address,
+                        gstin=customer_gstin or None,
                         created_by=user,
                     )
                     print("DEBUG SalesInvoiceSerializer: New customer created:", customer_obj.id)
@@ -681,13 +751,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if customer_address and customer_address != customer_obj.address:
                         customer_obj.address = customer_address
                         updated = True
+                    if customer_gstin and customer_gstin != customer_obj.gstin:
+                        customer_obj.gstin = customer_gstin
+                        updated = True
                     if updated:
-                        customer_obj.save(update_fields=['phone', 'address'])
+                        customer_obj.save()
                 else:
                     customer_obj = Customer.objects.create(
                         name=customer_name.strip(),
                         phone=customer_phone or None,
                         address=customer_address or None,
+                        gstin=customer_gstin or None,
                         created_by=user,
                     )
 
@@ -752,7 +826,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 print(f"DEBUG SalesInvoiceSerializer: Creating item {i+1}:", item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
-            
+
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
             round_off = validated_data.get('round_off', Decimal('0.00'))
@@ -787,7 +861,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 )
 
             transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
-                
             return sales_invoice
         except Exception as e:
             print("DEBUG SalesInvoiceSerializer: Error in create method:", str(e))
@@ -906,7 +979,7 @@ class VendorSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         if value:
             # Check for duplicate email within the same user's vendors
-            user = self.context['request'].user
+            user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
             queryset = Vendor.objects.filter(email=value, created_by=user)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
@@ -916,7 +989,7 @@ class VendorSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         vendor = Vendor.objects.create(**validated_data)
         
@@ -959,7 +1032,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         if value:
             # Check for duplicate email within the same user's customers
-            user = self.context['request'].user
+            user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
             queryset = Customer.objects.filter(email=value, created_by=user)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
@@ -969,7 +1042,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
-        validated_data['created_by'] = self.context['request'].user
+        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         customer = super().create(validated_data)
         

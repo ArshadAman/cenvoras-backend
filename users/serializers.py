@@ -3,7 +3,7 @@ from .models import User
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 from datetime import timedelta
-from subscription.services import get_tenant_plan, get_effective_plan_code, get_effective_limit
+from subscription.services import get_tenant_plan, get_effective_plan_code, get_effective_limit, is_vip_user
 
 class QuickSignupSerializer(serializers.ModelSerializer):
     """Minimal friction signup - only essential fields"""
@@ -12,10 +12,12 @@ class QuickSignupSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'gstin', 'state', 'city')
+        fields = ('email', 'password', 'confirm_password', 'phone', 'business_name', 'country', 'trn', 'gstin', 'state', 'city')
         extra_kwargs = {
-            'gstin': {'required': False, 'allow_blank': True},
-            'state': {'required': True, 'allow_blank': False, 'allow_null': False},
+            'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'country': {'required': False},
+            'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
@@ -49,7 +51,9 @@ class QuickSignupSerializer(serializers.ModelSerializer):
             email=validated_data['email'],
             phone=validated_data['phone'],
             business_name=validated_data['business_name'],
+            country=validated_data.get('country', 'IN'),
             gstin=validated_data.get('gstin', ''),
+            trn=validated_data.get('trn', ''),
             state=validated_data.get('state'),
             city=validated_data.get('city'),
             password=validated_data['password'],
@@ -64,7 +68,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'first_name', 'last_name', 'business_name', 'business_address', 
-            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city'
+            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city',
+            'country', 'trn'
         )
         extra_kwargs = {
             'business_name': {'required': True},
@@ -74,6 +79,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'country': {'required': False},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def update(self, instance, validated_data):
@@ -102,9 +109,20 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return obj.can_generate_gst_invoice
         
     def get_plan_name(self, obj):
+        if is_vip_user(obj):
+            return "Business"
+        
+        plan_code = get_effective_plan_code(obj)
         plan = get_tenant_plan(obj)
+        
         if plan:
             return plan.name
+            
+        # Fallback for trial users or other states without a Plan object
+        if plan_code == 'pro':
+            return "Pro"
+        if plan_code == 'business':
+            return "Business"
         return "Starter"
 
     def get_plan_code(self, obj):
@@ -122,7 +140,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
-            'parent_business_name', 'plan_name', 'plan_code', 'max_managers'
+            'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
+            'country', 'currency', 'trn', 'is_vat_registered'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -142,7 +161,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'first_name', 'last_name', 'phone', 'business_name', 
             'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
-            'new_password', 'confirm_new_password'
+            'new_password', 'confirm_new_password',
+            'country', 'currency', 'trn', 'is_vat_registered'
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -154,6 +174,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_invoice_prefix(self, value):
@@ -208,6 +229,16 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             if User.objects.filter(phone=phone).exclude(id=user.id).exists():
                 raise serializers.ValidationError({
                     'phone': 'A user with this phone number already exists.'
+                })
+        
+        # TRN Validation
+        country = attrs.get('country', user.country)
+        trn = attrs.get('trn', user.trn)
+        
+        if country == 'AE' and trn:
+            if len(str(trn)) != 15 or not str(trn).isdigit():
+                raise serializers.ValidationError({
+                    'trn': 'UAE Tax Registration Number (TRN) must be exactly 15 digits.'
                 })
         
         return attrs

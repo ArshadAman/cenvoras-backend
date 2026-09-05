@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Sum, Q
 from django.shortcuts import get_object_or_404
+from billing.models import SalesInvoiceItem
 from .models import Account, AccountType, GeneralLedgerEntry
 from .services import AccountingService
 
@@ -81,6 +82,48 @@ def profit_loss_statement(request):
                 'amount': float(bal),
             })
             total_expenses += bal
+
+    sales_items = SalesInvoiceItem.objects.filter(
+        Q(sales_invoice__created_by=user) | Q(sales_invoice__created_by__parent=user),
+        sales_invoice__status='final',
+    )
+    if from_date:
+        sales_items = sales_items.filter(sales_invoice__invoice_date__gte=from_date)
+    if to_date:
+        sales_items = sales_items.filter(sales_invoice__invoice_date__lte=to_date)
+
+    sales_cogs = Decimal('0')
+    sales_tax = Decimal('0')
+    for item in sales_items.select_related('product', 'batch'):
+        qty = Decimal(str(item.quantity or 0))
+        sale_price = Decimal(str(item.price or 0))
+        discount = Decimal(str(item.discount or 0))
+        tax_rate = Decimal(str(item.tax or 0))
+
+        base_amount = qty * sale_price
+        discount_amount = (base_amount * discount) / Decimal('100')
+        taxable_amount = base_amount - discount_amount
+        tax_amount = (taxable_amount * tax_rate) / Decimal('100')
+
+        if item.batch and item.batch.cost_price:
+            cost_price = Decimal(str(item.batch.cost_price))
+        elif item.product.price:
+            cost_price = Decimal(str(item.product.price))
+        else:
+            cost_price = Decimal('0')
+
+        sales_cogs += qty * cost_price
+        sales_tax += tax_amount
+
+    sales_based_expense = sales_cogs + sales_tax
+    if sales_based_expense:
+        expense_items.append({
+            'id': 'sales-cogs',
+            'code': 'COGS',
+            'name': 'Cost of Goods Sold (Sales Invoices)',
+            'amount': float(sales_based_expense),
+        })
+        total_expenses += sales_based_expense
 
     net_profit = total_revenue - total_expenses
     margin = (net_profit / total_revenue * 100) if total_revenue > 0 else Decimal('0')

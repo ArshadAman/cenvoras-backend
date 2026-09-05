@@ -8,27 +8,41 @@ class SubscriptionStatus(models.TextChoices):
     EXPIRED = 'expired', 'Expired'
     CANCELLED = 'cancelled', 'Cancelled'
 
+class CountryChoices(models.TextChoices):
+    IN = 'IN', 'India'
+    AE = 'AE', 'United Arab Emirates'
+
+class CurrencyChoices(models.TextChoices):
+    INR = 'INR', 'Indian Rupee (₹)'
+    AED = 'AED', 'UAE Dirham (د.إ)'
+
 class User(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
     # Core signup fields
-    phone = models.CharField(max_length=15, unique=True, null=True, blank=True, help_text="Phone number for login recovery and communication")
+    phone = models.CharField(max_length=15, null=True, blank=True, help_text="Phone number for login recovery and communication")
     business_name = models.CharField(max_length=100, blank=True, null=True, help_text="Business/Shop name (appears on invoices)")
     invoice_prefix = models.CharField(max_length=20, default='INV-', help_text="Default invoice prefix for this user")
     
+    # Regional Settings
+    country = models.CharField(max_length=2, choices=CountryChoices.choices, default=CountryChoices.IN, help_text="Active country for the shop")
+    currency = models.CharField(max_length=3, choices=CurrencyChoices.choices, default=CurrencyChoices.INR, help_text="Active currency for the shop")
+    
+    # Tax fields
+    gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional, for India)")
+    trn = models.CharField(max_length=15, blank=True, null=True, help_text="Tax Registration Number (15-digit for UAE)")
+    is_vat_registered = models.BooleanField(default=False, help_text="Is the business VAT registered? (for UAE)")
+    
     # Optional fields (can be added later)
-    gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional)")
     gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")
     dl_number = models.CharField(max_length=50, blank=True, null=True, help_text="DL number (optional)")
     business_address = models.TextField(blank=True, null=True, help_text="Complete business address for invoices")
     
-    from cenvoras.constants import IndianStates
     state = models.CharField(
-        max_length=2, 
-        choices=IndianStates.choices, 
+        max_length=50, 
         blank=True, 
         null=True, 
-        help_text="State for tax calculation (Place of Supply)"
+        help_text="State/Region for tax calculation (Place of Supply)"
     )
     city = models.CharField(
         max_length=100, 
@@ -57,6 +71,8 @@ class User(AbstractUser):
         ('manager', 'Manager'),
         ('salesman', 'Salesman'),
         ('accountant', 'Accountant'),
+        ('hr', 'HR'),
+        ('employee', 'Employee'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='admin', help_text="User capability role")
     

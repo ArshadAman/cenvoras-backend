@@ -1,5 +1,8 @@
 import csv
+import hashlib
+import json
 
+from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -47,14 +50,81 @@ def _decode_csv_bytes(raw_bytes):
             continue
     raise UnicodeDecodeError('csv', raw_bytes, 0, 1, 'unable to decode with supported encodings')
 
+
+def _normalize_idempotency_payload(payload):
+    if payload is None:
+        return '{}'
+
+    if hasattr(payload, 'dict'):
+        payload = payload.dict()
+
+    return json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
+
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     search_fields = ['name', 'description', 'hsn_sac_code']
+    idempotency_ttl = 600
+    idempotency_lock_ttl = 300
 
     def get_queryset(self):
         return Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant).order_by('name')
+
+    def _get_idempotency_key(self, request):
+        explicit_key = str(request.headers.get('x-idempotency-key', '')).strip()
+        if explicit_key:
+            return explicit_key
+
+        tenant_id = getattr(request.user.active_tenant, 'id', request.user.id)
+        payload = _normalize_idempotency_payload(request.data)
+        raw_key = f'inventory:product:create:{tenant_id}:{request.user.id}:{payload}'
+        return hashlib.sha256(raw_key.encode('utf-8')).hexdigest()
+
+    def _get_cached_product(self, cache_key):
+        product_id = cache.get(cache_key)
+        if not product_id:
+            return None
+
+        return Product.objects.select_related('meta').filter(
+            id=product_id,
+            created_by=self.request.user.active_tenant,
+        ).first()
+
+    def create(self, request, *args, **kwargs):
+        idempotency_key = self._get_idempotency_key(request)
+        tenant_id = getattr(request.user.active_tenant, 'id', request.user.id)
+        cache_key = f'inventory:product:create:tenant:{tenant_id}:{idempotency_key}'
+        lock_key = f'{cache_key}:lock'
+        result_key = f'{cache_key}:result'
+
+        cached_product = self._get_cached_product(result_key)
+        if cached_product is not None:
+            serializer = self.get_serializer(cached_product)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        acquired = cache.add(lock_key, request.user.id, timeout=self.idempotency_lock_ttl)
+        if not acquired:
+            cached_product = self._get_cached_product(result_key)
+            if cached_product is not None:
+                serializer = self.get_serializer(cached_product)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+            return Response(
+                {'detail': 'Product creation is already in progress. Please retry once the first request completes.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+
+            cache.set(result_key, str(serializer.instance.id), timeout=self.idempotency_ttl)
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        finally:
+            cache.delete(lock_key)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.active_tenant)

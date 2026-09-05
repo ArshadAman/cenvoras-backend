@@ -9,3 +9,4 @@ services:
       - /etc/letsencrypt/live/api.cenvora.app/privkey.pem:/etc/nginx/privkey.pem:ro
       - ./staticfiles:/app/static:ro
       - ./media:/app/media:ro
+      - /var/www/certbot:/var/www/certbot:ro

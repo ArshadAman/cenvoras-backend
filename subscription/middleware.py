@@ -30,6 +30,9 @@ class SubscriptionAccessMiddleware:
         ('/api/integration/', 'integrations'),
         ('/api/analytics/', 'advanced_analytics'),
         ('/api/inventory/', 'inventory_core'),
+        ('/api/hr/payroll-runs/', 'hr_payroll'),
+        ('/api/hr/payslips/', 'hr_payroll'),
+        ('/api/hr/', 'hr_basic'),
     )
 
     def __init__(self, get_response):

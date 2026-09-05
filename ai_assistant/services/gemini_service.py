@@ -9,7 +9,7 @@ from django.core.cache import cache
 class GeminiService:
     def __init__(self):
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash-lite')
         self.rate_limiter = RateLimiter()
     
     def parse_command(self, user_input, context=None):
@@ -36,11 +36,17 @@ class GeminiService:
             self.rate_limiter.record_request()
             
             # Parse JSON response
-            result = json.loads(response.text)
+            text = response.text.strip()
+            if text.startswith('```json'):
+                text = text[7:]
+            if text.endswith('```'):
+                text = text[:-3]
+            result = json.loads(text.strip())
             
             # Cache for 1 hour
             cache.set(cache_key, result, timeout=3600)
             return result
+
             
         except json.JSONDecodeError:
             return {
@@ -79,28 +85,36 @@ class GeminiService:
         - delete_invoice
         - general_query
         
-        Extract entities like:
-        - customer_name
-        - product_name
-        - quantity
-        - price
-        - amount
-        - date
-        - phone
-        - email
-        - address
-        - time_period (last week, this month, etc.)
-        
+        Analyze this user input for a business ERP system.
+        Context: {context if context else 'No context provided'}
+        Input: "{user_input}"
+
+        Possible Intents:
+        - create_invoice: User wants to create a sales bill/invoice.
+        - check_stock: User asking about inventory levels.
+        - sales_summary: User asking for sales performance/metrics.
+        - general_query: Anything else.
+
+        Rules for 'create_invoice':
+        1. If customer name is mentioned but ambiguous (e.g. "Bill to Aman"), set "clarification_needed": true.
+        2. If items are mentioned without quantity or price (and not in context), set "clarification_needed": true.
+        3. If the user is responding to a previous choice, detect the selection.
+
         Respond ONLY with valid JSON:
         {{
             "intent": "detected_intent",
             "entities": {{
-                "entity_name": "entity_value"
+                "customer_name": "...",
+                "customer_email": "...",
+                "items": [
+                    {{"product_name": "...", "quantity": 1, "price": 500}}
+                ]
             }},
-            "confidence": 0.95,
-            "clarification_needed": false,
+            "confidence": 0.0 to 1.0,
+            "clarification_needed": true/false,
             "clarification_question": "optional question if unclear"
         }}
+
         """
 
 class RateLimiter:
@@ -132,3 +146,47 @@ class RateLimiter:
 
 # Initialize global service
 gemini_service = GeminiService()
+
+def call_gemini(question, context, user=None):
+    """
+    Standard call to Gemini for natural language chat using the SDK.
+    """
+    business_name = getattr(user, 'business_name', user.username) if user else "Cenvora User"
+    today_date = context.get('date', datetime.now().date().isoformat())
+    
+    system_prompt = (
+        "You are Cenvora AI, an expert business advisor built into an ERP system. "
+        "RULES:\n"
+        "- NEVER greet the user or introduce yourself\n"
+        "- NEVER repeat the question back\n"
+        "- NEVER start with 'Hello', 'Hi', 'Great question', etc.\n"
+        "- Jump STRAIGHT into the answer\n"
+        "- Be concise and actionable — no fluff\n"
+        "- Use markdown: **bold**, bullet points, numbered lists\n"
+        "- Use ₹ for currency\n"
+        "- Give specific advice based on the actual numbers in the data\n"
+        "- If asked for strategy, give concrete steps, not generic advice\n\n"
+        "CAPABILITIES:\n"
+        "1. **Warranty lookup** — Check warranty status by invoice number, customer name, or product name\n"
+        "2. **Expiring products** — List products expiring within 30 days with batch details\n"
+        "3. **Sales summary** — Today, this week, this month, comparisons with last month\n"
+        "4. **Business summary** — Revenue, purchases, margins, inventory value, pending payments\n"
+        "5. **Monthly summary** — Month-over-month comparison with growth metrics\n"
+        "6. **Create invoice guidance** — Suggest available in-stock products with prices and GST\n"
+        "7. **Debit/Credit notes** — Summarize this month's notes\n"
+        "8. **Stock information** — Product stock levels, low stock alerts, inventory valuation\n"
+        "9. **Customer & Vendor info** — Names, emails, phones, outstanding balances\n"
+        "10. **GST filing assistant** — Generate GSTR-1/GSTR-3B draft data from invoice data\n"
+        "11. **AI insights** — Compare this month vs last month, identify trends, give growth advice\n\n"
+        f"Business: {business_name}\n"
+        f"Date: {today_date}\n\n"
+        f"LIVE DATA:\n{json.dumps(context, indent=2)}"
+    )
+
+    prompt = f"{system_prompt}\n\nUser Question: {question}"
+    
+    try:
+        response = gemini_service.model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"I'm sorry, I'm having trouble connecting to my brain right now. ({str(e)})"

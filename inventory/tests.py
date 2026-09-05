@@ -1,4 +1,5 @@
 from django.test import TestCase
+from django.core.cache import cache
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.contrib.auth import get_user_model
@@ -62,3 +63,45 @@ class BatchSplitValidationTests(TestCase):
 		res = self.client.post("/api/inventory/batches/split/", payload, format='json')
 		self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertEqual(res.data.get('error'), 'split_quantity must be a valid integer.')
+
+
+class ProductCreateIdempotencyTests(TestCase):
+	def setUp(self):
+		cache.clear()
+		self.client = APIClient()
+		self.tenant = User.objects.create_user(
+			username="tenant_products",
+			email="tenant.products@test.com",
+			password="testpassword",
+			first_name="Tenant",
+			last_name="Products",
+		)
+		self.user = User.objects.create_user(
+			username="user_products",
+			email="user.products@test.com",
+			password="testpassword",
+			first_name="User",
+			last_name="Products",
+			parent=self.tenant,
+		)
+		self.client.force_authenticate(user=self.user)
+
+	def test_duplicate_product_submission_returns_existing_product(self):
+		payload = {
+			"name": "Idempotent Item",
+			"sale_price": "125.00",
+			"cost_price": "100.00",
+			"unit": "pcs",
+			"stock": 0,
+			"tax": "0.00",
+			"warranty_months": 0,
+			"low_stock_alert": 0,
+		}
+
+		first_response = self.client.post("/api/inventory/products/", payload, format='json')
+		second_response = self.client.post("/api/inventory/products/", payload, format='json')
+
+		self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(Product.objects.filter(created_by=self.tenant, name="Idempotent Item").count(), 1)
+		self.assertEqual(first_response.data["id"], second_response.data["id"])

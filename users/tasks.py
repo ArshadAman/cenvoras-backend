@@ -206,7 +206,7 @@ def _send_ahasend_alert(subject, body):
     base_url = (getattr(settings, "TRANSACTIONAL_EMAIL_API_URL", "") or "https://api.ahasend.com/v1").rstrip("/")
     sender_email = getattr(settings, "TRANSACTIONAL_EMAIL_SENDER_EMAIL", "noreply@cenvora.app")
     sender_name = getattr(settings, "TRANSACTIONAL_EMAIL_SENDER_NAME", "Cenvora")
-    alert_to = getattr(settings, "BACKUP_ALERT_EMAIL", "cenvoras@gmail.com")
+    alert_to = getattr(settings, "BACKUP_ALERT_EMAIL", "support@cenvora.app")
     send_endpoint = getattr(settings, "TRANSACTIONAL_EMAIL_SEND_ENDPOINT", "/email/send")
 
     if not api_key:

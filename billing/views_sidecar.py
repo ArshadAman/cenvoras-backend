@@ -17,9 +17,10 @@ from decimal import Decimal
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def sales_order_list_create(request):
+    tenant = request.user.active_tenant
     if request.method == 'GET':
         search = request.GET.get('search', '')
-        orders = SalesOrder.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product')
+        orders = SalesOrder.objects.filter(created_by=tenant).select_related('customer').prefetch_related('items__product')
         
         if search:
             orders = orders.filter(
@@ -47,8 +48,9 @@ def sales_order_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def sales_order_detail(request, pk):
+    tenant = request.user.active_tenant
     try:
-        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
+        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except SalesOrder.DoesNotExist:
         return Response({"success": False, "message": "Order not found"}, status=404)
         
@@ -70,17 +72,18 @@ def sales_order_detail(request, pk):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def convert_order_to_invoice(request, pk):
+    tenant = request.user.active_tenant
     try:
-        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
+        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except SalesOrder.DoesNotExist:
         return Response({"message": "Order not found"}, status=404)
 
-    prefix = (getattr(request.user, 'invoice_prefix', 'INV-') or 'INV-').upper()
+    prefix = (getattr(tenant, 'invoice_prefix', 'INV-') or 'INV-').upper()
     if not prefix.endswith('-'):
         prefix = f"{prefix}-"
 
     invoices = SalesInvoice.objects.filter(
-        created_by=request.user,
+        created_by=tenant,
         invoice_number__startswith=prefix,
     )
 
@@ -102,7 +105,7 @@ def convert_order_to_invoice(request, pk):
         customer_name=order.customer.name,
         invoice_number=next_invoice_number,
         invoice_date=date.today(),
-        created_by=request.user,
+        created_by=tenant,
         total_amount=order.total_amount
     )
     
@@ -130,9 +133,10 @@ def convert_order_to_invoice(request, pk):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def delivery_challan_list_create(request):
+    tenant = request.user.active_tenant
     if request.method == 'GET':
         search = request.GET.get('search', '')
-        challans = DeliveryChallan.objects.filter(created_by=request.user).select_related('customer').prefetch_related('items__product')
+        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer').prefetch_related('items__product')
         
         if search:
             challans = challans.filter(
@@ -160,8 +164,9 @@ def delivery_challan_list_create(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def delivery_challan_detail(request, pk):
+    tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=request.user)
+        challan = DeliveryChallan.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except DeliveryChallan.DoesNotExist:
         return Response(status=404)
         
@@ -185,10 +190,11 @@ def delivery_challan_detail(request, pk):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def invoice_settings_view(request):
+    tenant = request.user.active_tenant
     try:
-        settings = InvoiceSettings.objects.get(user=request.user)
+        settings = InvoiceSettings.objects.get(user=tenant)
     except InvoiceSettings.DoesNotExist:
-        settings = InvoiceSettings.objects.create(user=request.user)
+        settings = InvoiceSettings.objects.create(user=tenant)
         
     if request.method == 'GET':
         serializer = InvoiceSettingsSerializer(settings)

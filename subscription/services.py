@@ -41,6 +41,8 @@ MODULE_FEATURES = {
     'shortage_management': 'shortage_management',
     'priority_support': 'priority_support',
     'team': 'team_management',
+    'hr_basic': 'hr_basic',
+    'hr_payroll': 'hr_payroll',
 }
 
 
@@ -139,7 +141,7 @@ def get_effective_plan_code(user: User) -> str:
 
     tenant = get_tenant(user)
     if _is_legacy_trial_active(tenant):
-        return 'starter'
+        return 'pro'
 
     plan = get_tenant_plan(user)
     if plan:
@@ -160,6 +162,8 @@ def invalidate_subscription_cache(user: User) -> None:
 
 def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
     if is_vip_user(user):
+        if field_name in {'max_team_members', 'max_managers'}:
+            return 5
         return -1
 
     plan = get_tenant_plan(user)
@@ -169,7 +173,11 @@ def get_effective_limit(user: User, field_name: str, default: int = -1) -> int:
     value = getattr(plan, field_name, None)
     if value is None and field_name == 'max_team_members':
         value = getattr(plan, 'max_managers', default)
-    return default if value is None else int(value)
+        
+    res = default if value is None else int(value)
+    if res == -1:
+        return 999
+    return res
 
 
 def get_current_usage(user: User) -> dict[str, int]:
@@ -215,6 +223,7 @@ def can_use_feature(user: User, feature_code: str) -> bool:
             'integrations',
             'advanced_reports',
             'team_management',
+            'hr_basic',
         }
         return feature_code in allowed
 
@@ -245,8 +254,8 @@ def get_entitlements(user: User) -> dict[str, Any]:
 
         limits = {
             'max_team_members': get_effective_limit(user, 'max_team_members', 0),
-            'max_invoices_per_month': -1,
-            'max_customers': -1,
+            'max_invoices_per_month': get_effective_limit(user, 'max_invoices_per_month', -1),
+            'max_customers': get_effective_limit(user, 'max_customers', -1),
         }
 
         locked_modules = {}
@@ -262,7 +271,7 @@ def get_entitlements(user: User) -> dict[str, Any]:
             'plan': {
                 'code': plan_code,
                 'name': 'VIP Access' if vip else (getattr(plan, 'name', None) if plan else ('Starter' if plan_code == 'starter' else plan_code.title())),
-                'status': getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
+                'status': 'active' if vip else getattr(subscription, 'status', 'trial' if plan_code == 'starter' else ('expired' if plan_code == 'free' else None)),
                 'current_period_end': getattr(subscription, 'current_period_end', None),
                 'pending_plan_code': getattr(getattr(subscription, 'pending_plan', None), 'code', None),
                 'pending_plan_name': getattr(getattr(subscription, 'pending_plan', None), 'name', None),
@@ -289,6 +298,8 @@ def get_entitlements(user: User) -> dict[str, Any]:
                 'shortage_management': can_use_feature(user, MODULE_FEATURES['shortage_management']),
                 'priority_support': can_use_feature(user, MODULE_FEATURES['priority_support']),
                 'team': can_use_feature(user, MODULE_FEATURES['team']),
+                'hr_basic': can_use_feature(user, MODULE_FEATURES['hr_basic']),
+                'hr_payroll': can_use_feature(user, MODULE_FEATURES['hr_payroll']),
             },
         }
 

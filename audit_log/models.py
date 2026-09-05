@@ -12,6 +12,7 @@ class AuditLog(models.Model):
         ('LOGOUT', _('Logout')),
         ('EMAIL', _('Email Sent')),
         ('BACKUP', _('Backup')),
+        ('DOWNLOAD', _('Download')),
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

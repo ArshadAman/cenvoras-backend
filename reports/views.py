@@ -11,7 +11,7 @@ def stock_valuation_view(request):
     """
     Get current stock valuation.
     """
-    data = get_stock_valuation()
+    data = get_stock_valuation(request.user.active_tenant)
     return Response(data)
 
 @api_view(['GET'])
@@ -22,7 +22,7 @@ def expiry_report_view(request):
     Query Params: ?days=30 (default)
     """
     days = int(request.query_params.get('days', 30))
-    data = get_expiry_report(days_threshold=days)
+    data = get_expiry_report(days_threshold=days, tenant=request.user.active_tenant)
     return Response(data)
 
 @api_view(['GET'])
@@ -39,7 +39,7 @@ def profit_loss_view(request):
     start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d').date() if start_date_str else today.replace(day=1)
     end_date = datetime.datetime.strptime(end_date_str, '%Y-%m-%d').date() if end_date_str else today
     
-    data = get_item_wise_profit(start_date, end_date)
+    data = get_item_wise_profit(start_date, end_date, tenant=request.user.active_tenant)
     return Response(data)
 
 @api_view(['GET'])
@@ -59,5 +59,5 @@ def stock_ledger_view(request):
     start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d').date() if start_date_str else None
     end_date = datetime.datetime.strptime(end_date_str, '%Y-%m-%d').date() if end_date_str else None
     
-    data = get_stock_ledger(product_id, start_date, end_date)
+    data = get_stock_ledger(product_id, start_date, end_date, tenant=request.user.active_tenant)
     return Response({'items': data})

@@ -1,0 +1,86 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title }}</title>
+    <meta name="description" content="{{ page_description }}">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ canonical_url }}">
+    
+    <!-- Open Graph Tags -->
+    <meta property="og:title" content="{{ page_title }}">
+    <meta property="og:description" content="{{ page_description }}">
+    <meta property="og:url" content="{{ canonical_url }}">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Cenvora">
+    
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{{ page_title }}">
+    <meta name="twitter:description" content="{{ page_description }}">
+    
+    <!-- JSON-LD Structured Data -->
+    <script type="application/ld+json">
+        {{ json_ld|safe }}
+    </script>
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #000; color: #fff; line-height: 1.6; }
+        .container { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+        header { margin-bottom: 40px; border-bottom: 1px solid #333; padding-bottom: 20px; }
+        h1 { font-size: 2.5em; margin-bottom: 10px; color: #fff; }
+        .meta { color: #999; font-size: 0.95em; }
+        .content { background: #111; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
+        .content p { margin-bottom: 15px; }
+        .badge { display: inline-block; background: #333; padding: 5px 12px; border-radius: 20px; margin-right: 10px; margin-bottom: 10px; font-size: 0.9em; }
+        .cta { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; margin: 30px 0; text-align: center; }
+        .cta a { color: #fff; text-decoration: none; font-weight: bold; font-size: 1.1em; }
+        .related { margin-top: 30px; }
+        .related-item { background: #222; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .related-item a { color: #667eea; text-decoration: none; }
+        .related-item a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>{{ page_title }}</h1>
+            <p class="meta">{{ page_description }}</p>
+        </header>
+        
+        <div class="content">
+            <h2 style="margin-bottom: 20px;">Overview</h2>
+            <p>{{ hsn.long_description|default:"Complete information about this HSN code, its classification, and how it's used in India's GST system." }}</p>
+        </div>
+        
+        <!-- Call-to-Action -->
+        <div class="cta">
+            <p style="margin-bottom: 15px;">Generate GST-compliant invoices instantly with this HSN code</p>
+            <button onclick="openSignupModal()" style="background: #fff; color: #667eea; border: none; padding: 12px 30px; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1em;">
+                Sign Up for Cenvora
+            </button>
+        </div>
+        
+        {% if related_gst_rates %}
+        <div class="related">
+            <h3>Applicable GST Rates</h3>
+            {% for rate in related_gst_rates %}
+                <div class="related-item">
+                    <a href="{% url 'references:gst-detail' rate.slug %}">GST {{ rate.rate }}% - {{ rate.category }}</a>
+                </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    
+    <script>
+        function openSignupModal() {
+            alert('Sign up modal would open here.\n\nRedirecting to Cenvora signup with HSN {{ hsn.code }} pre-filled.');
+            window.location.href = '/signup?hsn={{ hsn.code }}';
+        }
+    </script>
+</body>
+</html>

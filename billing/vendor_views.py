@@ -41,13 +41,14 @@ from cenvoras.pagination import StandardResultsSetPagination
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def vendor_list_create(request):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
         # Get query parameters
         search = request.query_params.get('search', '')
         ordering = request.query_params.get('ordering', '-created_at')
         
         # Filter vendors for the authenticated user
-        vendors = Vendor.objects.filter(created_by=request.user)
+        vendors = Vendor.objects.filter(created_by=tenant)
         
         # Apply search filter
         if search:
@@ -91,8 +92,9 @@ def vendor_list_create(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def vendor_detail(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        vendor = Vendor.objects.get(pk=pk, created_by=request.user)
+        vendor = Vendor.objects.get(pk=pk, created_by=tenant)
     except Vendor.DoesNotExist:
         return Response({
             "success": False,
@@ -119,8 +121,9 @@ def vendor_detail(request, pk):
 @api_view(['PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def vendor_update_delete(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        vendor = Vendor.objects.get(pk=pk, created_by=request.user)
+        vendor = Vendor.objects.get(pk=pk, created_by=tenant)
     except Vendor.DoesNotExist:
         return Response({
             "success": False,

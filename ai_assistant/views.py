@@ -11,7 +11,11 @@ from django.db.models import Sum, Count, F, Q
 from datetime import timedelta
 import json
 import logging
+from django.core.cache import cache
 from subscription.services import can_use_feature
+from .services.gemini_service import call_gemini
+from .services.command_parser import command_parser
+
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +193,33 @@ def gather_business_context(user):
     total_invoices = SalesInvoice.objects.filter(created_by=user).count()
     total_vendors = Vendor.objects.filter(created_by=user).count()
 
+    # HRMS Context
+    hrms_context = {
+        "active_employees": 0,
+        "payroll_month": f"{today.month}/{today.year}",
+        "payroll_status": "none",
+        "net_payable": 0.0,
+        "pending_leaves": 0,
+        "critical_alerts": 0
+    }
+    try:
+        from hr.models import Employee, PayrollRun, LeaveApplication, PayrollException
+        tenant = getattr(user, 'active_tenant', user)
+        hrms_context["active_employees"] = Employee.objects.filter(tenant=tenant, status='active').count()
+        hrms_context["pending_leaves"] = LeaveApplication.objects.filter(tenant=tenant, status='pending').count()
+        hrms_context["critical_alerts"] = PayrollException.objects.filter(tenant=tenant, severity='critical', is_resolved=False).count()
+
+        latest_run = PayrollRun.objects.filter(tenant=tenant).order_by('-year', '-month').first()
+        if latest_run:
+            hrms_context["payroll_month"] = f"{latest_run.month}/{latest_run.year}"
+            hrms_context["payroll_status"] = latest_run.status
+            hrms_context["net_payable"] = float(latest_run.total_net)
+    except Exception:
+        pass
+
     return {
         "date": str(today),
+        "hrms": hrms_context,
         # Sales
         "sales_today": {"count": sales_today['count'], "total": float(sales_today['total'] or 0)},
         "sales_this_week": {"count": sales_week['count'], "total": float(sales_week['total'] or 0)},
@@ -256,83 +285,15 @@ def gather_business_context(user):
             "customers": total_customers,
             "invoices": total_invoices,
             "vendors": total_vendors,
+            "employees": hrms_context["active_employees"],
         }
     }
 
 
-def call_gemini(question, business_context, user):
-    """Call Gemini 2.5 Flash API."""
-    import requests
 
-    system_prompt = (
-        "You are Cenvora AI, an expert business advisor built into an ERP system. "
-        "RULES:\n"
-        "- NEVER greet the user or introduce yourself\n"
-        "- NEVER repeat the question back\n"
-        "- NEVER start with 'Hello', 'Hi', 'Great question', etc.\n"
-        "- Jump STRAIGHT into the answer\n"
-        "- Be concise and actionable — no fluff\n"
-        "- Use markdown: **bold**, bullet points, numbered lists\n"
-        "- Use ₹ for currency\n"
-        "- Give specific advice based on the actual numbers in the data\n"
-        "- If asked for strategy, give concrete steps, not generic advice\n\n"
-        "CAPABILITIES:\n"
-        "1. **Warranty lookup** — Check warranty status by invoice number, customer name, or product name\n"
-        "2. **Expiring products** — List products expiring within 30 days with batch details\n"
-        "3. **Sales summary** — Today, this week, this month, comparisons with last month\n"
-        "4. **Business summary** — Revenue, purchases, margins, inventory value, pending payments\n"
-        "5. **Monthly summary** — Month-over-month comparison with growth metrics\n"
-        "6. **Create invoice guidance** — Suggest available in-stock products with prices and GST\n"
-        "7. **Debit/Credit notes** — Summarize this month's notes\n"
-        "8. **Stock information** — Product stock levels, low stock alerts, inventory valuation\n"
-        "9. **Customer & Vendor info** — Names, emails, phones, outstanding balances\n"
-        "10. **GST filing assistant** — Generate GSTR-1/GSTR-3B draft data from invoice data\n"
-        "11. **AI insights** — Compare this month vs last month, identify trends, give growth advice\n\n"
-        f"Business: {getattr(user, 'business_name', user.username)}\n"
-        f"Date: {business_context['date']}\n\n"
-        f"LIVE DATA:\n{json.dumps(business_context, indent=2)}"
-    )
+# The call_gemini function has been moved to services/gemini_service.py
+# and is imported at the top of this file.
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": f"{system_prompt}\n\nUser question: {question}"}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 1500,
-        }
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-
-        # Extract text from Gemini response
-        candidates = data.get('candidates', [])
-        if candidates:
-            parts = candidates[0].get('content', {}).get('parts', [])
-            if parts:
-                return parts[0].get('text', 'No response generated.')
-
-        return "Sorry, I couldn't generate a response. Please try again."
-
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"HTTP Error: {e}\nResponse: {e.response.text}"
-        logger.error(error_msg)
-        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Gemini API error: {e}")
-        return "⚠️ AI service is temporarily unavailable. Please try again shortly."
 
 
 class AIChatView(APIView):
@@ -368,9 +329,156 @@ class AIChatView(APIView):
                 "mode": "demo"
             })
 
-        # Call Gemini 2.5 Flash
+        # Check for active interactive session
+        session_key = f"ai_chat_state_{user.id}"
+        session_state = cache.get(session_key)
+
+        # 1. Get business context
+        context = gather_business_context(user)
+        
+        # 2. Get AI Response
         answer = call_gemini(question, context, user)
-        return Response({"answer": answer, "question": question, "mode": "gemini"})
+        
+        # 3. Process Intent / State
+        action = None
+        
+        # If we have an active session, process the selection
+        if session_state and session_state.get('step') == 'SELECT_CUSTOMER':
+            selected_id = None
+            if "CHOOSE_CUSTOMER:" in question:
+                selected_id = question.split("CHOOSE_CUSTOMER:")[1].strip()
+            
+            if question.lower() == 'create new customer' or 'new' in question.lower() or selected_id == "new":
+                # Proceed to draft or ask more questions
+                cache.delete(session_key)
+            elif selected_id:
+                from .services.invoice_service import create_invoice_from_ai
+                from billing.models import Customer
+                try:
+                    customer = Customer.objects.get(id=selected_id, created_by=getattr(user, 'active_tenant', user))
+                    entities = session_state.get('entities', {})
+                    entities['customer_name'] = customer.name
+                    entities['customer_id'] = str(customer.id)
+                    cache.delete(session_key)
+                    
+                    # Proceed to create
+                    result = create_invoice_from_ai(user, entities, request=self.request)
+                    if result['status'] == 'success':
+                        action = {
+                            "intent": "create_invoice",
+                            "status": "success",
+                            "invoice_id": result['invoice_id'],
+                            "invoice_number": result['invoice_number']
+                        }
+                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
+                        return Response({"answer": answer, "action": action})
+                except Customer.DoesNotExist:
+                    cache.delete(session_key)
+            else:
+                # Fallback to name search if they typed instead of clicking
+                from .services.invoice_service import search_customers, create_invoice_from_ai
+                matches = search_customers(user, question)
+                if matches.count() == 1:
+                    entities = session_state.get('entities', {})
+                    entities['customer_name'] = matches[0].name
+                    entities['customer_id'] = str(matches[0].id)
+                    cache.delete(session_key)
+                    # Proceed to create
+                    result = create_invoice_from_ai(user, entities, request=self.request)
+                    if result['status'] == 'success':
+                        action = {
+                            "intent": "create_invoice",
+                            "status": "success",
+                            "invoice_id": result['invoice_id'],
+                            "invoice_number": result['invoice_number']
+                        }
+                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
+                        return Response({"answer": answer, "action": action})
+
+        # Parse intent
+        parsed = command_parser.parse(question, context)
+        
+        if parsed and parsed.get('intent') == 'create_invoice':
+            entities = parsed.get('entities', {})
+            customer_name = entities.get('customer_name')
+            
+            if customer_name:
+                from .services.invoice_service import search_customers, create_invoice_from_ai
+                matches = search_customers(user, customer_name)
+                
+                if matches.count() > 1:
+                    # Multiple matches found, ask user to select
+                    options = []
+                    for m in matches:
+                        addr_parts = [p for p in [m.address, m.get_state_display() if hasattr(m, 'get_state_display') else m.state] if p]
+                        detail = ", ".join(addr_parts) or m.phone or "No location details"
+                        options.append({
+                            "id": str(m.id), 
+                            "name": m.name, 
+                            "detail": detail
+                        })
+                    
+                    options.append({"id": "new", "name": "Create New Customer", "detail": f"Add '{customer_name}' as a new record"})
+                    
+                    action = {
+                        "intent": "select_option",
+                        "type": "customer",
+                        "options": options,
+                        "entities": entities
+                    }
+                    answer = f"I found multiple customers matching **{customer_name}**. Which one should I use for this bill?"
+                    
+                    # Store state in cache
+                    cache.set(session_key, {"step": "SELECT_CUSTOMER", "entities": entities}, timeout=600)
+                elif matches.count() == 1:
+                    # One match found, check items
+                    customer = matches[0]
+                    entities['customer_name'] = customer.name
+                    entities['customer_id'] = str(customer.id)
+                    
+                    # Proceed to direct creation or next check (Items)
+                    # For now, let's stick to the direct creation if it's high confidence
+                    if parsed.get('confidence', 0) > 0.8:
+                        result = create_invoice_from_ai(user, entities, request=self.request)
+                        if result['status'] == 'success':
+                            action = {
+                                "intent": "create_invoice",
+                                "status": "success",
+                                "invoice_id": result['invoice_id'],
+                                "invoice_number": result['invoice_number']
+                            }
+                            answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,.2f}**."
+                        else:
+                            action = parsed
+                            action['status'] = 'draft'
+                    else:
+                        action = parsed
+                        action['status'] = 'draft'
+                else:
+                    # No matches found, ask to create new or proceed as draft
+                    answer = f"I couldn't find a customer named **{customer_name}**. Should I create a new record for them or prepare a draft?"
+                    action = {
+                        "intent": "select_option",
+                        "type": "customer_not_found",
+                        "options": [
+                            {"id": "new", "name": "Create New Customer", "detail": "Add to your records"},
+                            {"id": "draft", "name": "Prepare Draft", "detail": "I'll open the form for you"}
+                        ],
+                        "entities": entities
+                    }
+            else:
+                # No customer name mentioned
+                action = parsed
+                action['status'] = 'draft'
+        elif parsed and parsed.get('intent') != 'general_query' and parsed.get('confidence', 0) > 0.6:
+            action = parsed
+
+        return Response({
+            "answer": answer, 
+            "question": question, 
+            "mode": "gemini",
+            "action": action
+        })
 
     def demo_response(self, q, ctx):
         """Fallback when no Gemini key is configured."""
@@ -498,9 +606,21 @@ class AIChatView(APIView):
                 f"• Low Stock Alerts: **{len(ctx['low_stock_items'])}** items"
             )
 
+        if any(kw in q_lower for kw in ['payroll', 'salary', 'salaries', 'hrms', 'employee', 'headcount']):
+            h = ctx.get('hrms', {})
+            return (
+                f"👥 **HR & Payroll Overview:**\n\n"
+                f"• Active Employees: **{h.get('active_employees', 0)}**\n"
+                f"• Current Payroll Cycle: **{h.get('payroll_month', '—')}** (Status: **{h.get('payroll_status', 'N/A').title()}**)\n"
+                f"• Net Salary Payable: **₹{h.get('net_payable', 0):,.2f}**\n"
+                f"• Pending Leave Approvals: **{h.get('pending_leaves', 0)}**\n"
+                f"• Critical Payroll Exceptions: **{h.get('critical_alerts', 0)}**\n\n"
+                f"*Visit the HRMS module to run calculations, review exceptions, and disburse salaries.*"
+            )
+
         return (
             "⚠️ **Demo Mode** — No Gemini API key configured.\n\n"
-            "Add your key to `settings.py`:\n"
+            "Add your key to the `.env` file:\n"
             "`GEMINI_API_KEY = 'your_key'`\n\n"
-            "I can answer: *sales, purchases, warranty, expiry, GST, stock, customers, vendors, business summary, create invoice, credit/debit notes*"
+            "I can answer: *sales, purchases, warranty, expiry, GST, stock, customers, vendors, HRMS & payroll, business summary, create invoice, credit/debit notes*"
         )

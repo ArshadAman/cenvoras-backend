@@ -24,6 +24,7 @@ class Plan(models.Model):
     description = models.TextField(blank=True)
     
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    original_monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     quarterly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     yearly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     

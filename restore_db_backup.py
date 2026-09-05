@@ -78,11 +78,11 @@ def restore_into_postgres(gz_path):
     db_name = os.getenv('POSTGRES_DB', 'cenvoras_db')
     db_user = os.getenv('POSTGRES_USER', 'cenvoras_user')
     
-    # Try docker compose first, fallback to psql directly
+    # Try docker compose first, fallback to sudo docker compose, then psql directly
     cmd = None
-    for compose_cmd in [["docker", "compose"], ["docker-compose"]]:
+    for compose_cmd in [["docker", "compose"], ["docker-compose"], ["sudo", "docker", "compose"], ["sudo", "docker-compose"]]:
         try:
-            res = subprocess.run(compose_cmd + ["version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            res = subprocess.run(compose_cmd + ["ps"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res.returncode == 0:
                 cmd = compose_cmd + ["exec", "-T", "db", "psql", "-U", db_user, "-d", db_name]
                 break

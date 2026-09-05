@@ -19,7 +19,7 @@ echo "=================================================="
 echo "  🚀 CENVORA ONE-CLICK DEPLOYMENT: ${DOMAIN}"
 echo "=================================================="
 
-# Detect Docker command
+# Detect Docker command and socket permission
 DOCKER_CMD="docker compose"
 if ! docker compose version >/dev/null 2>&1; then
   if command -v docker-compose >/dev/null 2>&1; then
@@ -31,6 +31,13 @@ if ! docker compose version >/dev/null 2>&1; then
     sudo usermod -aG docker "$USER" || true
     sudo systemctl enable --now docker
     DOCKER_CMD="docker compose"
+  fi
+fi
+
+# If user doesn't have permission to docker.sock yet without re-logging in, use sudo
+if ! $DOCKER_CMD ps >/dev/null 2>&1; then
+  if sudo $DOCKER_CMD ps >/dev/null 2>&1; then
+    DOCKER_CMD="sudo $DOCKER_CMD"
   fi
 fi
 
@@ -138,8 +145,17 @@ TABLE_COUNT=$($DOCKER_CMD exec -T db psql -U cenvoras_user -d cenvoras_db -t -c 
 if [ "$TABLE_COUNT" = "0" ] || [ -z "$TABLE_COUNT" ]; then
   echo "Database is currently empty. Restoring latest Cloudinary backup..."
   if command -v python3 >/dev/null 2>&1; then
-    python3 -m pip install cloudinary python-dotenv --quiet 2>/dev/null || true
-    python3 restore_db_backup.py --apply || echo "⚠️ Backup restore completed with non-fatal notes."
+    sudo apt-get install -y python3-pip python3-venv >/dev/null 2>&1 || true
+    if [ ! -d /tmp/cenvora_venv ]; then
+      python3 -m venv /tmp/cenvora_venv 2>/dev/null || true
+    fi
+    if [ -f /tmp/cenvora_venv/bin/pip ]; then
+      /tmp/cenvora_venv/bin/pip install cloudinary python-dotenv --quiet
+      /tmp/cenvora_venv/bin/python restore_db_backup.py --apply || echo "⚠️ Backup restore completed with non-fatal notes."
+    else
+      python3 -m pip install cloudinary python-dotenv --break-system-packages --quiet 2>/dev/null || true
+      python3 restore_db_backup.py --apply || echo "⚠️ Backup restore completed with non-fatal notes."
+    fi
   else
     echo "⚠️ Python3 not installed on host. Proceeding to migrate directly."
   fi

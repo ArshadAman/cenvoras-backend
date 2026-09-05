@@ -45,17 +45,17 @@ EOF
 echo "2. Enabling site in /etc/nginx/sites-enabled/..."
 ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/
 
-# 3. Test configuration and reload Nginx
-echo "3. Testing and reloading Nginx..."
+# 3. Test configuration and start/reload Nginx
+echo "3. Testing and starting Nginx..."
 nginx -t
-systemctl reload nginx
+systemctl restart nginx || systemctl start nginx
 
 # 4. Obtain and install real Let's Encrypt SSL certificate
 echo "4. Requesting Let's Encrypt SSL certificate via Certbot..."
 certbot --nginx -d "${DOMAIN}" --agree-tos --email "${EMAIL}" --non-interactive --redirect
 
 # 5. Reload Nginx with new certificate
-systemctl reload nginx
+systemctl reload nginx || systemctl restart nginx
 
 echo ""
 echo "=================================================="

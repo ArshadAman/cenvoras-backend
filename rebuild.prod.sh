@@ -13,8 +13,8 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
 free_http_ports() {
   echo " ---- Checking for processes using ports 80/443 ----- "
 
-  # Stop common host web servers if they are running.
-  for svc in nginx apache2 caddy; do
+  # Stop common host web servers & database services if they are running.
+  for svc in nginx apache2 caddy redis redis-server postgresql; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
       echo " ---- Stopping host service: $svc ----- "
       systemctl stop "$svc" || true

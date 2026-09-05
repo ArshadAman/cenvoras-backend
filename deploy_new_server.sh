@@ -83,16 +83,22 @@ else
   echo "✓ Existing .env file found."
 fi
 
-# 2. Free up ports 80 and 443 if used by host webservers
+# 2. Free up ports 80, 443, 6379, 5432 if used by host services
 echo ""
-echo "--- [2/6] Freeing ports 80 & 443 ---"
-for svc in nginx apache2 caddy; do
+echo "--- [2/6] Freeing host ports (80, 443, 6379, 5432) ---"
+for svc in nginx apache2 caddy redis redis-server postgresql; do
   if systemctl is-active --quiet "$svc" 2>/dev/null; then
     echo "Stopping host service: $svc"
     sudo systemctl stop "$svc" || true
     sudo systemctl disable "$svc" || true
   fi
 done
+
+# Kill any process holding 6379 if still running
+if command -v fuser >/dev/null 2>&1; then
+  sudo fuser -k 6379/tcp 2>/dev/null || true
+  sudo fuser -k 5432/tcp 2>/dev/null || true
+fi
 
 # 3. SSL Certificate Setup
 echo ""

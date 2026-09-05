@@ -76,7 +76,13 @@ class HRPermission(permissions.BasePermission):
 
         # Employee: limited access to specific viewsets
         if role == 'employee':
-            allowed_views = ['LeaveApplicationViewSet', 'AttendanceViewSet', 'LeaveBalanceViewSet', 'EmployeeTaskViewSet', 'EmployeeQueryViewSet', 'LeaveTypeViewSet', 'EmployeeViewSet']
+            allowed_views = [
+                'LeaveApplicationViewSet', 'AttendanceViewSet', 'LeaveBalanceViewSet',
+                'EmployeeTaskViewSet', 'EmployeeQueryViewSet', 'LeaveTypeViewSet',
+                'EmployeeViewSet', 'EmployeeSalaryHistoryViewSet', 'OvertimeRecordViewSet',
+                'EmployeeAdvanceLoanViewSet', 'HRDocumentViewSet', 'PayslipViewSet',
+                'PayslipPDFView'
+            ]
             if view.__class__.__name__ in allowed_views:
                 if request.method == 'DELETE':
                     self.message = "Employees cannot delete records."

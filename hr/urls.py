@@ -9,13 +9,20 @@ from .views import (
     SalaryStructureViewSet, SalaryAssignmentViewSet,
     PayrollRunViewSet, PayslipViewSet,
     PayslipPDFView, HRDashboardView, SetupDefaultsView,
-    EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet
+    EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet,
+    EmployeeSalaryHistoryViewSet, OvertimeRecordViewSet, EmployeeAdvanceLoanViewSet,
+    PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView
 )
 
 router = DefaultRouter()
 router.register(r'departments', DepartmentViewSet, basename='department')
 router.register(r'designations', DesignationViewSet, basename='designation')
 router.register(r'employees', EmployeeViewSet, basename='employee')
+router.register(r'salary-history', EmployeeSalaryHistoryViewSet, basename='salary-history')
+router.register(r'overtime', OvertimeRecordViewSet, basename='overtime')
+router.register(r'advances-loans', EmployeeAdvanceLoanViewSet, basename='advance-loan')
+router.register(r'exceptions', PayrollExceptionViewSet, basename='payroll-exception')
+router.register(r'documents', HRDocumentViewSet, basename='hr-document')
 router.register(r'attendance', AttendanceViewSet, basename='attendance')
 router.register(r'leave-types', LeaveTypeViewSet, basename='leave-type')
 router.register(r'leave-balances', LeaveBalanceViewSet, basename='leave-balance')
@@ -34,6 +41,9 @@ urlpatterns = [
     path('leave-applications/<uuid:pk>/reject/', LeaveRejectView.as_view(), name='leave-reject'),
     path('payslips/<uuid:pk>/pdf/', PayslipPDFView.as_view(), name='payslip-pdf'),
     path('dashboard/', HRDashboardView.as_view(), name='hr-dashboard'),
+    path('settings/', HRMSSettingsView.as_view(), name='hrms-settings'),
+    path('reports/', HRReportsView.as_view(), name='hr-reports'),
     path('setup-defaults/', SetupDefaultsView.as_view(), name='setup-defaults'),
     path('', include(router.urls)),
 ]
+

@@ -11,16 +11,23 @@ from .models import (
     Department, Designation, Employee, AttendanceRecord,
     LeaveType, LeaveBalance, LeaveApplication,
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
-    PayrollRun, Payslip
+    PayrollRun, Payslip, EmployeeSalaryHistory, OvertimeRecord,
+    EmployeeAdvanceLoan, LoanRecoveryLog, PayrollException,
+    HRDocument, HRMSSettings
 )
 from .serializers import (
     DepartmentSerializer, DesignationSerializer, EmployeeSerializer,
     AttendanceRecordSerializer, LeaveTypeSerializer, LeaveBalanceSerializer,
     LeaveApplicationSerializer, SalaryStructureSerializer, EmployeeSalaryAssignmentSerializer,
-    PayrollRunSerializer, PayslipSerializer
+    PayrollRunSerializer, PayslipSerializer, EmployeeSalaryHistorySerializer,
+    OvertimeRecordSerializer, EmployeeAdvanceLoanSerializer, LoanRecoveryLogSerializer,
+    PayrollExceptionSerializer, HRDocumentSerializer, HRMSSettingsSerializer
 )
 from .permissions import HRPermission
 from .services import audit_service, leave_service
+from .services.hr_accounting_service import HRAccountingService
+from .services.exceptions_service import scan_payroll_exceptions
+from .services.payroll_engine import run_payroll, get_hrms_settings
 
 
 class DepartmentViewSet(viewsets.ModelViewSet):
@@ -220,39 +227,79 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     def increment_salary(self, request, pk=None):
         instance = self.get_object()
         tenant = getattr(request.user, 'active_tenant', request.user)
-        
+
         increment_percentage = request.data.get('increment_percentage')
+        new_salary_input = request.data.get('new_salary')
         effective_from = request.data.get('effective_from')
-        
-        if not increment_percentage or not effective_from:
-            raise ValidationError("increment_percentage and effective_from are required.")
-            
-        try:
-            increment_percentage = float(increment_percentage)
-        except ValueError:
-            raise ValidationError("increment_percentage must be a number.")
-            
+        reason = request.data.get('reason', '')
+        structure_id = request.data.get('salary_structure')
+
+        if not effective_from:
+            raise ValidationError("effective_from date is required.")
+
         latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by('-effective_from').first()
-        if not latest_assignment:
-            raise ValidationError("Employee has no existing salary assignment.")
-            
+        prev_ctc = latest_assignment.monthly_ctc if latest_assignment else Decimal('0.00')
+        target_structure = latest_assignment.salary_structure if latest_assignment else None
+
+        if structure_id:
+            try:
+                target_structure = SalaryStructure.objects.get(id=structure_id, tenant=tenant)
+            except SalaryStructure.DoesNotExist:
+                raise ValidationError("Specified salary structure not found.")
+
+        if not target_structure:
+            raise ValidationError("A valid salary structure must be assigned.")
+
         from decimal import Decimal
-        new_ctc = latest_assignment.monthly_ctc * Decimal(1 + (increment_percentage / 100.0))
-        new_ctc = round(new_ctc, 2)
-        
+        if new_salary_input is not None and new_salary_input != '':
+            try:
+                new_ctc = Decimal(str(new_salary_input)).quantize(Decimal('0.01'))
+            except Exception:
+                raise ValidationError("Invalid new_salary format.")
+        elif increment_percentage:
+            try:
+                pct = Decimal(str(increment_percentage))
+                new_ctc = (prev_ctc * (Decimal('1.00') + (pct / Decimal('100.0')))).quantize(Decimal('0.01'))
+            except Exception:
+                raise ValidationError("increment_percentage must be a valid number.")
+        else:
+            raise ValidationError("Either increment_percentage or new_salary is required.")
+
         data = {
             'employee': instance.id,
-            'salary_structure': latest_assignment.salary_structure.id,
+            'salary_structure': target_structure.id,
             'effective_from': effective_from,
             'monthly_ctc': new_ctc
         }
-        
-        # We must import the serializer locally to avoid circular imports or just use it if already imported
-        from hr.serializers import EmployeeSalaryAssignmentSerializer
+
         serializer = EmployeeSalaryAssignmentSerializer(data=data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        new_assignment = serializer.save(tenant=tenant)
-        
+        serializer.save(tenant=tenant)
+
+        # Record immutable EmployeeSalaryHistory
+        EmployeeSalaryHistory.objects.create(
+            tenant=tenant,
+            employee=instance,
+            effective_date=effective_from,
+            previous_salary=prev_ctc,
+            new_salary=new_ctc,
+            salary_structure=target_structure,
+            reason=reason or f"Salary revision to ₹{new_ctc}",
+            approved_by=request.user,
+        )
+
+        audit_service.log_create(
+            request,
+            instance,
+            model_name="EmployeeSalaryRevision",
+            changes={
+                'employee_code': instance.employee_code,
+                'previous_salary': str(prev_ctc),
+                'new_salary': str(new_ctc),
+                'reason': reason,
+            }
+        )
+
         if instance.personal_email:
             from hr.tasks import send_salary_increment_email
             from django.conf import settings
@@ -261,8 +308,33 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 send_salary_increment_email.delay(instance.personal_email, instance.full_name, str(new_ctc))
             else:
                 send_salary_increment_email(instance.personal_email, instance.full_name, str(new_ctc))
-                
-        return Response({'status': 'Salary incremented', 'new_ctc': new_ctc}, status=status.HTTP_200_OK)
+
+        return Response({
+            'status': 'Salary updated successfully',
+            'previous_ctc': str(prev_ctc),
+            'new_ctc': str(new_ctc),
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def salary_history(self, request, pk=None):
+        instance = self.get_object()
+        history = instance.salary_history.all().order_by('-effective_date', '-created_at')
+        serializer = EmployeeSalaryHistorySerializer(history, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get', 'post'])
+    def documents(self, request, pk=None):
+        instance = self.get_object()
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        if request.method == 'GET':
+            docs = instance.documents.all().order_by('-created_at')
+            serializer = HRDocumentSerializer(docs, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            serializer = HRDocumentSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save(tenant=tenant, employee=instance, uploaded_by=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class AttendanceViewSet(viewsets.ModelViewSet):
@@ -665,41 +737,154 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             audit_service.log_update(request, instance, before={'status': 'draft'}, after={'status': 'processing'})
             return Response({'status': 'Payroll run initiated'}, status=status.HTTP_202_ACCEPTED)
         else:
-            # Run synchronously in local dev — task closes the DB connection on exit,
-            # so we reset it before doing anything with the DB afterwards.
             run_payroll_task(str(instance.id))
             close_old_connections()
-
-            # Re-fetch the instance on the fresh connection so we get the real status
             instance.refresh_from_db()
             try:
                 audit_service.log_update(request, instance, before={'status': 'processing'}, after={'status': instance.status})
             except Exception:
-                pass  # Non-critical; don't fail the whole request over an audit log
-
+                pass
             return Response({'status': instance.status}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
-    def finalise(self, request, pk=None):
+    def calculate(self, request, pk=None):
         instance = self.get_object()
-        
-        if instance.status != 'completed':
-            raise ValidationError("Only completed payroll runs can be finalised.")
-            
+        if instance.status == 'locked':
+            raise ValidationError("Cannot recalculate a locked payroll run. Please reopen first.")
+
+        run_payroll(str(instance.id))
+        instance.refresh_from_db()
+        audit_service.log_update(request, instance, before={'status': 'draft'}, after={'status': instance.status})
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def exceptions(self, request, pk=None):
+        instance = self.get_object()
+        exceptions = instance.exceptions.all().order_by('severity', 'created_at')
+        serializer = PayrollExceptionSerializer(exceptions, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def finalise(self, request, pk=None):
+        """Backward-compatible action mapping to approval."""
+        instance = self.get_object()
+        if instance.status not in ['completed', 'calculated']:
+            raise ValidationError("Only completed or calculated payroll runs can be finalised.")
+
         before = {'status': instance.status, 'finalised_at': str(instance.finalised_at)}
         instance.status = 'finalised'
         instance.finalised_at = timezone.now()
         instance.save(update_fields=['status', 'finalised_at'])
-        
+
         after = {'status': instance.status, 'finalised_at': str(instance.finalised_at)}
         audit_service.log_update(request, instance, before=before, after=after)
         return Response({'status': 'Payroll run finalised'}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        instance = self.get_object()
+        if instance.status in ['approved', 'paid', 'locked']:
+            raise ValidationError(f"Payroll run is already {instance.status}.")
+
+        critical_exceptions = instance.exceptions.filter(severity='critical', is_resolved=False)
+        if critical_exceptions.exists():
+            count = critical_exceptions.count()
+            err_msg = f"Cannot approve payroll: {count} unresolved critical exception(s) detected. Please review and resolve."
+            raise ValidationError(err_msg)
+
+        before = {'status': instance.status}
+        instance.status = 'approved'
+        instance.approved_by = request.user
+        instance.approved_at = timezone.now()
+        instance.save(update_fields=['status', 'approved_by', 'approved_at'])
+
+        # Create Double-Entry Accounting Accrual entries in Ledger
+        HRAccountingService.post_payroll_accrual(instance, request.user)
+
+        audit_service.log_update(request, instance, before=before, after={'status': 'approved'})
+        return Response({'status': 'Payroll approved and accounting accrual entries posted successfully'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def pay(self, request, pk=None):
+        instance = self.get_object()
+        if instance.status not in ['approved', 'finalised']:
+            raise ValidationError("Only approved payroll runs can be marked as paid.")
+
+        payment_account_id = request.data.get('payment_account_id')
+        payment_account = None
+        if payment_account_id:
+            from ledger.models import Account
+            try:
+                payment_account = Account.objects.get(id=payment_account_id, created_by=instance.tenant)
+            except Account.DoesNotExist:
+                raise ValidationError("Specified payment bank account not found.")
+
+        before = {'status': instance.status}
+        instance.status = 'paid'
+        instance.paid_by = request.user
+        instance.paid_at = timezone.now()
+        instance.payment_account = payment_account
+        instance.save(update_fields=['status', 'paid_by', 'paid_at', 'payment_account'])
+
+        # Create Double-Entry Accounting Disbursement entries and record loan recoveries
+        HRAccountingService.post_payroll_disbursement(instance, payment_account, request.user)
+
+        audit_service.log_update(request, instance, before=before, after={'status': 'paid'})
+        return Response({'status': 'Payroll marked as paid and disbursement ledger entries recorded'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def lock(self, request, pk=None):
+        instance = self.get_object()
+        if instance.status not in ['approved', 'paid', 'finalised']:
+            raise ValidationError("Only approved or paid payroll runs can be locked.")
+
+        before = {'status': instance.status}
+        instance.status = 'locked'
+        instance.locked_by = request.user
+        instance.locked_at = timezone.now()
+        instance.save(update_fields=['status', 'locked_by', 'locked_at'])
+
+        audit_service.log_update(request, instance, before=before, after={'status': 'locked'})
+        return Response({'status': 'Payroll run locked successfully'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reopen(self, request, pk=None):
+        instance = self.get_object()
+        if instance.status != 'locked' and not getattr(instance, 'finalised_at', None):
+            raise ValidationError("Only locked or finalised payroll runs can be reopened.")
+
+        if request.user.role not in ['admin', 'hr']:
+            raise ValidationError("Only HR Admin or Admin roles are authorized to reopen payroll.")
+
+        reason = request.data.get('reason', '').strip()
+        if not reason:
+            raise ValidationError("A mandatory reason must be provided to reopen payroll.")
+
+        before = {'status': instance.status}
+        # Reverse accounting entries
+        HRAccountingService.reverse_payroll_accrual(instance, request.user, reason)
+
+        instance.status = 'draft'
+        instance.is_reopened = True
+        instance.reopened_by = request.user
+        instance.reopened_at = timezone.now()
+        instance.reopen_reason = reason
+        instance.save(update_fields=['status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason'])
+
+        audit_service.log_update(
+            request,
+            instance,
+            before=before,
+            after={'status': 'draft', 'reopened_reason': reason},
+            model_name="PayrollReopen"
+        )
+        return Response({'status': 'Payroll run reopened and accounting entries reversed for editing'}, status=status.HTTP_200_OK)
+
 
 class PayslipViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    Read-only ViewSet for Payslip.
-    Requirements: 10.1, 12.1
+    Read-only ViewSet for Payslip with email and WhatsApp delivery actions.
     """
     serializer_class = PayslipSerializer
     permission_classes = [permissions.IsAuthenticated, HRPermission]
@@ -707,7 +892,64 @@ class PayslipViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)
-        return Payslip.objects.filter(tenant=tenant)
+        qs = Payslip.objects.filter(tenant=tenant)
+        run_id = self.request.query_params.get('payroll_run')
+        if run_id:
+            qs = qs.filter(payroll_run_id=run_id)
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def send_email(self, request, pk=None):
+        payslip = self.get_object()
+        if not payslip.employee.personal_email:
+            raise ValidationError("Employee has no email address configured.")
+
+        import calendar
+        from integration.tasks import send_async_email_notification
+        subject = f"Payslip for {calendar.month_name[payslip.payroll_run.month]} {payslip.payroll_run.year}"
+        message = (
+            f"Dear {payslip.employee.full_name},\n\n"
+            f"Your payslip for {calendar.month_name[payslip.payroll_run.month]} {payslip.payroll_run.year} has been generated.\n\n"
+            f"Gross Earnings: ₹{payslip.gross_salary}\n"
+            f"Total Deductions: ₹{payslip.total_deductions}\n"
+            f"Net Take-Home Salary: ₹{payslip.net_salary}\n\n"
+            f"Thank you,\n{payslip.tenant.business_name or 'Cenvora HR'}"
+        )
+        send_async_email_notification.delay(
+            str(payslip.tenant.id),
+            payslip.employee.personal_email,
+            subject,
+            message,
+            'Payslip',
+            str(payslip.id)
+        )
+        return Response({'status': 'Payslip email queued successfully'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def send_whatsapp(self, request, pk=None):
+        payslip = self.get_object()
+        if not payslip.employee.personal_phone:
+            raise ValidationError("Employee has no phone number configured.")
+
+        import calendar
+        from integration.tasks import send_async_whatsapp_notification
+        body = (
+            f"Hello {payslip.employee.full_name},\n"
+            f"Your salary slip for {calendar.month_name[payslip.payroll_run.month]} {payslip.payroll_run.year} is ready.\n"
+            f"Net Pay: ₹{payslip.net_salary}\n"
+            f"— {payslip.tenant.business_name or 'Cenvora HR'}"
+        )
+        send_async_whatsapp_notification.delay(
+            str(payslip.tenant.id),
+            payslip.employee.personal_phone,
+            body,
+            'Payslip',
+            str(payslip.id)
+        )
+        return Response({'status': 'Payslip WhatsApp message queued successfully'}, status=status.HTTP_200_OK)
 
 
 from django.http import HttpResponse
@@ -744,22 +986,21 @@ class PayslipPDFView(APIView):
 class HRDashboardView(APIView):
     """
     Dashboard metrics for HR module.
-    Requirements: 11.1, 11.2, 11.3, 11.4
+    Displays KPIs, current payroll progress, and HR alert notifications.
     """
     permission_classes = [permissions.IsAuthenticated, HRPermission]
 
     def get(self, request, *args, **kwargs):
         tenant = getattr(request.user, 'active_tenant', request.user)
-        cache_key = f"hr_dashboard_{tenant.id}"
         
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return Response(cached_data, status=status.HTTP_200_OK)
-            
         import pytz
+        from django.db.models import Sum, Q
         tz = pytz.timezone('Asia/Kolkata')
         today = timezone.now().astimezone(tz).date()
+        current_year = today.year
+        current_month = today.month
         
+        total_employees = Employee.objects.filter(tenant=tenant).count()
         active_employees = Employee.objects.filter(tenant=tenant, status='active').count()
         
         on_leave_today = AttendanceRecord.objects.filter(
@@ -774,17 +1015,111 @@ class HRDashboardView(APIView):
             status__in=['present', 'half_day']
         ).count()
         
-        latest_run = PayrollRun.objects.filter(tenant=tenant, status='finalised').order_by('-finalised_at').first()
-        last_payroll_net = str(latest_run.total_net) if latest_run else None
-        
+        # Current month payroll run
+        current_payroll = PayrollRun.objects.filter(
+            tenant=tenant,
+            year=current_year,
+            month=current_month
+        ).first()
+
+        payroll_this_month = Decimal('0.00')
+        net_salary_payable = Decimal('0.00')
+        pending_payroll_runs = PayrollRun.objects.filter(
+            tenant=tenant,
+            status__in=['draft', 'calculating', 'calculated', 'review', 'approved']
+        ).count()
+
+        if current_payroll:
+            payroll_this_month = current_payroll.total_gross
+            net_salary_payable = current_payroll.total_net
+        else:
+            # Fallback to latest run if current month not initialized
+            latest_run = PayrollRun.objects.filter(tenant=tenant).order_by('-year', '-month').first()
+            if latest_run:
+                payroll_this_month = latest_run.total_gross
+                net_salary_payable = latest_run.total_net
+
+        # HR Alerts Panel
+        alerts = []
+        # Check unapproved leaves
+        pending_leaves = LeaveApplication.objects.filter(tenant=tenant, status='pending').count()
+        if pending_leaves > 0:
+            alerts.append({
+                "type": "warning",
+                "title": "Pending Leave Requests",
+                "message": f"{pending_leaves} leave application(s) awaiting manager/HR approval.",
+                "action_url": "/hr/leave"
+            })
+
+        # Check pending overtime records
+        pending_ot = OvertimeRecord.objects.filter(tenant=tenant, status='pending').count()
+        if pending_ot > 0:
+            alerts.append({
+                "type": "info",
+                "title": "Unapproved Overtime",
+                "message": f"{pending_ot} overtime record(s) pending approval for upcoming payroll.",
+                "action_url": "/hr/attendance"
+            })
+
+        # Check critical payroll exceptions
+        critical_exceptions = PayrollException.objects.filter(
+            tenant=tenant,
+            severity='critical',
+            is_resolved=False
+        ).count()
+        if critical_exceptions > 0:
+            alerts.append({
+                "type": "danger",
+                "title": "Critical Payroll Exceptions",
+                "message": f"{critical_exceptions} critical exception(s) blocking payroll approval.",
+                "action_url": "/hr/payroll"
+            })
+
+        # Check employees without bank details
+        missing_bank = Employee.objects.filter(
+            tenant=tenant,
+            status='active'
+        ).filter(Q(bank_account_number='') | Q(bank_ifsc='')).count()
+        if missing_bank > 0:
+            alerts.append({
+                "type": "warning",
+                "title": "Missing Bank Details",
+                "message": f"{missing_bank} active employee(s) have incomplete bank or IFSC information.",
+                "action_url": "/hr/employees"
+            })
+
+        # Check employees without salary structure
+        assigned_emp_ids = EmployeeSalaryAssignment.objects.filter(tenant=tenant).values_list('employee_id', flat=True)
+        missing_salary = Employee.objects.filter(tenant=tenant, status='active').exclude(id__in=assigned_emp_ids).count()
+        if missing_salary > 0:
+            alerts.append({
+                "type": "warning",
+                "title": "Missing Salary Structures",
+                "message": f"{missing_salary} active employee(s) do not have an assigned salary structure.",
+                "action_url": "/hr/employees"
+            })
+
+        current_payroll_data = None
+        if current_payroll:
+            current_payroll_data = PayrollRunSerializer(current_payroll).data
+
         data = {
             "total_active_employees": active_employees,
             "on_leave_today": on_leave_today,
             "present_today": present_today,
-            "last_payroll_net": last_payroll_net
+            "last_payroll_net": str(net_salary_payable),
+            "kpis": {
+                "total_employees": total_employees,
+                "active_employees": active_employees,
+                "present_today": present_today,
+                "on_leave_today": on_leave_today,
+                "payroll_this_month": str(payroll_this_month),
+                "net_salary_payable": str(net_salary_payable),
+                "pending_payroll": pending_payroll_runs
+            },
+            "current_payroll": current_payroll_data,
+            "alerts": alerts
         }
-        
-        cache.set(cache_key, data, timeout=300)
         
         return Response(data, status=status.HTTP_200_OK)
 
@@ -1069,3 +1404,318 @@ An official notification has been broadcasted by the HR/Admin team:
                 if emp.personal_email:
                     html = get_html_notification(emp.full_name, title, message)
                     send_via_integration(emp.personal_email, title, message, html_body=html)
+
+
+class EmployeeSalaryHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only viewset for immutable audit trail of employee salary increments/revisions.
+    """
+    serializer_class = EmployeeSalaryHistorySerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        qs = EmployeeSalaryHistory.objects.filter(employee__tenant=tenant)
+        if user.role == 'employee':
+            try:
+                emp = Employee.objects.get(tenant=tenant, user=user)
+                return qs.filter(employee=emp)
+            except Employee.DoesNotExist:
+                return qs.none()
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        return qs
+
+
+class OvertimeRecordViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for logging and approving overtime hours.
+    """
+    serializer_class = OvertimeRecordSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        qs = OvertimeRecord.objects.filter(tenant=tenant)
+        if user.role == 'employee':
+            try:
+                emp = Employee.objects.get(tenant=tenant, user=user)
+                return qs.filter(employee=emp)
+            except Employee.DoesNotExist:
+                return qs.none()
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        serializer.save(tenant=tenant)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        ot = self.get_object()
+        if ot.status != 'pending':
+            return Response({"error": f"Cannot approve overtime with status {ot.status}."}, status=status.HTTP_400_BAD_REQUEST)
+        ot.status = 'approved'
+        ot.approved_by = request.user
+        ot.save()
+        return Response({"status": "approved"}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        ot = self.get_object()
+        if ot.status != 'pending':
+            return Response({"error": f"Cannot reject overtime with status {ot.status}."}, status=status.HTTP_400_BAD_REQUEST)
+        ot.status = 'rejected'
+        ot.approved_by = request.user
+        ot.save()
+        return Response({"status": "rejected"}, status=status.HTTP_200_OK)
+
+
+class EmployeeAdvanceLoanViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for tracking employee salary advances and personal loans with recovery tracking.
+    """
+    serializer_class = EmployeeAdvanceLoanSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        qs = EmployeeAdvanceLoan.objects.filter(tenant=tenant)
+        if user.role == 'employee':
+            try:
+                emp = Employee.objects.get(tenant=tenant, user=user)
+                return qs.filter(employee=emp)
+            except Employee.DoesNotExist:
+                return qs.none()
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        loan_type = self.request.query_params.get('type')
+        if loan_type:
+            qs = qs.filter(type=loan_type)
+        return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        serializer.save(tenant=tenant)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        loan = self.get_object()
+        if loan.status != 'requested':
+            return Response({"error": f"Cannot approve loan with status {loan.status}."}, status=status.HTTP_400_BAD_REQUEST)
+        loan.status = 'active'
+        loan.approved_by = request.user
+        loan.save()
+        return Response({"status": "active"}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='close')
+    def close(self, request, pk=None):
+        loan = self.get_object()
+        loan.status = 'closed'
+        loan.balance_amount = Decimal('0.00')
+        loan.save()
+        return Response({"status": "closed"}, status=status.HTTP_200_OK)
+
+
+class PayrollExceptionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing pre-approval payroll exceptions and warnings.
+    """
+    serializer_class = PayrollExceptionSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        qs = PayrollException.objects.filter(tenant=tenant)
+        payroll_run_id = self.request.query_params.get('payroll_run')
+        if payroll_run_id:
+            qs = qs.filter(payroll_run_id=payroll_run_id)
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='resolve')
+    def resolve(self, request, pk=None):
+        exc = self.get_object()
+        exc.is_resolved = True
+        exc.resolved_by = request.user
+        exc.save()
+        return Response({"status": "resolved"}, status=status.HTTP_200_OK)
+
+
+class HRDocumentViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing employee HR documents (offer letters, ID proof, contracts).
+    """
+    serializer_class = HRDocumentSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        qs = HRDocument.objects.filter(tenant=tenant)
+        if user.role == 'employee':
+            try:
+                emp = Employee.objects.get(tenant=tenant, user=user)
+                return qs.filter(employee=emp)
+            except Employee.DoesNotExist:
+                return qs.none()
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        serializer.save(tenant=tenant, uploaded_by=user)
+
+
+class HRMSSettingsView(APIView):
+    """
+    Get or update global HRMS Settings for the tenant.
+    """
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get(self, request, *args, **kwargs):
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        settings_obj = get_hrms_settings(tenant)
+        serializer = HRMSSettingsSerializer(settings_obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, *args, **kwargs):
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        settings_obj = get_hrms_settings(tenant)
+        serializer = HRMSSettingsSerializer(settings_obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class HRReportsView(APIView):
+    """
+    Consolidated HR reports:
+    - Payroll Register
+    - Salary Sheet
+    - Department Expenses
+    - Branch Expenses
+    - Statutory Summary (PF / ESI / PT / TDS)
+    """
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get(self, request, *args, **kwargs):
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        report_type = request.query_params.get('type', 'payroll_register')
+        year = int(request.query_params.get('year', timezone.now().year))
+        month = int(request.query_params.get('month', timezone.now().month))
+
+        if report_type == 'payroll_register':
+            payslips = Payslip.objects.filter(
+                payroll_run__tenant=tenant,
+                payroll_run__year=year,
+                payroll_run__month=month
+            ).select_related('employee', 'employee__department', 'employee__branch')
+
+            records = []
+            for p in payslips:
+                records.append({
+                    "employee_code": p.employee.employee_code,
+                    "employee_name": p.employee.full_name,
+                    "department": p.employee.department.name if p.employee.department else '—',
+                    "branch": p.employee.branch.name if p.employee.branch else 'Head Office',
+                    "bank_account": p.employee.bank_account_number or '—',
+                    "ifsc": p.employee.bank_ifsc or '—',
+                    "pan": p.employee.pan_number or '—',
+                    "working_days": str(p.working_days),
+                    "lop_days": str(p.lop_days),
+                    "gross_salary": str(p.gross_earnings),
+                    "total_deductions": str(p.total_deductions),
+                    "net_salary": str(p.net_salary),
+                    "employer_contribution": str(p.employer_total_contribution),
+                    "status": p.payroll_run.status
+                })
+            return Response({"year": year, "month": month, "count": len(records), "records": records}, status=status.HTTP_200_OK)
+
+        elif report_type == 'department_expenses':
+            from django.db.models import Sum
+            payslips = Payslip.objects.filter(
+                payroll_run__tenant=tenant,
+                payroll_run__year=year,
+                payroll_run__month=month
+            ).select_related('employee__department')
+
+            dept_map = {}
+            for p in payslips:
+                dept_name = p.employee.department.name if p.employee.department else 'Unassigned'
+                if dept_name not in dept_map:
+                    dept_map[dept_name] = {
+                        "department": dept_name,
+                        "headcount": 0,
+                        "gross": Decimal('0.00'),
+                        "net": Decimal('0.00'),
+                        "deductions": Decimal('0.00'),
+                        "employer_contribution": Decimal('0.00')
+                    }
+                dept_map[dept_name]["headcount"] += 1
+                dept_map[dept_name]["gross"] += p.gross_earnings
+                dept_map[dept_name]["net"] += p.net_salary
+                dept_map[dept_name]["deductions"] += p.total_deductions
+                dept_map[dept_name]["employer_contribution"] += p.employer_total_contribution
+
+            results = [
+                {
+                    "department": v["department"],
+                    "headcount": v["headcount"],
+                    "gross": str(v["gross"]),
+                    "net": str(v["net"]),
+                    "deductions": str(v["deductions"]),
+                    "employer_contribution": str(v["employer_contribution"]),
+                }
+                for v in dept_map.values()
+            ]
+            return Response({"year": year, "month": month, "results": results}, status=status.HTTP_200_OK)
+
+        elif report_type == 'statutory_summary':
+            payslips = Payslip.objects.filter(
+                payroll_run__tenant=tenant,
+                payroll_run__year=year,
+                payroll_run__month=month
+            )
+            total_pf = Decimal('0.00')
+            total_esi = Decimal('0.00')
+            total_pt = Decimal('0.00')
+            total_tds = Decimal('0.00')
+            total_employer_pf = Decimal('0.00')
+            total_employer_esi = Decimal('0.00')
+
+            for p in payslips:
+                total_pf += p.pf_deduction
+                total_esi += p.esi_deduction
+                total_pt += p.pt_deduction
+                total_tds += p.tds_deduction
+                # check component breakdown if available
+                breakdown = p.employer_contribution_breakdown or {}
+                total_employer_pf += Decimal(str(breakdown.get('pf', 0)))
+                total_employer_esi += Decimal(str(breakdown.get('esi', 0)))
+
+            return Response({
+                "year": year,
+                "month": month,
+                "employee_pf": str(total_pf),
+                "employer_pf": str(total_employer_pf),
+                "total_pf_liability": str(total_pf + total_employer_pf),
+                "employee_esi": str(total_esi),
+                "employer_esi": str(total_employer_esi),
+                "total_esi_liability": str(total_esi + total_employer_esi),
+                "professional_tax": str(total_pt),
+                "tds_payable": str(total_tds),
+            }, status=status.HTTP_200_OK)
+
+        return Response({"error": "Unknown report type."}, status=status.HTTP_400_BAD_REQUEST)

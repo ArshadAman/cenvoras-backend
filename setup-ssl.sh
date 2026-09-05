@@ -4,7 +4,7 @@
 
 set -e
 
-DOMAINS=("api.cenvora.app" "dev.cenvora.app" "devapi.cenvora.app")
+DOMAINS=("api.cenvora.app" "dev.cenvora.app" "devapi.cenvora.app" "newapi.cenvora.app")
 SELF_SIGNED_DIR="/etc/nginx/self-signed"
 CERTBOT_DIR="/var/www/certbot"
 
@@ -65,7 +65,7 @@ cat > /root/obtain-letsencrypt-certs.sh <<'EOFCERT'
 #!/bin/bash
 # Interactive script to obtain Let's Encrypt certificates via DNS-01 challenge
 
-DOMAINS="api.cenvora.app,dev.cenvora.app,devapi.cenvora.app"
+DOMAINS="api.cenvora.app,dev.cenvora.app,devapi.cenvora.app,newapi.cenvora.app"
 EMAIL="${1:-your-email@domain.com}"
 
 echo "=== Obtaining Let's Encrypt Certificates ==="
@@ -82,7 +82,7 @@ echo "3. Wait 5-15 minutes for DNS propagation"
 echo "4. Press Enter in Certbot to verify"
 echo ""
 echo "Domains to verify:"
-for domain in api.cenvora.app dev.cenvora.app devapi.cenvora.app; do
+for domain in api.cenvora.app dev.cenvora.app devapi.cenvora.app newapi.cenvora.app; do
   echo "  - _acme-challenge.$domain"
 done
 echo ""
@@ -93,6 +93,7 @@ certbot certonly --manual --preferred-challenges=dns \
   -d api.cenvora.app \
   -d dev.cenvora.app \
   -d devapi.cenvora.app \
+  -d newapi.cenvora.app \
   --email "$EMAIL" \
   --agree-tos \
   --no-eff-email

@@ -256,7 +256,7 @@ REST_FRAMEWORK = {
 # CORS configuration (allow all for development, restrict in production)
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('1', 'true', 'yes', 'on')
 CORS_ALLOW_CREDENTIALS = os.environ.get('CORS_ALLOW_CREDENTIALS', 'False').lower() in ('1', 'true', 'yes', 'on')
-raw_cors_allowed = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
+raw_cors_allowed = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app,https://newapi.cenvora.app')
 cors_origins = [origin.strip() for origin in raw_cors_allowed.split(',') if origin.strip()]
 for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
     if required_origin not in cors_origins:
@@ -272,7 +272,7 @@ if DEBUG:
     ])
 
 
-raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app')
+raw_csrf_trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://cenvora.app,https://www.cenvora.app,https://dev.cenvora.app,https://devapi.cenvora.app,https://api.cenvora.app,https://newapi.cenvora.app')
 csrf_trusted_origins = [origin.strip() for origin in raw_csrf_trusted.split(',') if origin.strip()]
 for required_origin in ('https://cenvora.app', 'https://www.cenvora.app'):
     if required_origin not in csrf_trusted_origins:

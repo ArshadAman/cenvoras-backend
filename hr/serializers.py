@@ -62,7 +62,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     def get_current_ctc(self, obj):
         latest = obj.salary_assignments.order_by('-effective_from').first()
-        return str(latest.monthly_ctc) if latest else '0.00'
+        if latest:
+            return str(latest.monthly_ctc)
+        latest_hist = obj.salary_history.order_by('-effective_date', '-created_at').first()
+        if latest_hist:
+            return str(latest_hist.new_salary)
+        return '0.00'
 
     def validate_user(self, value):
         if value:

@@ -230,151 +230,167 @@ class EmployeeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def increment_salary(self, request, pk=None):
-        instance = self.get_object()
-        tenant = getattr(request.user, 'active_tenant', request.user)
+        try:
+            instance = self.get_object()
+            tenant = getattr(request.user, 'active_tenant', request.user)
 
-        increment_percentage = request.data.get('increment_percentage')
-        new_salary_input = request.data.get('new_salary')
-        effective_from = request.data.get('effective_from') or request.data.get('effective_date')
-        reason = request.data.get('reason', '')
-        structure_id = request.data.get('salary_structure')
+            increment_percentage = request.data.get('increment_percentage')
+            new_salary_input = request.data.get('new_salary')
+            effective_from = request.data.get('effective_from') or request.data.get('effective_date')
+            reason = request.data.get('reason', '')
+            structure_id = request.data.get('salary_structure')
 
-        if not effective_from:
-            effective_from = timezone.now().date()
+            if not effective_from:
+                effective_from = timezone.now().date()
 
-        latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by('-effective_from').first()
-        prev_ctc = latest_assignment.monthly_ctc if latest_assignment else Decimal('0.00')
-        target_structure = latest_assignment.salary_structure if latest_assignment else None
+            latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by('-effective_from').first()
+            prev_ctc = latest_assignment.monthly_ctc if latest_assignment else Decimal('0.00')
+            target_structure = latest_assignment.salary_structure if latest_assignment else None
 
-        if structure_id:
-            try:
-                target_structure = SalaryStructure.objects.get(id=structure_id, tenant=tenant)
-            except SalaryStructure.DoesNotExist:
-                raise ValidationError("Specified salary structure not found.")
+            if structure_id:
+                try:
+                    target_structure = SalaryStructure.objects.get(id=structure_id, tenant=tenant)
+                except SalaryStructure.DoesNotExist:
+                    raise ValidationError("Specified salary structure not found.")
 
-        if not target_structure:
-            target_structure = SalaryStructure.objects.filter(tenant=tenant).first()
             if not target_structure:
-                target_structure = SalaryStructure.objects.create(
-                    tenant=tenant,
-                    name="Standard Salary Structure",
-                    description="Default company salary structure",
+                target_structure = SalaryStructure.objects.filter(tenant=tenant).first()
+                if not target_structure:
+                    target_structure, _ = SalaryStructure.objects.get_or_create(
+                        tenant=tenant,
+                        name="Standard Salary Structure",
+                        defaults={"description": "Default company salary structure"}
+                    )
+
+            if not target_structure.components.filter(is_basic=True).exists():
+                SalaryComponent.objects.get_or_create(
+                    salary_structure=target_structure,
+                    name="Basic",
+                    defaults={
+                        "type": "earning",
+                        "component_type": "pct_gross",
+                        "value": Decimal('50.00'),
+                        "is_basic": True,
+                        "is_taxable": True,
+                        "order": 1,
+                    }
+                )
+                SalaryComponent.objects.get_or_create(
+                    salary_structure=target_structure,
+                    name="HRA",
+                    defaults={
+                        "type": "earning",
+                        "component_type": "pct_gross",
+                        "value": Decimal('25.00'),
+                        "is_basic": False,
+                        "is_taxable": True,
+                        "order": 2,
+                    }
+                )
+                SalaryComponent.objects.get_or_create(
+                    salary_structure=target_structure,
+                    name="Special Allowance",
+                    defaults={
+                        "type": "earning",
+                        "component_type": "pct_gross",
+                        "value": Decimal('25.00'),
+                        "is_basic": False,
+                        "is_taxable": True,
+                        "order": 3,
+                    }
                 )
 
-        if not target_structure.components.filter(is_basic=True).exists():
-            SalaryComponent.objects.create(
-                salary_structure=target_structure,
-                name="Basic",
-                type="earning",
-                component_type="pct_gross",
-                value=Decimal('50.00'),
-                is_basic=True,
-                is_taxable=True,
-                order=1
-            )
-            SalaryComponent.objects.create(
-                salary_structure=target_structure,
-                name="HRA",
-                type="earning",
-                component_type="pct_gross",
-                value=Decimal('25.00'),
-                is_basic=False,
-                is_taxable=True,
-                order=2
-            )
-            SalaryComponent.objects.create(
-                salary_structure=target_structure,
-                name="Special Allowance",
-                type="earning",
-                component_type="pct_gross",
-                value=Decimal('25.00'),
-                is_basic=False,
-                is_taxable=True,
-                order=3
-            )
+            if new_salary_input is not None and str(new_salary_input).strip() != '':
+                try:
+                    new_ctc = Decimal(str(new_salary_input)).quantize(Decimal('0.01'))
+                except Exception:
+                    raise ValidationError("Invalid new_salary format.")
+            elif increment_percentage is not None and str(increment_percentage).strip() != '':
+                try:
+                    pct = Decimal(str(increment_percentage))
+                    new_ctc = (prev_ctc * (Decimal('1.00') + (pct / Decimal('100.0')))).quantize(Decimal('0.01'))
+                except Exception:
+                    raise ValidationError("increment_percentage must be a valid number.")
+            else:
+                raise ValidationError("Either increment_percentage or new_salary is required.")
 
-        if new_salary_input is not None and str(new_salary_input).strip() != '':
-            try:
-                new_ctc = Decimal(str(new_salary_input)).quantize(Decimal('0.01'))
-            except Exception:
-                raise ValidationError("Invalid new_salary format.")
-        elif increment_percentage is not None and str(increment_percentage).strip() != '':
-            try:
-                pct = Decimal(str(increment_percentage))
-                new_ctc = (prev_ctc * (Decimal('1.00') + (pct / Decimal('100.0')))).quantize(Decimal('0.01'))
-            except Exception:
-                raise ValidationError("increment_percentage must be a valid number.")
-        else:
-            raise ValidationError("Either increment_percentage or new_salary is required.")
-
-        data = {
-            'employee': instance.id,
-            'salary_structure': target_structure.id,
-            'effective_from': effective_from,
-            'monthly_ctc': new_ctc
-        }
-
-        existing_assignment = EmployeeSalaryAssignment.objects.filter(
-            employee=instance,
-            effective_from=effective_from
-        ).first()
-
-        if existing_assignment:
-            serializer = EmployeeSalaryAssignmentSerializer(
-                existing_assignment,
-                data=data,
-                partial=True,
-                context={'request': request}
-            )
-        else:
-            serializer = EmployeeSalaryAssignmentSerializer(
-                data=data,
-                context={'request': request}
-            )
-        serializer.is_valid(raise_exception=True)
-        serializer.save(tenant=tenant)
-
-        # Record immutable EmployeeSalaryHistory
-        EmployeeSalaryHistory.objects.create(
-            tenant=tenant,
-            employee=instance,
-            effective_date=effective_from,
-            previous_salary=prev_ctc,
-            new_salary=new_ctc,
-            salary_structure=target_structure,
-            reason=reason or f"Salary revision to ₹{new_ctc}",
-            approved_by=request.user if request.user.is_authenticated else None,
-        )
-
-        audit_service.log_create(
-            request,
-            instance,
-            model_name="EmployeeSalaryRevision",
-            changes={
-                'employee_code': instance.employee_code,
-                'previous_salary': str(prev_ctc),
-                'new_salary': str(new_ctc),
-                'reason': reason,
+            data = {
+                'employee': instance.id,
+                'salary_structure': target_structure.id,
+                'effective_from': effective_from,
+                'monthly_ctc': new_ctc
             }
-        )
 
-        if instance.personal_email:
+            existing_assignment = EmployeeSalaryAssignment.objects.filter(
+                employee=instance,
+                effective_from=effective_from
+            ).first()
+
+            if existing_assignment:
+                serializer = EmployeeSalaryAssignmentSerializer(
+                    existing_assignment,
+                    data=data,
+                    partial=True,
+                    context={'request': request}
+                )
+            else:
+                serializer = EmployeeSalaryAssignmentSerializer(
+                    data=data,
+                    context={'request': request}
+                )
+            serializer.is_valid(raise_exception=True)
+            serializer.save(tenant=tenant)
+
+            # Record immutable EmployeeSalaryHistory
+            EmployeeSalaryHistory.objects.create(
+                tenant=tenant,
+                employee=instance,
+                effective_date=effective_from,
+                previous_salary=prev_ctc,
+                new_salary=new_ctc,
+                salary_structure=target_structure,
+                reason=reason or f"Salary revision to ₹{new_ctc}",
+                approved_by=request.user if request.user.is_authenticated else None,
+            )
+
             try:
-                from hr.tasks import send_salary_increment_email
-                from django.conf import settings
-                use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-                if use_celery:
-                    send_salary_increment_email.delay(instance.personal_email, instance.full_name, str(new_ctc))
-                else:
-                    send_salary_increment_email(instance.personal_email, instance.full_name, str(new_ctc))
-            except Exception as email_err:
-                logger.warning(f"Failed to send salary increment email to {instance.personal_email}: {email_err}")
+                audit_service.log_create(
+                    request,
+                    instance,
+                    model_name="EmployeeSalaryRevision",
+                    changes={
+                        'employee_code': instance.employee_code,
+                        'previous_salary': str(prev_ctc),
+                        'new_salary': str(new_ctc),
+                        'reason': reason,
+                    }
+                )
+            except Exception as audit_err:
+                logger.warning(f"Audit log failed in increment_salary: {audit_err}")
 
-        return Response({
-            'status': 'Salary updated successfully',
-            'previous_ctc': str(prev_ctc),
-            'new_ctc': str(new_ctc),
-        }, status=status.HTTP_200_OK)
+            if instance.personal_email:
+                try:
+                    from hr.tasks import send_salary_increment_email
+                    from django.conf import settings
+                    use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+                    if use_celery:
+                        send_salary_increment_email.delay(instance.personal_email, instance.full_name, str(new_ctc))
+                    else:
+                        send_salary_increment_email(instance.personal_email, instance.full_name, str(new_ctc))
+                except Exception as email_err:
+                    logger.warning(f"Failed to send salary increment email to {instance.personal_email}: {email_err}")
+
+            return Response({
+                'status': 'Salary updated successfully',
+                'previous_ctc': str(prev_ctc),
+                'new_ctc': str(new_ctc),
+            }, status=status.HTTP_200_OK)
+        except ValidationError as ve:
+            detail = ve.detail if hasattr(ve, 'detail') else str(ve)
+            return Response({'error': detail}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception(f"Unhandled error in increment_salary for employee {pk}: {e}")
+            return Response({'error': f"Failed to update salary: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'])
     def salary_history(self, request, pk=None):

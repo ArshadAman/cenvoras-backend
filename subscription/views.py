@@ -1,6 +1,14 @@
-import uuid
-from decimal import Decimal
+from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import uuid
+from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+
+import requests
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -9,8 +17,123 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import BillingCycle, Plan, SubscriptionStatus, TenantSubscription
+from cenvoras.cache_utils import global_cache_key, cache_get_or_set, CACHE_TTL_LONG
+from .models import (
+	BillingCycle,
+	Plan,
+	SubscriptionStatus,
+	TenantSubscription,
+	SubscriptionPayment,
+	SubscriptionPaymentStatus,
+	SubscriptionPaymentAction,
+	WebhookEvent,
+)
 from .services import get_entitlements, get_tenant
+from .tasks import process_cashfree_webhook, verify_cashfree_signature, send_payment_status_email
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_webhook_event_type(raw_event_type: str) -> str:
+	event_type = (raw_event_type or '').upper().strip().replace('-', '_').replace(' ', '_')
+	if event_type.endswith('_WEBHOOK'):
+		event_type = event_type.replace('_WEBHOOK', '')
+	if event_type in {'PAYMENT_SUCCEEDED', 'PAYMENT_SUCCESSFUL'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'PAYMENT_FAILURE', 'PAYMENT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'PAYMENT_PENDING'}:
+		return 'PAYMENT_PENDING'
+	if event_type in {'SUCCESS_PAYMENT', 'PAYMENT_SUCCESS'}:
+		return 'PAYMENT_SUCCESS'
+	if event_type in {'FAILED_PAYMENT', 'CHECKOUT_FAILED'}:
+		return 'PAYMENT_FAILED'
+	if event_type in {'ABANDONED_CHECKOUT', 'USER_DROPPED_PAYMENT'}:
+		return 'PAYMENT_PENDING'
+	return event_type
+
+
+def _extract_payment_status(payload: dict) -> str:
+	if not isinstance(payload, dict):
+		return ''
+
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+	status_value = (
+		payment.get('payment_status')
+		or data.get('payment_status')
+		or payload.get('payment_status')
+		or ''
+	)
+	return str(status_value).upper().strip().replace('-', '_').replace(' ', '_')
+
+
+def _extract_order_id(payload: dict) -> str | None:
+	if not isinstance(payload, dict):
+		return None
+
+	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
+	order = data.get('order', {}) if isinstance(data.get('order', {}), dict) else {}
+	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+
+	order_id = (
+		data.get('orderId')
+		or data.get('order_id')
+		or order.get('order_id')
+		or order.get('orderId')
+		or payment.get('order_id')
+		or payment.get('orderId')
+		or payload.get('orderId')
+		or payload.get('order_id')
+	)
+
+	return str(order_id).strip() if order_id else None
+
+
+def _is_webhook_test_event(payload: dict, event_type: str, headers) -> bool:
+	if not isinstance(payload, dict):
+		return False
+
+	candidates = {
+		(event_type or '').upper(),
+		str(payload.get('event', '')).upper(),
+		str(payload.get('type', '')).upper(),
+		str(payload.get('event_type', '')).upper(),
+	}
+
+	known_test_events = {
+		'TEST',
+		'PING',
+		'WEBHOOK_TEST',
+		'ENDPOINT_TEST',
+		'WEBHOOK_PING',
+	}
+	if candidates.intersection(known_test_events):
+		return True
+
+	if payload.get('is_test') is True or payload.get('test') is True:
+		return True
+
+	if str(headers.get('x-webhook-event', '')).upper() in known_test_events:
+		return True
+
+	if str(headers.get('x-webhook-test', '')).strip().lower() == 'true':
+		return True
+
+	return False
+
+
+def _ack_ignored(reason: str, event_id: str | None = None, details: str | None = None):
+	payload = {
+		'status': 'ignored',
+		'reason': reason,
+	}
+	if event_id:
+		payload['event_id'] = event_id
+	if details:
+		payload['details'] = details
+	return Response(payload, status=status.HTTP_200_OK)
 
 
 def _normalize_cycle(cycle: str | None) -> str:
@@ -66,10 +189,14 @@ def _get_plan_change_data(subscription, target_plan, target_cycle):
 	current_cycle_price = Decimal('0.00')
 	current_cycle_total_days = 0
 	new_plan_full_price = Decimal('0.00')
+	base_price_before_discount = Decimal('0.00')
 	amount = Decimal('0.00')
 
 	if payment_required:
 		new_plan_full_price = target_plan.price_for_cycle(target_cycle)
+		base_price_before_discount = Decimal(str(getattr(target_plan, 'original_monthly_price', 0.0) or 0.0)) * (Decimal('3') if target_cycle == BillingCycle.QUARTERLY else (Decimal('12') if target_cycle == BillingCycle.YEARLY else Decimal('1')))
+		if base_price_before_discount <= 0:
+			base_price_before_discount = new_plan_full_price
 		
 		has_active_paid_period = (
 			not current_is_free

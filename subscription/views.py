@@ -1,12 +1,7 @@
 import uuid
-import json
-import logging
-import hashlib
-from datetime import timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 
-import requests
-from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
@@ -14,125 +9,210 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from cenvoras.cache_utils import CACHE_TTL_LONG, cache_get_or_set, global_cache_key
-
-from .models import (
-	Plan,
-	TenantSubscription,
-	SubscriptionStatus,
-	SubscriptionPayment,
-	SubscriptionPaymentStatus,
-	SubscriptionPaymentAction,
-	WebhookEvent,
-	BillingCycle,
-)
-from .services import get_entitlements
-from .tasks import process_cashfree_webhook, verify_cashfree_signature, send_payment_status_email
-
-logger = logging.getLogger(__name__)
+from .models import BillingCycle, Plan, SubscriptionPaymentOrder, SubscriptionStatus, TenantSubscription
+from .services import get_entitlements, get_tenant
 
 
-def _normalize_webhook_event_type(raw_event_type: str) -> str:
-	event_type = (raw_event_type or '').upper().strip().replace('-', '_').replace(' ', '_')
-	if event_type.endswith('_WEBHOOK'):
-		event_type = event_type.replace('_WEBHOOK', '')
-	if event_type in {'PAYMENT_SUCCEEDED', 'PAYMENT_SUCCESSFUL'}:
-		return 'PAYMENT_SUCCESS'
-	if event_type in {'PAYMENT_FAILURE', 'PAYMENT_FAILED'}:
-		return 'PAYMENT_FAILED'
-	if event_type in {'PAYMENT_PENDING'}:
-		return 'PAYMENT_PENDING'
-	# New endpoint labels / variants commonly seen in provider dashboards.
-	if event_type in {'SUCCESS_PAYMENT', 'PAYMENT_SUCCESS'}:
-		return 'PAYMENT_SUCCESS'
-	if event_type in {'FAILED_PAYMENT', 'CHECKOUT_FAILED'}:
-		return 'PAYMENT_FAILED'
-	if event_type in {'ABANDONED_CHECKOUT', 'USER_DROPPED_PAYMENT'}:
-		return 'PAYMENT_PENDING'
-	return event_type
+def _normalize_cycle(cycle: str | None) -> str:
+	normalized = str(cycle or BillingCycle.MONTHLY).lower()
+	if normalized in {BillingCycle.MONTHLY, BillingCycle.QUARTERLY, BillingCycle.YEARLY}:
+		return normalized
+	return BillingCycle.MONTHLY
 
 
-def _extract_payment_status(payload: dict) -> str:
-	if not isinstance(payload, dict):
-		return ''
+def _days_for_cycle(cycle: str) -> int:
+	normalized = _normalize_cycle(cycle)
+	if normalized == BillingCycle.YEARLY:
+		return 365
+	if normalized == BillingCycle.QUARTERLY:
+		return 90
+	return 30
 
-	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
-	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
 
-	status_value = (
-		payment.get('payment_status')
-		or data.get('payment_status')
-		or payload.get('payment_status')
-		or ''
+def _get_plan_change_data(subscription, target_plan, target_cycle):
+	now = timezone.now()
+	current_plan = subscription.plan
+	current_code = str(current_plan.code or 'free').lower() if current_plan else 'free'
+	target_code = str(target_plan.code or 'free').lower()
+	current_rank = _rank(current_code)
+	target_rank = _rank(target_code)
+	current_is_free = current_code in {'free', 'starter'}
+
+	action = 'upgrade'
+	payment_required = True
+	effective_at = now
+
+	if target_plan.is_free:
+		action = 'current' if target_code == current_code else 'downgrade_not_allowed'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+	elif target_code == current_code and target_cycle == _normalize_cycle(subscription.current_billing_cycle):
+		action = 'renewal'
+	elif target_code == current_code:
+		action = 'upgrade'
+	elif target_rank < current_rank and target_plan.is_free:
+		action = 'downgrade_not_allowed'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+	elif target_rank < current_rank:
+		action = 'unsupported_paid_schedule'
+		payment_required = False
+		effective_at = subscription.current_period_end or now
+
+	credit = Decimal('0.00')
+	days_used = 0
+	days_remaining = 0
+	current_daily_rate = Decimal('0.00')
+	current_cycle_price = Decimal('0.00')
+	current_cycle_total_days = 0
+	new_plan_full_price = Decimal('0.00')
+	amount = Decimal('0.00')
+
+	if payment_required:
+		new_plan_full_price = target_plan.price_for_cycle(target_cycle)
+		
+		has_active_paid_period = (
+			not current_is_free
+			and subscription.current_period_end
+			and subscription.current_period_end > now
+			and subscription.current_period_start
+		)
+
+		if has_active_paid_period and action != 'renewal':
+			current_cycle = _normalize_cycle(subscription.current_billing_cycle)
+			current_cycle_total_days = _days_for_cycle(current_cycle)
+			current_cycle_price = current_plan.price_for_cycle(current_cycle)
+
+			days_used = max(0, (now - subscription.current_period_start).days)
+			days_remaining = max(0, current_cycle_total_days - days_used)
+
+			if current_cycle_total_days > 0 and days_remaining > 0:
+				current_daily_rate = current_cycle_price / Decimal(str(current_cycle_total_days))
+				credit = (current_daily_rate * Decimal(str(days_remaining))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+			amount = max(Decimal('0.00'), new_plan_full_price - credit)
+			effective_at = now
+		elif action == 'renewal':
+			amount = new_plan_full_price
+			effective_at = subscription.current_period_end or now
+		else:
+			amount = new_plan_full_price
+
+		if amount > Decimal('0.00') and amount < Decimal('1.00'):
+			amount = Decimal('1.00')
+
+	# Failsafe: Ensure Yearly/Quarterly prices aren't accidentally Monthly-level
+	if payment_required and amount > Decimal('0.00'):
+		if target_cycle == BillingCycle.YEARLY and amount < (new_plan_full_price * Decimal('0.5')):
+			# If the final amount is less than 50% of the yearly price, check if credit is really that high
+			if credit < (new_plan_full_price * Decimal('0.5')):
+				# Force a re-calculation or at least use the full price if something is wrong
+				amount = max(Decimal('0.00'), new_plan_full_price - credit)
+
+	summary = ""
+	if payment_required:
+		if credit > Decimal('0.00'):
+			summary = f"Upgrade to {target_plan.name}. Credit of INR {credit} for {days_remaining} unused days applied. Pay INR {amount}."
+		else:
+			summary = f"Upgrade to {target_plan.name}. Pay INR {amount}."
+
+	return {
+		'action': action,
+		'payment_required': payment_required,
+		'amount': amount,
+		'new_plan_full_price': new_plan_full_price,
+		'base_price_before_discount': base_price_before_discount,
+		'credit': credit,
+		'days_used': days_used,
+		'days_remaining': days_remaining,
+		'current_daily_rate': current_daily_rate,
+		'current_cycle_price': current_cycle_price,
+		'current_cycle_total_days': current_cycle_total_days,
+		'effective_at': effective_at,
+		'summary': summary,
+	}
+
+
+def _rank(plan_code: str | None) -> int:
+	code = str(plan_code or '').lower()
+	if code == 'business':
+		return 2
+	if code == 'pro':
+		return 1
+	return 0
+
+
+def _add_days(dt: datetime, days: int) -> datetime:
+	return dt + timedelta(days=int(days))
+
+
+def _coerce_bool(value) -> bool:
+	if isinstance(value, bool):
+		return value
+	return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _get_subscription(tenant):
+	subscription, _ = TenantSubscription.objects.get_or_create(
+		tenant=tenant,
+		defaults={
+			'plan': Plan.objects.filter(code='free').first() or Plan.objects.filter(is_active=True).order_by('monthly_price').first(),
+			'status': SubscriptionStatus.TRIAL if getattr(tenant, 'is_trial_active', False) else SubscriptionStatus.ACTIVE,
+			'current_period_start': timezone.now(),
+			'current_billing_cycle': BillingCycle.MONTHLY,
+		},
 	)
-	return str(status_value).upper().strip().replace('-', '_').replace(' ', '_')
+	return subscription
 
 
-def _extract_order_id(payload: dict) -> str | None:
-	if not isinstance(payload, dict):
-		return None
+def _apply_pending_if_due(subscription: TenantSubscription):
+	if not subscription.pending_plan or not subscription.pending_plan_starts_at:
+		return
+	now = timezone.now()
+	if now < subscription.pending_plan_starts_at:
+		return
 
-	data = payload.get('data', {}) if isinstance(payload.get('data', {}), dict) else {}
-	order = data.get('order', {}) if isinstance(data.get('order', {}), dict) else {}
-	payment = data.get('payment', {}) if isinstance(data.get('payment', {}), dict) else {}
+	cycle = _normalize_cycle(subscription.pending_billing_cycle)
+	start_at = subscription.pending_plan_starts_at
+	end_at = _add_days(start_at, _days_for_cycle(cycle))
+	subscription.plan = subscription.pending_plan
+	subscription.current_billing_cycle = cycle
+	subscription.current_period_start = start_at
+	subscription.current_period_end = end_at
+	subscription.status = SubscriptionStatus.ACTIVE
+	subscription.pending_plan = None
+	subscription.pending_billing_cycle = None
+	subscription.pending_plan_starts_at = None
+	subscription.save(update_fields=[
+		'plan',
+		'current_billing_cycle',
+		'current_period_start',
+		'current_period_end',
+		'status',
+		'pending_plan',
+		'pending_billing_cycle',
+		'pending_plan_starts_at',
+		'updated_at',
+	])
 
-	order_id = (
-		data.get('orderId')
-		or data.get('order_id')
-		or order.get('order_id')
-		or order.get('orderId')
-		or payment.get('order_id')
-		or payment.get('orderId')
-		or payload.get('orderId')
-		or payload.get('order_id')
-	)
 
-	return str(order_id).strip() if order_id else None
-
-
-def _is_webhook_test_event(payload: dict, event_type: str, headers) -> bool:
-	if not isinstance(payload, dict):
-		return False
-
-	candidates = {
-		(event_type or '').upper(),
-		str(payload.get('event', '')).upper(),
-		str(payload.get('type', '')).upper(),
-		str(payload.get('event_type', '')).upper(),
+def _serialize_order(order: SubscriptionPaymentOrder):
+	return {
+		'order_id': order.order_id,
+		'payment_session_id': order.payment_session_id,
+		'status': order.status,
+		'amount': str(order.amount),
+		'plan_code': order.target_plan.code,
+		'plan_name': order.target_plan.name,
+		'billing_cycle': order.billing_cycle,
+		'duration_days': order.duration_days,
+		'created_at': order.created_at,
+		'paid_at': order.paid_at,
+		'failure_reason': order.failure_reason,
+		'cashfree_env': 'sandbox',
+		# Frontend uses this to skip checkout when backend is not yet wired to a payment gateway.
+		'skip_checkout': not bool(order.payment_session_id),
 	}
-
-	known_test_events = {
-		'TEST',
-		'PING',
-		'WEBHOOK_TEST',
-		'ENDPOINT_TEST',
-		'WEBHOOK_PING',
-	}
-	if candidates.intersection(known_test_events):
-		return True
-
-	if payload.get('is_test') is True or payload.get('test') is True:
-		return True
-
-	if str(headers.get('x-webhook-event', '')).upper() in known_test_events:
-		return True
-
-	if str(headers.get('x-webhook-test', '')).strip().lower() == 'true':
-		return True
-
-	return False
-
-
-def _ack_ignored(reason: str, event_id: str | None = None, details: str | None = None):
-	payload = {
-		'status': 'ignored',
-		'reason': reason,
-	}
-	if event_id:
-		payload['event_id'] = event_id
-	if details:
-		payload['details'] = details
-	return Response(payload, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
@@ -163,9 +243,12 @@ def plan_catalog(request):
 			'max_customers': getattr(plan, 'max_customers', -1),
 			'max_invoices_per_month': plan.max_invoices_per_month,
 			'features': [feature.code for feature in plan.features.all()],
-		}
-		for plan in Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
-	])
+			'cycle_days': {
+				BillingCycle.MONTHLY: _days_for_cycle(BillingCycle.MONTHLY),
+				BillingCycle.QUARTERLY: _days_for_cycle(BillingCycle.QUARTERLY),
+				BillingCycle.YEARLY: _days_for_cycle(BillingCycle.YEARLY),
+			},
+		})
 
 	return Response({
 		'success': True,

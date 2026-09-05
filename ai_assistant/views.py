@@ -193,8 +193,33 @@ def gather_business_context(user):
     total_invoices = SalesInvoice.objects.filter(created_by=user).count()
     total_vendors = Vendor.objects.filter(created_by=user).count()
 
+    # HRMS Context
+    hrms_context = {
+        "active_employees": 0,
+        "payroll_month": f"{today.month}/{today.year}",
+        "payroll_status": "none",
+        "net_payable": 0.0,
+        "pending_leaves": 0,
+        "critical_alerts": 0
+    }
+    try:
+        from hr.models import Employee, PayrollRun, LeaveApplication, PayrollException
+        tenant = getattr(user, 'active_tenant', user)
+        hrms_context["active_employees"] = Employee.objects.filter(tenant=tenant, status='active').count()
+        hrms_context["pending_leaves"] = LeaveApplication.objects.filter(tenant=tenant, status='pending').count()
+        hrms_context["critical_alerts"] = PayrollException.objects.filter(tenant=tenant, severity='critical', is_resolved=False).count()
+
+        latest_run = PayrollRun.objects.filter(tenant=tenant).order_by('-year', '-month').first()
+        if latest_run:
+            hrms_context["payroll_month"] = f"{latest_run.month}/{latest_run.year}"
+            hrms_context["payroll_status"] = latest_run.status
+            hrms_context["net_payable"] = float(latest_run.total_net)
+    except Exception:
+        pass
+
     return {
         "date": str(today),
+        "hrms": hrms_context,
         # Sales
         "sales_today": {"count": sales_today['count'], "total": float(sales_today['total'] or 0)},
         "sales_this_week": {"count": sales_week['count'], "total": float(sales_week['total'] or 0)},
@@ -260,6 +285,7 @@ def gather_business_context(user):
             "customers": total_customers,
             "invoices": total_invoices,
             "vendors": total_vendors,
+            "employees": hrms_context["active_employees"],
         }
     }
 
@@ -580,9 +606,21 @@ class AIChatView(APIView):
                 f"• Low Stock Alerts: **{len(ctx['low_stock_items'])}** items"
             )
 
+        if any(kw in q_lower for kw in ['payroll', 'salary', 'salaries', 'hrms', 'employee', 'headcount']):
+            h = ctx.get('hrms', {})
+            return (
+                f"👥 **HR & Payroll Overview:**\n\n"
+                f"• Active Employees: **{h.get('active_employees', 0)}**\n"
+                f"• Current Payroll Cycle: **{h.get('payroll_month', '—')}** (Status: **{h.get('payroll_status', 'N/A').title()}**)\n"
+                f"• Net Salary Payable: **₹{h.get('net_payable', 0):,.2f}**\n"
+                f"• Pending Leave Approvals: **{h.get('pending_leaves', 0)}**\n"
+                f"• Critical Payroll Exceptions: **{h.get('critical_alerts', 0)}**\n\n"
+                f"*Visit the HRMS module to run calculations, review exceptions, and disburse salaries.*"
+            )
+
         return (
             "⚠️ **Demo Mode** — No Gemini API key configured.\n\n"
             "Add your key to the `.env` file:\n"
             "`GEMINI_API_KEY = 'your_key'`\n\n"
-            "I can answer: *sales, purchases, warranty, expiry, GST, stock, customers, vendors, business summary, create invoice, credit/debit notes*"
+            "I can answer: *sales, purchases, warranty, expiry, GST, stock, customers, vendors, HRMS & payroll, business summary, create invoice, credit/debit notes*"
         )

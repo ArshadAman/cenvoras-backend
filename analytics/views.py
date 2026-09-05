@@ -770,8 +770,8 @@ def ml_predictions(request):
     """
     from .ml_predictions import MLPredictions
     tenant = getattr(request.user, 'active_tenant', request.user)
-    cache_key = tenant_cache_key('analytics', tenant.id, 'ml-predictions')
-
+    cache_key = tenant_cache_key('analytics', tenant.id, 'ml_predictions')
+    
     if request.query_params.get('refresh') == 'true':
         from django.core.cache import cache
         cache.delete(cache_key)
@@ -780,4 +780,4 @@ def ml_predictions(request):
         ml = MLPredictions(request.user)
         return ml.get_all_predictions()
 
-    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_predictions))
+    return Response(cache_get_or_set(cache_key, 60 * 60 * 24, build_predictions))

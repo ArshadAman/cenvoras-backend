@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import BillingCycle, Plan, SubscriptionPaymentOrder, SubscriptionStatus, TenantSubscription
+from .models import BillingCycle, Plan, SubscriptionStatus, TenantSubscription
 from .services import get_entitlements, get_tenant
 
 
@@ -196,7 +196,7 @@ def _apply_pending_if_due(subscription: TenantSubscription):
 	])
 
 
-def _serialize_order(order: SubscriptionPaymentOrder):
+def _serialize_order(order):
 	return {
 		'order_id': order.order_id,
 		'payment_session_id': order.payment_session_id,
@@ -248,7 +248,9 @@ def plan_catalog(request):
 				BillingCycle.QUARTERLY: _days_for_cycle(BillingCycle.QUARTERLY),
 				BillingCycle.YEARLY: _days_for_cycle(BillingCycle.YEARLY),
 			},
-		})
+		}
+		for plan in Plan.objects.filter(is_active=True).prefetch_related('features').order_by('monthly_price', 'name')
+	])
 
 	return Response({
 		'success': True,

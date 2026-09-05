@@ -94,8 +94,10 @@ for svc in nginx apache2 caddy redis redis-server postgresql; do
   fi
 done
 
-# Kill any process holding 6379 if still running
+# Kill any process holding 80, 443, 6379, 5432 if still running on host
 if command -v fuser >/dev/null 2>&1; then
+  sudo fuser -k 80/tcp 2>/dev/null || true
+  sudo fuser -k 443/tcp 2>/dev/null || true
   sudo fuser -k 6379/tcp 2>/dev/null || true
   sudo fuser -k 5432/tcp 2>/dev/null || true
 fi
@@ -172,6 +174,16 @@ fi
 # 5. Build and Launch Full Cenvora Stack
 echo ""
 echo "--- [5/6] Building and Starting Full Application Stack ---"
+for svc in nginx apache2 caddy; do
+  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    sudo systemctl stop "$svc" || true
+    sudo systemctl disable "$svc" || true
+  fi
+done
+if command -v fuser >/dev/null 2>&1; then
+  sudo fuser -k 80/tcp 2>/dev/null || true
+  sudo fuser -k 443/tcp 2>/dev/null || true
+fi
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
 
 $DOCKER_CMD $COMPOSE_FILES up --build -d

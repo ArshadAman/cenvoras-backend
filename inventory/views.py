@@ -150,7 +150,7 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
                 counts[model_name] = counts.get(model_name, 0) + 1
             if counts:
                 details = ", ".join(f"{cnt} {name}" for name, cnt in counts.items())
-                error_msg = f"Cannot delete '{instance.name}' because it is linked to existing records: {details}. In accounting, items with transaction history are protected to preserve audit compliance."
+                error_msg = f"Cannot delete '{instance.name}' because it is linked to: {details}. Historical records are protected for audit compliance."
             else:
                 error_msg = f"Cannot delete '{instance.name}' because it is linked to existing invoices, purchases, or stock movements."
             return Response(

@@ -9,6 +9,7 @@ from inventory.models import Product
 @permission_classes([permissions.IsAuthenticated])
 def bulk_delete_products(request):
     ids = request.data.get('ids', [])
+    archive_protected = request.data.get('archive_protected', False) or request.data.get('archive', False)
     if not ids or not isinstance(ids, list):
         return Response({'error': 'A list of product IDs is required.'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -21,6 +22,7 @@ def bulk_delete_products(request):
         return Response({'error': 'No matching products found to delete.'}, status=status.HTTP_404_NOT_FOUND)
 
     deleted_count = 0
+    archived_count = 0
     protected_products = []
 
     for product in products:
@@ -29,9 +31,14 @@ def bulk_delete_products(request):
                 product.delete()
                 deleted_count += 1
         except ProtectedError:
-            protected_products.append(product.name)
+            if archive_protected:
+                product.is_active = False
+                product.save(update_fields=['is_active'])
+                archived_count += 1
+            else:
+                protected_products.append(product.name)
 
-    if deleted_count == 0 and protected_products:
+    if deleted_count == 0 and archived_count == 0 and protected_products:
         names_preview = ", ".join(f"'{name}'" for name in protected_products[:3])
         if len(protected_products) > 3:
             names_preview += f" and {len(protected_products) - 3} more"
@@ -41,16 +48,19 @@ def bulk_delete_products(request):
             'deleted_count': 0
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    parts = []
+    if deleted_count > 0:
+        parts.append(f"deleted {deleted_count} product(s)")
+    if archived_count > 0:
+        parts.append(f"archived {archived_count} product(s)")
     if protected_products:
-        message = (
-            f"Successfully deleted {deleted_count} product(s). "
-            f"{len(protected_products)} product(s) could not be deleted because they are linked to financial records."
-        )
-    else:
-        message = f"Successfully deleted {deleted_count} product(s)."
+        parts.append(f"{len(protected_products)} product(s) could not be deleted because they are linked to financial records")
+
+    message = f"Successfully {', and '.join(parts)}." if (deleted_count or archived_count) else f"{len(protected_products)} product(s) protected."
 
     return Response({
         'message': message,
         'deleted_count': deleted_count,
+        'archived_count': archived_count,
         'protected': protected_products
     }, status=status.HTTP_200_OK)

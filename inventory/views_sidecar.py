@@ -30,7 +30,12 @@ class StockJournalListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        qs = StockJournal.objects.filter(created_by=self.request.user.active_tenant).order_by('-date')
+        qs = (
+            StockJournal.objects.filter(created_by=self.request.user.active_tenant)
+            .select_related('warehouse')
+            .prefetch_related('items__product', 'items__batch')
+            .order_by('-date')
+        )
         
         # Filtering logic
         search = self.request.query_params.get('search', '').strip()

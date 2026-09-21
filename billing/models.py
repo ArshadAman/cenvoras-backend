@@ -225,7 +225,35 @@ class SalesInvoice(models.Model):
                   f"amount_paid={self.amount_paid}, total={self.total_amount}, "
                   f"{old_status} → {status_value}", file=sys.stderr)
         
-        return status_value
+    class Meta:
+        unique_together = [['created_by', 'invoice_number']]
+        indexes = [
+            models.Index(fields=['created_by', 'invoice_number']),
+            models.Index(fields=['created_by', 'invoice_date']),
+        ]
+
+
+class InvoiceSequence(models.Model):
+    """
+    Thread-safe atomic sequence tracker for multi-user / multi-cashier billing.
+    Prevents race conditions and invoice number collisions under concurrent usage.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='invoice_sequences')
+    document_type = models.CharField(max_length=50, default='sales_invoice')
+    prefix = models.CharField(max_length=50)
+    last_number = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [['tenant', 'document_type', 'prefix']]
+        indexes = [
+            models.Index(fields=['tenant', 'document_type', 'prefix']),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant_id} - {self.document_type} - {self.prefix}{self.last_number}"
+
 
 class SalesInvoiceItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

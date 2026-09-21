@@ -47,9 +47,16 @@ def recompute_customer_balance(customer_id):
         SalesInvoice.objects.filter(created_by=customer.created_by, customer_id=customer_id, status='final')
         .aggregate(total=Coalesce(Sum(outstanding_expr), Value(0, output_field=_AMOUNT_FIELD)))
         .get('total')
-    )
+    ) or 0
 
-    Customer.objects.filter(pk=customer_id).update(current_balance=outstanding_total)
+    unlinked_payments_total = (
+        Payment.objects.filter(created_by=customer.created_by, customer_id=customer_id, invoice__isnull=True)
+        .aggregate(total=Coalesce(Sum('amount'), Value(0, output_field=_AMOUNT_FIELD)))
+        .get('total')
+    ) or 0
+
+    final_balance = outstanding_total - unlinked_payments_total
+    Customer.objects.filter(pk=customer_id).update(current_balance=final_balance)
 
 
 def recompute_customer_balances_for_customers(customers, tenant):
@@ -68,10 +75,17 @@ def recompute_customer_balances_for_customers(customers, tenant):
         .annotate(total=Coalesce(Sum(outstanding_expr), Value(0, output_field=_AMOUNT_FIELD)))
     )
 
-    outstanding_map = {row['customer_id']: row['total'] for row in outstanding_rows}
+    outstanding_map = {row['customer_id']: (row['total'] or 0) for row in outstanding_rows}
+
+    unlinked_rows = (
+        Payment.objects.filter(created_by=tenant, customer_id__in=customer_ids, invoice__isnull=True)
+        .values('customer_id')
+        .annotate(total=Coalesce(Sum('amount'), Value(0, output_field=_AMOUNT_FIELD)))
+    )
+    unlinked_map = {row['customer_id']: (row['total'] or 0) for row in unlinked_rows}
 
     for customer in customers:
-        computed_balance = outstanding_map.get(customer.id, 0) or 0
+        computed_balance = (outstanding_map.get(customer.id, 0) or 0) - (unlinked_map.get(customer.id, 0) or 0)
         if customer.current_balance != computed_balance:
             Customer.objects.filter(pk=customer.id).update(current_balance=computed_balance)
             customer.current_balance = computed_balance

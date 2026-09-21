@@ -36,11 +36,12 @@ class Command(BaseCommand):
                 AccountingService.create_payment_received_entries(
                     customer=payment.customer,
                     amount=payment.amount,
-                    description=payment.notes or f'Payment received - {payment.reference or ""}',
+                    description=payment.notes or f'Payment received ({payment.get_mode_display()}) - {payment.reference or ""}'.strip(' -'),
                     date=payment.date,
                     user=payment.created_by,
                     invoice=payment.invoice,
                     payment_id=payment.id,
+                    payment_mode=payment.mode,
                 )
                 recreated += 1
 

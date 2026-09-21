@@ -16,7 +16,17 @@ from cenvoras.cache_utils import (
 
 def get_stock_valuation(tenant=None):
     """
-    Calculate current stock valuation based on Weighted Average.
+    Calculate current stock valuation based on real-time Weighted Average Cost (WAC).
+
+    Accounting Valuation Hierarchy:
+    1. Active Batches on Hand: Volume-weighted average of currently stocked batches.
+       WAC = Sum(stock_point.quantity * batch.cost_price) / Sum(stock_point.quantity)
+    2. Purchase Bill History: Volume-weighted average of all supplier purchase bills.
+       WAC = Sum(item.quantity * item.price) / Sum(item.quantity + item.free_quantity)
+    3. Baseline Catalog Cost: product.price (opening/catalog cost)
+    4. Fallback: product.sale_price or 0.00
+
+    Optimized with bulk SQL aggregation to operate in O(1) queries (zero N+1 loops).
     """
     cache_key = tenant_cache_key('reports', getattr(tenant, 'id', None), 'stock-valuation') if tenant else global_cache_key('reports', 'stock-valuation')
 
@@ -24,33 +34,94 @@ def get_stock_valuation(tenant=None):
         valuation = []
         total_value = Decimal('0.00')
 
-        # Product.stock is a cached field, we can use it directly
-        products = Product.objects.select_related('meta')
+        # Active products for tenant
+        products = Product.objects.select_related('meta').filter(is_active=True)
         if tenant:
             products = products.filter(created_by=tenant)
 
+        # 1. Bulk aggregate on-hand batch costs (Tier 1 WAC)
+        batch_sp_qs = StockPoint.objects.filter(
+            quantity__gt=0,
+            batch__cost_price__gt=0
+        )
+        if tenant:
+            batch_sp_qs = batch_sp_qs.filter(warehouse__created_by=tenant)
+
+        batch_valuations = (
+            batch_sp_qs.values('batch__product_id')
+            .annotate(
+                total_qty=Sum('quantity'),
+                total_val=Sum(F('quantity') * F('batch__cost_price'))
+            )
+        )
+        batch_wac_map = {}
+        for row in batch_valuations:
+            qty = row['total_qty']
+            val = row['total_val']
+            if qty and qty > 0 and val is not None:
+                batch_wac_map[row['batch__product_id']] = Decimal(str(val)) / Decimal(str(qty))
+
+        # 2. Bulk aggregate supplier purchase bill history (Tier 2 WAC)
+        purchase_items_qs = PurchaseBillItem.objects.filter(
+            quantity__gt=0,
+            price__gt=0
+        )
+        if tenant:
+            purchase_items_qs = purchase_items_qs.filter(purchase_bill__created_by=tenant)
+
+        purchase_valuations = (
+            purchase_items_qs.values('product_id')
+            .annotate(
+                total_qty=Sum(F('quantity') + F('free_quantity')),
+                total_val=Sum(F('quantity') * F('price'))
+            )
+        )
+        purchase_wac_map = {}
+        for row in purchase_valuations:
+            qty = row['total_qty']
+            val = row['total_val']
+            if qty and qty > 0 and val is not None:
+                purchase_wac_map[row['product_id']] = Decimal(str(val)) / Decimal(str(qty))
+
+        # 3. Compute valuation for each product in-memory
         for product in products:
             stock = Decimal(str(product.stock or 0))
             cost_price = Decimal(str(product.price or 0))
             sale_price = Decimal(str(product.sale_price or 0))
 
-            # Use sale_price as fallback if purchase cost is missing or zero.
-            avg_cost = cost_price if cost_price > 0 else sale_price
-            value = stock * avg_cost
+            if product.id in batch_wac_map:
+                avg_cost = batch_wac_map[product.id]
+                method = 'batch_moving_average'
+            elif product.id in purchase_wac_map:
+                avg_cost = purchase_wac_map[product.id]
+                method = 'purchase_history_average'
+            elif cost_price > 0:
+                avg_cost = cost_price
+                method = 'catalog_cost'
+            else:
+                avg_cost = sale_price
+                method = 'sale_price_fallback'
+
+            avg_cost = avg_cost.quantize(Decimal('0.01'))
+            if stock > 0:
+                value = (stock * avg_cost).quantize(Decimal('0.01'))
+            else:
+                value = Decimal('0.00')
+
             total_value += value
 
             valuation.append({
                 'id': product.id,
                 'name': product.name,
-                # 'sku': product.sku, # Product has no SKU field yet
                 'stock': stock,
+                'unit': product.unit,
                 'avg_cost': avg_cost,
                 'total_value': value,
-                # 'category': product.category.name # Product has no category FK yet, simplistic model
+                'valuation_method': method,
             })
 
         return {
-            'total_value': total_value,
+            'total_value': total_value.quantize(Decimal('0.01')),
             'items': valuation,
         }
 

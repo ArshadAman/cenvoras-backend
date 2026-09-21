@@ -150,7 +150,11 @@ class SalesOrderItem(models.Model):
     order = models.ForeignKey(SalesOrder, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
+    free_quantity = models.PositiveIntegerField(default=0)
+    unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
 
 class DeliveryChallan(models.Model):

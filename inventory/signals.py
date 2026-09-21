@@ -1,6 +1,28 @@
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from .models import StockTransfer, StockPoint, Warehouse
+
+@receiver(post_save, sender=StockPoint)
+def sync_product_stock_on_stockpoint_save(sender, instance, **kwargs):
+    """
+    Keep product cached stock in sync whenever a StockPoint quantity changes.
+    """
+    try:
+        if instance.batch_id and instance.batch and instance.batch.product:
+            instance.batch.product.recalculate_stock(save=True)
+    except Exception:
+        pass
+
+@receiver(post_delete, sender=StockPoint)
+def sync_product_stock_on_stockpoint_delete(sender, instance, **kwargs):
+    """
+    Keep product cached stock in sync whenever a StockPoint is deleted.
+    """
+    try:
+        if instance.batch_id and instance.batch and instance.batch.product:
+            instance.batch.product.recalculate_stock(save=True)
+    except Exception:
+        pass
 
 @receiver(post_save, sender=StockTransfer)
 def process_stock_transfer(sender, instance, created, **kwargs):
@@ -38,6 +60,3 @@ def process_stock_transfer(sender, instance, created, **kwargs):
                 # Ideally, we should rollback here, but signals are already in transaction if atomic/
                 raise e
 
-# Actually, relying on post_save of Transfer might be too early if items aren't added yet.
-# Better to have a dedicated 'complete_transfer' action or signal on the Item itself?
-# Or assume the API creates items then updates status to completed.

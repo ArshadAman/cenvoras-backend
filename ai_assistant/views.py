@@ -27,43 +27,44 @@ def gather_business_context(user):
     from billing.models import SalesInvoice, SalesInvoiceItem, Customer, Payment, PurchaseBill, Vendor
     from inventory.models import Product, ProductBatch, StockPoint
 
-    today = timezone.now().date()
+    tenant = getattr(user, 'active_tenant', user)
+    today = timezone.localdate()
     month_start = today.replace(day=1)
     week_start = today - timedelta(days=today.weekday())
 
     # Sales summaries
     sales_today = SalesInvoice.objects.filter(
-        created_by=user, invoice_date=today
+        created_by=tenant, invoice_date=today
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     sales_week = SalesInvoice.objects.filter(
-        created_by=user, invoice_date__gte=week_start
+        created_by=tenant, invoice_date__gte=week_start
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     sales_month = SalesInvoice.objects.filter(
-        created_by=user, invoice_date__gte=month_start
+        created_by=tenant, invoice_date__gte=month_start
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     # Previous month for comparison
     prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
     prev_month_end = month_start - timedelta(days=1)
     sales_prev_month = SalesInvoice.objects.filter(
-        created_by=user, invoice_date__gte=prev_month_start, invoice_date__lte=prev_month_end
+        created_by=tenant, invoice_date__gte=prev_month_start, invoice_date__lte=prev_month_end
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     # Purchase summaries
     purchases_month = PurchaseBill.objects.filter(
-        created_by=user, bill_date__gte=month_start
+        created_by=tenant, bill_date__gte=month_start
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     purchases_prev_month = PurchaseBill.objects.filter(
-        created_by=user, bill_date__gte=prev_month_start, bill_date__lte=prev_month_end
+        created_by=tenant, bill_date__gte=prev_month_start, bill_date__lte=prev_month_end
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     # Top products this month
     top_products = list(
         SalesInvoiceItem.objects
-        .filter(sales_invoice__created_by=user, sales_invoice__invoice_date__gte=month_start)
+        .filter(sales_invoice__created_by=tenant, sales_invoice__invoice_date__gte=month_start)
         .values('product__name')
         .annotate(qty_sold=Sum('quantity'), revenue=Sum('amount'))
         .order_by('-qty_sold')[:5]
@@ -71,7 +72,7 @@ def gather_business_context(user):
 
     # Low stock
     low_stock = list(
-        Product.objects.filter(created_by=user)
+        Product.objects.filter(created_by=tenant)
         .exclude(low_stock_alert=0)
         .filter(stock__lte=F('low_stock_alert'))
         .values('name', 'stock', 'low_stock_alert')[:10]
@@ -79,43 +80,43 @@ def gather_business_context(user):
 
     # In-stock products (for invoice creation suggestions)
     in_stock_products = list(
-        Product.objects.filter(created_by=user, stock__gt=0)
+        Product.objects.filter(created_by=tenant, stock__gt=0)
         .values('name', 'price', 'stock', 'unit', 'hsn_sac_code', 'tax', 'warranty_months')
         .order_by('name')[:30]
     )
 
     # Pending payments
     pending = list(
-        Customer.objects.filter(created_by=user, current_balance__gt=0)
+        Customer.objects.filter(created_by=tenant, current_balance__gt=0)
         .order_by('-current_balance')
         .values('name', 'current_balance', 'email', 'phone')[:10]
     )
     total_receivable = Customer.objects.filter(
-        created_by=user, current_balance__gt=0
+        created_by=tenant, current_balance__gt=0
     ).aggregate(total=Sum('current_balance'))['total'] or 0
 
     # Customer & Vendor info
     all_customers = list(
-        Customer.objects.filter(created_by=user)
+        Customer.objects.filter(created_by=tenant)
         .values('name', 'email', 'phone', 'current_balance')
         .order_by('name')[:20]
     )
     all_vendors = list(
-        Vendor.objects.filter(created_by=user)
+        Vendor.objects.filter(created_by=tenant)
         .values('name', 'email', 'phone')
         .order_by('name')[:20]
     )
 
     # Warranty info — products with warranty sold
     warranty_products = list(
-        Product.objects.filter(created_by=user, warranty_months__gt=0)
+        Product.objects.filter(created_by=tenant, warranty_months__gt=0)
         .values('name', 'warranty_months')[:10]
     )
     # Recent warranty items from invoices
     from dateutil.relativedelta import relativedelta
     warranty_sales = []
     warranty_items_qs = SalesInvoiceItem.objects.filter(
-        sales_invoice__created_by=user,
+        sales_invoice__created_by=tenant,
         product__warranty_months__gt=0,
     ).select_related('sales_invoice', 'product').order_by('-sales_invoice__invoice_date')[:10]
     for item in warranty_items_qs:
@@ -135,7 +136,7 @@ def gather_business_context(user):
     cutoff = today + timedelta(days=30)
     expiring_batches = list(
         ProductBatch.objects.filter(
-            product__created_by=user,
+            product__created_by=tenant,
             expiry_date__isnull=False,
             expiry_date__lte=cutoff,
             is_active=True,
@@ -155,7 +156,7 @@ def gather_business_context(user):
 
     # GST data for filing assistance
     gst_invoices_month = SalesInvoice.objects.filter(
-        created_by=user, invoice_date__gte=month_start
+        created_by=tenant, invoice_date__gte=month_start
     )
     gst_sales_total = gst_invoices_month.aggregate(total=Sum('total_amount'))['total'] or 0
     gst_tax_total = SalesInvoiceItem.objects.filter(
@@ -165,7 +166,7 @@ def gather_business_context(user):
     )['total_tax'] or 0
 
     gst_purchases_month = PurchaseBill.objects.filter(
-        created_by=user, bill_date__gte=month_start
+        created_by=tenant, bill_date__gte=month_start
     )
     gst_purchase_total = gst_purchases_month.aggregate(total=Sum('total_amount'))['total'] or 0
 
@@ -173,25 +174,25 @@ def gather_business_context(user):
     try:
         from billing.models_returns import CreditNote, DebitNote
         credit_notes_month = CreditNote.objects.filter(
-            created_by=user, date__gte=month_start
+            created_by=tenant, date__gte=month_start
         ).aggregate(count=Count('id'), total=Sum('total_amount'))
         debit_notes_month = DebitNote.objects.filter(
-            created_by=user, date__gte=month_start
+            created_by=tenant, date__gte=month_start
         ).aggregate(count=Count('id'), total=Sum('total_amount'))
     except Exception:
         credit_notes_month = {'count': 0, 'total': 0}
         debit_notes_month = {'count': 0, 'total': 0}
 
     # Stock overview
-    total_inventory_value = Product.objects.filter(created_by=user).aggregate(
+    total_inventory_value = Product.objects.filter(created_by=tenant).aggregate(
         total=Sum(F('stock') * F('price'))
     )['total'] or 0
 
     # Counts
-    total_products = Product.objects.filter(created_by=user).count()
-    total_customers = Customer.objects.filter(created_by=user).count()
-    total_invoices = SalesInvoice.objects.filter(created_by=user).count()
-    total_vendors = Vendor.objects.filter(created_by=user).count()
+    total_products = Product.objects.filter(created_by=tenant).count()
+    total_customers = Customer.objects.filter(created_by=tenant).count()
+    total_invoices = SalesInvoice.objects.filter(created_by=tenant).count()
+    total_vendors = Vendor.objects.filter(created_by=tenant).count()
 
     # HRMS Context
     hrms_context = {

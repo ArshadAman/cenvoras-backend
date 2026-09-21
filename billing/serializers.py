@@ -364,8 +364,15 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    quantity = serializers.IntegerField(min_value=1)
+    quantity = serializers.IntegerField(min_value=0, default=1)
     free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    def validate(self, data):
+        qty = data.get('quantity', 0) or 0
+        free_qty = data.get('free_quantity', 0) or 0
+        if qty <= 0 and free_qty <= 0:
+            raise serializers.ValidationError({'quantity': 'Quantity or Free Quantity must be greater than 0.'})
+        return data
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
@@ -821,11 +828,44 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             sales_invoice = SalesInvoice.objects.create(**validated_data)
             print("DEBUG SalesInvoiceSerializer: Sales invoice created:", sales_invoice.id)
             
+            # Feature 59: Evaluate Schemes (BOGO and promotional offers)
+            bonus_items = []
+            if items_data:
+                try:
+                    from billing.scheme_service import evaluate_schemes_for_items
+                    scheme_res = evaluate_schemes_for_items(
+                        tenant=sales_invoice.created_by,
+                        items=items_data,
+                        evaluation_date=sales_invoice.invoice_date or timezone.now().date()
+                    )
+                    items_data = scheme_res.get('items', items_data)
+                    bonus_items = scheme_res.get('additional_free_items', [])
+                except Exception as e:
+                    print(f"DEBUG SalesInvoiceSerializer: Scheme evaluation exception: {e}")
+
             for i, item_data in enumerate(items_data):
+                item_data.pop('applied_scheme', None)
+                item_data.pop('product_detail', None)
+                item_data.pop('is_scheme_bonus', None)
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Creating item {i+1}:", item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
+
+            for bonus_item in bonus_items:
+                bonus_product = bonus_item.get('product')
+                if bonus_product:
+                    SalesInvoiceItem.objects.create(
+                        sales_invoice=sales_invoice,
+                        product=bonus_product,
+                        quantity=bonus_item.get('quantity', 0),
+                        free_quantity=bonus_item.get('free_quantity', 0),
+                        unit=bonus_item.get('unit') or 'pcs',
+                        price=bonus_item.get('price', Decimal('0.00')),
+                        discount=bonus_item.get('discount', Decimal('0.00')),
+                        tax=bonus_item.get('tax', Decimal('0.00')),
+                        amount=Decimal('0.00'),
+                    )
 
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
@@ -908,9 +948,40 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Delete existing items and create new ones when provided
         if items_data:
             instance.items.all().delete()
+            bonus_items = []
+            try:
+                from billing.scheme_service import evaluate_schemes_for_items
+                scheme_res = evaluate_schemes_for_items(
+                    tenant=instance.created_by,
+                    items=items_data,
+                    evaluation_date=instance.invoice_date or timezone.now().date()
+                )
+                items_data = scheme_res.get('items', items_data)
+                bonus_items = scheme_res.get('additional_free_items', [])
+            except Exception as e:
+                print(f"DEBUG SalesInvoiceSerializer: Scheme evaluation exception on update: {e}")
+
             for item_data in items_data:
+                item_data.pop('applied_scheme', None)
+                item_data.pop('product_detail', None)
+                item_data.pop('is_scheme_bonus', None)
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
+
+            for bonus_item in bonus_items:
+                bonus_product = bonus_item.get('product')
+                if bonus_product:
+                    SalesInvoiceItem.objects.create(
+                        sales_invoice=instance,
+                        product=bonus_product,
+                        quantity=bonus_item.get('quantity', 0),
+                        free_quantity=bonus_item.get('free_quantity', 0),
+                        unit=bonus_item.get('unit') or 'pcs',
+                        price=bonus_item.get('price', Decimal('0.00')),
+                        discount=bonus_item.get('discount', Decimal('0.00')),
+                        tax=bonus_item.get('tax', Decimal('0.00')),
+                        amount=Decimal('0.00'),
+                    )
 
             round_off = validated_data.get('round_off', instance.round_off)
             recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))

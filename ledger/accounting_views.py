@@ -49,8 +49,9 @@ logger = logging.getLogger(__name__)
 @permission_classes([IsAuthenticated])
 def chart_of_accounts(request):
     """Chart of Accounts - List and Create accounts"""
+    tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
-        accounts = Account.objects.filter(created_by=request.user)
+        accounts = Account.objects.filter(created_by=tenant)
         
         # Filter by account type
         account_type = request.query_params.get('account_type')
@@ -101,9 +102,9 @@ def chart_of_accounts(request):
 def account_detail(request, account_id):
     """Get, update, or delete a specific account"""
     logger.info(f"Account {request.method} request - Account ID: {account_id}, User: {request.user.username if request.user else 'Anonymous'}")
-    
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        account = Account.objects.get(id=account_id, created_by=request.user)
+        account = Account.objects.get(id=account_id, created_by=tenant)
         logger.info(f"Account found: {account.name} (Code: {account.code}, Type: {account.account_type})")
     except Account.DoesNotExist:
         logger.warning(f"Account not found for ID: {account_id}, User: {request.user.username if request.user else 'Anonymous'}")
@@ -213,8 +214,9 @@ def account_detail(request, account_id):
 @permission_classes([IsAuthenticated])
 def general_ledger(request, account_id):
     """Get general ledger entries for a specific account"""
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        account = Account.objects.get(id=account_id, created_by=request.user)
+        account = Account.objects.get(id=account_id, created_by=tenant)
     except Account.DoesNotExist:
         return Response({
             'success': False,
@@ -225,13 +227,13 @@ def general_ledger(request, account_id):
     date_from = request.query_params.get('date_from')
     date_to = request.query_params.get('date_to')
     
-    entries = AccountingService.get_general_ledger_entries(account, request.user, date_from, date_to)
+    entries = AccountingService.get_general_ledger_entries(account, tenant, date_from, date_to)
     
     from .serializers import GeneralLedgerEntrySerializer
     serializer = GeneralLedgerEntrySerializer(entries, many=True)
     
     # Also get account balance
-    balance_info = AccountingService.get_account_balance(account, request.user, date_to)
+    balance_info = AccountingService.get_account_balance(account, tenant, date_to)
     
     return Response({
         'account': AccountSerializer(account).data,
@@ -330,8 +332,9 @@ def setup_default_accounts(request):
 @permission_classes([IsAuthenticated])
 def general_ledger_entry_detail(request, entry_id):
     """Get, update, or delete a specific general ledger entry"""
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        entry = GeneralLedgerEntry.objects.get(id=entry_id, created_by=request.user)
+        entry = GeneralLedgerEntry.objects.get(id=entry_id, created_by=tenant)
     except GeneralLedgerEntry.DoesNotExist:
         return Response({
             'success': False,
@@ -417,7 +420,8 @@ def general_ledger_entry_detail(request, entry_id):
 @permission_classes([IsAuthenticated])
 def general_ledger_entries_list(request):
     """List all general ledger entries with filtering options"""
-    entries = GeneralLedgerEntry.objects.filter(created_by=request.user).select_related('account')
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    entries = GeneralLedgerEntry.objects.filter(created_by=tenant).select_related('account')
     
     # Filter by date range
     date_from = request.query_params.get('date_from')
@@ -485,11 +489,12 @@ def create_sales_invoice_ledger_entries(request):
                 'error': 'sales_invoice_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        tenant = getattr(request.user, 'active_tenant', request.user)
         # Get the sales invoice
         try:
             sales_invoice = SalesInvoice.objects.get(
                 id=sales_invoice_id,
-                created_by=request.user
+                created_by=tenant
             )
         except SalesInvoice.DoesNotExist:
             return Response({
@@ -500,7 +505,7 @@ def create_sales_invoice_ledger_entries(request):
         # Check if ledger entries already exist
         existing_entries = GeneralLedgerEntry.objects.filter(
             sales_invoice=sales_invoice,
-            created_by=request.user
+            created_by=tenant
         )
         if existing_entries.exists():
             return Response({
@@ -518,7 +523,7 @@ def create_sales_invoice_ledger_entries(request):
             try:
                 accounts_receivable_account = Account.objects.get(
                     id=ar_account_id,
-                    created_by=request.user,
+                    created_by=tenant,
                     account_type=AccountType.ASSET
                 )
             except Account.DoesNotExist:
@@ -532,7 +537,7 @@ def create_sales_invoice_ledger_entries(request):
             try:
                 sales_revenue_account = Account.objects.get(
                     id=sr_account_id,
-                    created_by=request.user,
+                    created_by=tenant,
                     account_type=AccountType.REVENUE
                 )
             except Account.DoesNotExist:
@@ -552,7 +557,7 @@ def create_sales_invoice_ledger_entries(request):
             # Count the created entries
             created_entries = GeneralLedgerEntry.objects.filter(
                 sales_invoice=sales_invoice,
-                created_by=request.user
+                created_by=tenant
             )
             
             return Response({
@@ -737,11 +742,12 @@ def create_purchase_bill_ledger_entries(request):
                 'error': 'purchase_bill_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        tenant = getattr(request.user, 'active_tenant', request.user)
         # Get the purchase bill
         try:
             purchase_bill = PurchaseBill.objects.get(
                 id=purchase_bill_id,
-                created_by=request.user
+                created_by=tenant
             )
         except PurchaseBill.DoesNotExist:
             return Response({
@@ -752,7 +758,7 @@ def create_purchase_bill_ledger_entries(request):
         # Check if ledger entries already exist
         existing_entries = GeneralLedgerEntry.objects.filter(
             purchase_bill=purchase_bill,
-            created_by=request.user
+            created_by=tenant
         )
         if existing_entries.exists():
             return Response({
@@ -770,7 +776,7 @@ def create_purchase_bill_ledger_entries(request):
             try:
                 purchases_account = Account.objects.get(
                     id=p_account_id,
-                    created_by=request.user,
+                    created_by=tenant,
                     account_type=AccountType.EXPENSE
                 )
             except Account.DoesNotExist:
@@ -784,7 +790,7 @@ def create_purchase_bill_ledger_entries(request):
             try:
                 accounts_payable_account = Account.objects.get(
                     id=ap_account_id,
-                    created_by=request.user,
+                    created_by=tenant,
                     account_type=AccountType.LIABILITY
                 )
             except Account.DoesNotExist:
@@ -804,7 +810,7 @@ def create_purchase_bill_ledger_entries(request):
             # Count the created entries
             created_entries = GeneralLedgerEntry.objects.filter(
                 purchase_bill=purchase_bill,
-                created_by=request.user
+                created_by=tenant
             )
             
             return Response({
@@ -884,11 +890,12 @@ def create_manual_journal_entry(request):
         if total_debit == 0:
             return Response({'success': False, 'error': 'Journal entry requires at least a non-zero debit and credit amount'}, status=status.HTTP_400_BAD_REQUEST)
 
+        tenant = getattr(request.user, 'active_tenant', request.user)
         with transaction.atomic():
             created_entries = []
             for item in entries_data:
                 try:
-                    account = Account.objects.get(id=item.get('account_id'), created_by=request.user)
+                    account = Account.objects.get(id=item.get('account_id'), created_by=tenant)
                 except Account.DoesNotExist:
                     raise ValueError(f"Account setup issue: {item.get('account_id')} not found")
 
@@ -906,7 +913,7 @@ def create_manual_journal_entry(request):
                     credit=credit,
                     description=description,
                     reference=reference,
-                    created_by=request.user
+                    created_by=tenant
                 )
                 created_entries.append(entry)
 

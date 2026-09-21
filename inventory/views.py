@@ -69,7 +69,20 @@ class ProductListCreateView(generics.ListCreateAPIView):
     idempotency_lock_ttl = 300
 
     def get_queryset(self):
-        return Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant).order_by('name')
+        qs = Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant)
+
+        include_archived = str(self.request.query_params.get('include_archived', '')).lower() in ('true', '1')
+        is_active_param = self.request.query_params.get('is_active')
+
+        if is_active_param is not None:
+            if str(is_active_param).lower() in ('true', '1'):
+                qs = qs.filter(is_active=True)
+            elif str(is_active_param).lower() in ('false', '0'):
+                qs = qs.filter(is_active=False)
+        elif not include_archived:
+            qs = qs.filter(is_active=True)
+
+        return qs.order_by('name')
 
     def _get_idempotency_key(self, request):
         explicit_key = str(request.headers.get('x-idempotency-key', '')).strip()
@@ -139,23 +152,25 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         from django.db.models.deletion import ProtectedError
+        from django.db import transaction
+        instance = self.get_object()
         try:
-            instance = self.get_object()
-            self.perform_destroy(instance)
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except ProtectedError as e:
-            counts = {}
-            for obj in getattr(e, 'protected_objects', []):
-                model_name = obj._meta.verbose_name.title() if hasattr(obj, '_meta') else type(obj).__name__
-                counts[model_name] = counts.get(model_name, 0) + 1
-            if counts:
-                details = ", ".join(f"{cnt} {name}" for name, cnt in counts.items())
-                error_msg = f"Cannot delete '{instance.name}' because it is linked to: {details}. Historical records are protected for audit compliance."
-            else:
-                error_msg = f"Cannot delete '{instance.name}' because it is linked to existing invoices, purchases, or stock movements."
+            with transaction.atomic():
+                self.perform_destroy(instance)
+                return Response(status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError:
+            # Gracefully soft-delete/archive if linked to historical records
+            instance.is_active = False
+            instance.save(update_fields=['is_active'])
             return Response(
-                {"error": error_msg},
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    "success": True,
+                    "archived": True,
+                    "message": f"'{instance.name}' is linked to historical records and has been archived.",
+                    "product_id": str(instance.id),
+                    "is_active": False,
+                },
+                status=status.HTTP_200_OK,
             )
 
     def update(self, request, *args, **kwargs):
@@ -273,7 +288,7 @@ def batch_list(request):
     Optional filters: ?product=UUID &search=name
     """
     queryset = ProductBatch.objects.filter(
-        product__created_by=request.user.active_tenant.active_tenant
+        product__created_by=request.user.active_tenant
     ).select_related('product').order_by('-created_at')
     
     product_id = request.query_params.get('product')
@@ -554,7 +569,26 @@ class SchemeListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Scheme.objects.filter(created_by=self.request.user.active_tenant).order_by('-start_date')
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        qs = Scheme.objects.filter(created_by=tenant).order_by('-start_date')
+        
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            if is_active.lower() in ['true', '1']:
+                qs = qs.filter(is_active=True)
+            elif is_active.lower() in ['false', '0']:
+                qs = qs.filter(is_active=False)
+
+        active_only = self.request.query_params.get('active_only')
+        if active_only and active_only.lower() in ['true', '1']:
+            today = timezone.now().date()
+            qs = qs.filter(is_active=True, start_date__lte=today, end_date__gte=today)
+
+        product = self.request.query_params.get('product')
+        if product:
+            qs = qs.filter(product_id=product)
+
+        return qs
 
 
 class SchemeDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -726,59 +760,5 @@ def expiry_dashboard_summary(request):
 
     return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_summary))
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework import permissions, status
-from rest_framework.response import Response
-from inventory.models import Product
+from .bulk_delete import bulk_delete_products
 
-@api_view(['POST'])
-@permission_classes([permissions.IsAuthenticated])
-def bulk_delete_products(request):
-    from django.db.models.deletion import ProtectedError
-
-    ids = request.data.get('ids', [])
-    if not ids or not isinstance(ids, list):
-        return Response({'error': 'A list of product IDs is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-    products = list(Product.objects.filter(
-        id__in=ids,
-        created_by=request.user.active_tenant
-    ))
-
-    if not products:
-        return Response({'error': 'No matching products found to delete.'}, status=status.HTTP_404_NOT_FOUND)
-
-    deleted_count = 0
-    protected_products = []
-
-    for product in products:
-        try:
-            with transaction.atomic():
-                product.delete()
-                deleted_count += 1
-        except ProtectedError:
-            protected_products.append(product.name)
-
-    if deleted_count == 0 and protected_products:
-        names_preview = ", ".join(f"'{name}'" for name in protected_products[:3])
-        if len(protected_products) > 3:
-            names_preview += f" and {len(protected_products) - 3} more"
-        return Response({
-            'error': f'Cannot delete selected products ({names_preview}) because they are linked to existing transactions (invoices, purchases, or stock movements).',
-            'protected': protected_products,
-            'deleted_count': 0
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    if protected_products:
-        message = (
-            f"Successfully deleted {deleted_count} product(s). "
-            f"{len(protected_products)} product(s) could not be deleted because they are linked to financial records."
-        )
-    else:
-        message = f"Successfully deleted {deleted_count} product(s)."
-
-    return Response({
-        'message': message,
-        'deleted_count': deleted_count,
-        'protected': protected_products
-    }, status=status.HTTP_200_OK)

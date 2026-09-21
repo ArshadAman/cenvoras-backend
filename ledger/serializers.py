@@ -16,7 +16,8 @@ class AccountSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'parent_account_name', 'created_by', 'created_at']
     
     def create(self, validated_data):
-        validated_data['created_by'] = self.context['request'].user
+        user = self.context['request'].user
+        validated_data['created_by'] = getattr(user, 'active_tenant', user)
         return super().create(validated_data)
 
 

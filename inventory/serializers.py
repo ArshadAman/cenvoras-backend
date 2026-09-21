@@ -7,17 +7,18 @@ class ProductSerializer(serializers.ModelSerializer):
     unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, required=False)
     cost_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, required=False, allow_null=True)
     sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
+    current_stock = serializers.IntegerField(source='stock', read_only=True)
     meta = ProductMetaSerializer(required=False)
     
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'hsn_sac_code', 'description', 'tax', 'stock', 'unit',
+            'id', 'name', 'hsn_sac_code', 'description', 'tax', 'stock', 'current_stock', 'unit',
             'secondary_unit', 'conversion_factor',
-            'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'created_by',
+            'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'is_active', 'created_by',
             'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'price']
+        read_only_fields = ['id', 'created_by', 'price', 'current_stock']
 
     def validate(self, attrs):
         sale_price = attrs.get('sale_price')
@@ -189,5 +190,6 @@ class SchemeSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_by']
 
     def create(self, validated_data):
-        validated_data['created_by'] = self.context['request'].user
+        user = self.context['request'].user
+        validated_data['created_by'] = getattr(user, 'active_tenant', user)
         return super().create(validated_data)

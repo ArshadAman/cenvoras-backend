@@ -22,6 +22,26 @@ def purchase_bill_list_create(request):
     tenant = request.user.active_tenant
 
     if request.method == 'GET':
+        page_param = request.GET.get('page')
+        limit_param = request.GET.get('limit') or request.GET.get('page_size')
+        errors = {}
+        if page_param is not None:
+            try:
+                p = int(page_param)
+                if p < 1:
+                    errors['page'] = 'Invalid page number.'
+            except (ValueError, TypeError):
+                errors['page'] = 'Invalid page number.'
+        if limit_param is not None:
+            try:
+                l = int(limit_param)
+                if l < 1:
+                    errors['limit'] = 'Invalid limit.'
+            except (ValueError, TypeError):
+                errors['limit'] = 'Invalid limit.'
+        if errors:
+            return Response({'success': False, 'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
+
         bills = (
             PurchaseBill.objects.filter(created_by=tenant)
             .order_by('-bill_date', '-created_at')
@@ -271,19 +291,41 @@ def sales_invoice_list_create(request):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-    invoice_number = request.data.get('invoice_number')
-    if invoice_number and SalesInvoice.objects.filter(invoice_number=invoice_number, created_by=tenant).exists():
-        return Response(
-            {'error': 'Invoice number already exists', 'details': f'Invoice with number {invoice_number} already exists.'},
-            status=status.HTTP_409_CONFLICT,
-        )
+    from billing.sequence_service import (
+        allocate_next_number,
+        sync_sequence_after_creation,
+        get_tenant_full_prefix,
+        is_auto_sequence_number,
+        preview_next_number,
+    )
+    from django.db import transaction
 
-    serializer = SalesInvoiceSerializer(data=request.data, context={'request': request})
-    if serializer.is_valid():
-        serializer.save(created_by=tenant)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+    invoice_number = (data.get('invoice_number') or '').strip()
+    full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
 
-    return Response({'error': 'Validation failed', 'details': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        if not invoice_number:
+            invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+            data['invoice_number'] = invoice_number
+        elif SalesInvoice.objects.filter(invoice_number=invoice_number, created_by=tenant).exists():
+            if is_auto_sequence_number(full_prefix, invoice_number):
+                # Concurrent cashier collision on auto-sequence number: auto-advance atomically
+                invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+                data['invoice_number'] = invoice_number
+            else:
+                return Response(
+                    {'error': 'Invoice number already exists', 'details': f'Invoice with number {invoice_number} already exists.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        serializer = SalesInvoiceSerializer(data=data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save(created_by=tenant)
+            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        return Response({'error': 'Validation failed', 'details': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET'])
@@ -299,6 +341,48 @@ def sales_invoice_detail(request, pk):
     return Response(serializer.data)
 
 
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def sales_invoice_pdf_download(request, pk):
+    from django.http import HttpResponse
+    from django.db.models import Q
+
+    tenant = request.user.active_tenant
+    try:
+        invoice = SalesInvoice.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(
+            Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
+        )
+    except SalesInvoice.DoesNotExist:
+        return Response({'error': 'Invoice not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    template_data = None
+    if request.method == 'POST':
+        template_data = request.data.get('template')
+    elif request.GET.get('primary_color'):
+        template_data = {
+            'colors': {
+                'primary': request.GET.get('primary_color'),
+                'secondary': request.GET.get('secondary_color'),
+                'tableHeader': request.GET.get('table_header'),
+            },
+            'layoutType': request.GET.get('layout_type', 'classic'),
+        }
+
+    from billing.invoice_pdf_service import generate_invoice_pdf
+    pdf_bytes = generate_invoice_pdf(
+        invoice_obj=invoice,
+        tenant=tenant,
+        document_type='invoice',
+        template_data=template_data,
+    )
+
+    filename = f"invoice-{invoice.invoice_number or invoice.id}.pdf"
+    response = HttpResponse(pdf_bytes, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Content-Length'] = len(pdf_bytes)
+    return response
+
+
 @api_view(['PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def sales_invoice_update_delete(request, pk):
@@ -309,8 +393,8 @@ def sales_invoice_update_delete(request, pk):
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method in ['PUT', 'PATCH']:
-        if invoice.payment_status != 'pending':
-            return Response({'error': 'Only pending sales invoices can be edited.'}, status=status.HTTP_400_BAD_REQUEST)
+        if invoice.payment_status == 'paid':
+            return Response({'error': 'Paid sales invoices cannot be edited.'}, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = SalesInvoiceSerializer(
             invoice,
@@ -333,32 +417,24 @@ def sales_invoice_update_delete(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_next_invoice_number(request):
-    prefix = request.GET.get('prefix', 'INV-')
-    tenant_id = str(request.user.active_tenant.id)[:4].upper()
-    full_prefix = f'{prefix}{tenant_id}-'
+    from billing.sequence_service import preview_next_number
 
-    invoices = SalesInvoice.objects.filter(
-        created_by=request.user.active_tenant,
-        invoice_number__startswith=full_prefix,
+    prefix = request.GET.get('prefix', 'INV-')
+    tenant = request.user.active_tenant
+    tenant_id = str(tenant.id)[:4].upper()
+
+    next_number, suffix = preview_next_number(
+        tenant=tenant,
+        document_type='sales_invoice',
+        prefix=prefix,
     )
 
-    max_num = 0
-    for inv in invoices:
-        suffix = inv.invoice_number.replace(full_prefix, '')
-        try:
-            num = int(suffix)
-            if num > max_num:
-                max_num = num
-        except ValueError:
-            continue
-
-    next_num = max_num + 1
     return Response(
         {
             'success': True,
             'uuid_prefix': tenant_id,
-            'next_number': f'{full_prefix}{next_num:03d}',
-            'suffix': f'{next_num:03d}',
+            'next_number': next_number,
+            'suffix': suffix,
         }
     )
 
@@ -450,3 +526,26 @@ def recalculate_invoice_totals(request):
             fixed_count += 1
 
     return Response({'success': True, 'message': f'Fixed {fixed_count} invoices with incorrect totals'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def evaluate_invoice_schemes(request):
+    """
+    Evaluates promotional schemes (BOGO, percentage discounts, flat discounts)
+    for invoice line items before saving.
+    """
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    items = request.data.get('items', [])
+    evaluation_date_str = request.data.get('invoice_date')
+    evaluation_date = None
+    if evaluation_date_str:
+        try:
+            from datetime import datetime
+            evaluation_date = datetime.strptime(str(evaluation_date_str)[:10], '%Y-%m-%d').date()
+        except Exception:
+            evaluation_date = None
+
+    from .scheme_service import evaluate_schemes_for_items
+    result = evaluate_schemes_for_items(tenant=tenant, items=items, evaluation_date=evaluation_date)
+    return Response(result)

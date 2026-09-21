@@ -51,10 +51,14 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
+    unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
+    tax = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
+    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
     
     class Meta:
         model = SalesOrderItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'amount']
+        fields = ['id', 'product', 'product_name', 'quantity', 'free_quantity', 'unit', 'price', 'discount', 'tax', 'amount']
 
     def to_internal_value(self, data):
         # Allow passing product name instead of UUID
@@ -83,12 +87,15 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
                     product_obj = Product.objects.create(
                         name=str(product_value).strip(),
                         price=data.get('price', 0),
+                        unit=data.get('unit') or 'pcs',
                         created_by=user
                     )
                 else:
                     raise serializers.ValidationError({'product': f'Product "{product_value}" not found in inventory.'})
 
         data['product'] = product_obj.id
+        if not data.get('unit') and product_obj and product_obj.unit:
+            data['unit'] = product_obj.unit
         return super().to_internal_value(data)
 
 class SalesOrderSerializer(serializers.ModelSerializer):

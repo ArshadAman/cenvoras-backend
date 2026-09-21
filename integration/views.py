@@ -140,12 +140,13 @@ class SendInvoiceNotificationView(APIView):
         invoice_id = serializer.validated_data['invoice_id']
         channels = serializer.validated_data.get('channels', ['email'])
 
+        tenant = getattr(request.user, 'active_tenant', request.user)
         try:
-            invoice = SalesInvoice.objects.get(id=invoice_id, created_by=request.user)
+            invoice = SalesInvoice.objects.get(id=invoice_id, created_by=tenant)
         except SalesInvoice.DoesNotExist:
             return Response({"error": "Invoice not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        results = send_invoice_notification(request.user, invoice, channels)
+        results = send_invoice_notification(tenant, invoice, channels)
         return Response({"message": "Notification processed", "results": results})
 
 
@@ -159,8 +160,9 @@ class SendCustomEmailView(APIView):
         body = request.data.get('body', '')
         if not recipient or not body:
             return Response({'error': 'recipient and body are required'}, status=status.HTTP_400_BAD_REQUEST)
+        tenant = getattr(request.user, 'active_tenant', request.user)
         result = send_email(
-            request.user, recipient, subject, body,
+            tenant, recipient, subject, body,
             related_model='custom', related_id=''
         )
         return Response({'message': 'Email queued', 'result': result})
@@ -172,14 +174,15 @@ class SendPaymentRemindersView(APIView):
 
     def post(self, request):
         from .tasks import send_payment_reminders_for_user
+        tenant = getattr(request.user, 'active_tenant', request.user)
         overdue_days = request.data.get('overdue_days', 30)
         stagger_seconds = 2
         # Count eligible before dispatching
         count = Customer.objects.filter(
-            created_by=request.user,
+            created_by=tenant,
             current_balance__gt=0,
         ).exclude(email='').count()
-        send_payment_reminders_for_user.delay(str(request.user.id), overdue_days)
+        send_payment_reminders_for_user.delay(str(tenant.id), overdue_days)
         total_dispatch_window_seconds = count * stagger_seconds
         return Response({
             'message': f'Payment reminders queued for {count} customer(s) with outstanding balance.',
@@ -233,9 +236,10 @@ class BarcodeLookupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, barcode):
+        tenant = getattr(request.user, 'active_tenant', request.user)
         try:
             meta = Product.objects.get(
-                created_by=request.user,
+                created_by=tenant,
                 meta__barcode=barcode
             )
             return Response({

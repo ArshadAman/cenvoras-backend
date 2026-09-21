@@ -37,27 +37,27 @@ class Product(models.Model):
     warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
     stock = models.IntegerField(default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
     low_stock_alert = models.PositiveIntegerField(default=0)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-
+    is_active = models.BooleanField(default=True, db_index=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
 
     def __str__(self):
         return self.name
 
-    def recalculate_stock(self):
+    def recalculate_stock(self, save=True):
         """
-        Re-aggregates total stock from all StockPoints (Warehouses/Batches).
-        Updates the cached 'stock' field.
+        Recalculates cached product stock from authoritative StockPoints (Batches x Warehouses).
+        Only overrides cached stock if batches or batch stock points exist, protecting unbatched products.
+        Returns the updated stock count.
         """
         from django.db.models import Sum
-        # Avoid circular import by importing inside method if needed, 
-        # though StockPoint relies on Product so it's tricky.
-        # Actually StockPoint is in this file (later), so we can use string reference or import after class definition.
-        # But since they are in same file, we can use 'StockPoint' name directly if defined, OR self.batches.stock_points...
-        
-        # Better approach: 
-        # total = StockPoint.objects.filter(batch__product=self).aggregate(total=Sum('quantity'))['total'] or 0
-        pass # Will implement properly after StockPoint is defined or use reverse relation logic carefully.
+        stock_points = StockPoint.objects.filter(batch__product=self)
+        if self.batches.exists() or stock_points.exists():
+            total = stock_points.aggregate(total=Sum('quantity'))['total'] or 0
+            if self.stock != total:
+                self.stock = total
+                if save:
+                    self.save(update_fields=['stock'])
+        return self.stock
 
 class Warehouse(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -146,20 +146,6 @@ class StockTransferItem(models.Model):
     def __str__(self):
         return f"{self.product.name} ({self.quantity})"
 
-# Signal to reconcile stock? Or keep it manual? 
-# For now, let's attach the method to Product properly.
-def product_recalculate_stock(self):
-    """
-    Re-aggregates total stock from all StockPoints.
-    """
-    from django.db.models import Sum
-    # Sum up all quantities from stock points linked to this product's batches
-    total = StockPoint.objects.filter(batch__product=self).aggregate(total=Sum('quantity'))['total'] or 0
-    self.stock = total
-    self.save(update_fields=['stock'])
-
-
-Product.recalculate_stock = product_recalculate_stock
 
 # Import Sidecar Models to ensure they are registered
 # Import Sidecar Models to ensure they are registered

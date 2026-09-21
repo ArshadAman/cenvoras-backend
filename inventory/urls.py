@@ -1,8 +1,10 @@
 from django.urls import path
 from . import views
 from . import views_sidecar
+from . import views_adjustment
 
 urlpatterns = [
+    path('stock-adjustments/', views_adjustment.StockAdjustmentView.as_view(), name='stock-adjustments'),
     path('products/', views.ProductListCreateView.as_view(), name='product-list-create'),
     path('products/<uuid:pk>/', views.ProductDetailView.as_view(), name='product-detail'),
     path('products/bulk-delete/', views.bulk_delete_products, name='product-bulk-delete'),

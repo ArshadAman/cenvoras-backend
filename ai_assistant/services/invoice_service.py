@@ -24,27 +24,9 @@ def search_products(user, query):
 
 
 def get_next_invoice_number_internal(user, prefix='INV-'):
+    from billing.sequence_service import allocate_next_number
     tenant = getattr(user, 'active_tenant', user)
-    tenant_id = str(tenant.id)[:4].upper()
-    full_prefix = f'{prefix}{tenant_id}-'
-
-    invoices = SalesInvoice.objects.filter(
-        created_by=tenant,
-        invoice_number__startswith=full_prefix,
-    )
-
-    max_num = 0
-    for inv in invoices:
-        suffix = inv.invoice_number.replace(full_prefix, '')
-        try:
-            num = int(suffix)
-            if num > max_num:
-                max_num = num
-        except ValueError:
-            continue
-
-    next_num = max_num + 1
-    return f"{full_prefix}{next_num:03d}"
+    return allocate_next_number(tenant=tenant, document_type='sales_invoice', prefix=prefix)
 
 def create_invoice_from_ai(user, entities, request=None):
     """

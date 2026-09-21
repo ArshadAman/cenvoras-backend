@@ -2,10 +2,11 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from django.db.models import Q
-from .models_sidecar import SalesOrder, SalesOrderItem, DeliveryChallan, InvoiceSettings, Quotation, QuotationItem
+from django.db import transaction
+from django.db.models import Q, F
+from .models_sidecar import SalesOrder, SalesOrderItem, DeliveryChallan, InvoiceSettings, Quotation, QuotationItem, TransactionMeta
 from .serializers_sidecar import SalesOrderSerializer, DeliveryChallanSerializer, InvoiceSettingsSerializer, QuotationSerializer
-from .models import SalesInvoice, SalesInvoiceItem
+from .models import SalesInvoice, SalesInvoiceItem, Customer
 from cenvoras.pagination import StandardResultsSetPagination
 from datetime import date
 from decimal import Decimal
@@ -76,54 +77,125 @@ def convert_order_to_invoice(request, pk):
     try:
         order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
     except SalesOrder.DoesNotExist:
-        return Response({"message": "Order not found"}, status=404)
+        return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    prefix = (getattr(tenant, 'invoice_prefix', 'INV-') or 'INV-').upper()
-    if not prefix.endswith('-'):
-        prefix = f"{prefix}-"
+    if order.stage == 'completed':
+        return Response({"message": "Order has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
-    invoices = SalesInvoice.objects.filter(
-        created_by=tenant,
-        invoice_number__startswith=prefix,
-    )
+    with transaction.atomic():
+        # Lock order row for update
+        order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+        if order.stage == 'completed':
+            return Response({"message": "Order has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
-    max_num = 0
-    for inv in invoices:
-        suffix = inv.invoice_number.replace(prefix, '', 1)
-        try:
-            num = int(suffix)
-            if num > max_num:
-                max_num = num
-        except (TypeError, ValueError):
-            continue
+        # Check credit limit if allow_credit is disabled
+        if order.customer and not order.customer.allow_credit:
+            new_balance = order.customer.current_balance + order.total_amount
+            if new_balance > order.customer.credit_limit:
+                return Response(
+                    {"message": f"Credit limit exceeded. Current: {order.customer.current_balance}, Limit: {order.customer.credit_limit}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-    next_num = max_num + 1
-    next_invoice_number = f"{prefix}{next_num:03d}"
+        from billing.sequence_service import allocate_next_number
+        next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
 
-    invoice = SalesInvoice.objects.create(
-        customer=order.customer,
-        customer_name=order.customer.name,
-        invoice_number=next_invoice_number,
-        invoice_date=date.today(),
-        created_by=tenant,
-        total_amount=order.total_amount
-    )
-    
-    for item in order.items.all():
-        SalesInvoiceItem.objects.create(
-            sales_invoice=invoice,
-            product=item.product,
-            quantity=item.quantity,
-            price=item.price,
-            amount=item.amount,
-            unit="pcs", 
-            tax=item.product.tax
+        invoice = SalesInvoice.objects.create(
+            customer=order.customer,
+            customer_name=order.customer.name if order.customer else '',
+            customer_address=order.customer.address if order.customer else '',
+            place_of_supply=order.customer.state if order.customer and order.customer.state else None,
+            invoice_number=next_invoice_number,
+            invoice_date=date.today(),
+            created_by=tenant,
+            total_amount=Decimal('0.00'),
+            status='final',
         )
-        
-    # Update Order Stage
-    order.stage = 'completed'
-    order.save()
-    
+
+        raw_items = []
+        for item in order.items.all():
+            item_unit = getattr(item, 'unit', None) or (item.product.unit if item.product else 'pcs') or 'pcs'
+            item_tax = getattr(item, 'tax', None) if getattr(item, 'tax', None) is not None else (item.product.tax if item.product else Decimal('0.00'))
+            item_discount = getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00')
+            item_free_qty = getattr(item, 'free_quantity', 0) or 0
+            raw_items.append({
+                'product': item.product,
+                'quantity': item.quantity,
+                'price': item.price,
+                'amount': item.amount,
+                'unit': item_unit,
+                'tax': item_tax,
+                'discount': item_discount,
+                'free_quantity': item_free_qty,
+            })
+
+        # Evaluate active schemes if any items have free_quantity == 0
+        bonus_items = []
+        try:
+            from billing.scheme_service import evaluate_schemes_for_items
+            scheme_res = evaluate_schemes_for_items(tenant=tenant, items=raw_items, evaluation_date=invoice.invoice_date)
+            raw_items = scheme_res.get('items', raw_items)
+            bonus_items = scheme_res.get('additional_free_items', [])
+        except Exception as e:
+            pass
+
+        for r_item in raw_items:
+            SalesInvoiceItem.objects.create(
+                sales_invoice=invoice,
+                product=r_item['product'],
+                quantity=r_item['quantity'],
+                free_quantity=r_item.get('free_quantity', 0),
+                price=r_item['price'],
+                amount=r_item['amount'],
+                unit=r_item['unit'],
+                tax=r_item['tax'],
+                discount=r_item['discount'],
+            )
+
+        for b_item in bonus_items:
+            b_prod = b_item.get('product')
+            if b_prod:
+                SalesInvoiceItem.objects.create(
+                    sales_invoice=invoice,
+                    product=b_prod,
+                    quantity=b_item.get('quantity', 0),
+                    free_quantity=b_item.get('free_quantity', 0),
+                    price=Decimal('0.00'),
+                    amount=Decimal('0.00'),
+                    unit=b_item.get('unit') or 'pcs',
+                    tax=Decimal('0.00'),
+                    discount=Decimal('0.00'),
+                )
+
+        invoice.refresh_from_db()
+
+        # Ensure TransactionMeta exists
+        TransactionMeta.objects.get_or_create(invoice=invoice)
+
+        # Accrue loyalty points (1 point per ₹100)
+        if order.customer and hasattr(order.customer, 'meta'):
+            try:
+                points_earned = int(invoice.total_amount / 100)
+                if points_earned > 0:
+                    order.customer.meta.loyalty_points += points_earned
+                    order.customer.meta.save(update_fields=['loyalty_points'])
+            except Exception:
+                pass
+
+        # Update customer balance
+        if invoice.status == 'final' and invoice.customer_id:
+            Customer.objects.filter(pk=invoice.customer_id).update(
+                current_balance=F('current_balance') + invoice.total_amount
+            )
+
+        # Rebuild general ledger entries
+        from .serializers import _rebuild_sales_invoice_ledger
+        _rebuild_sales_invoice_ledger(invoice.id)
+
+        # Update Order Stage
+        order.stage = 'completed'
+        order.save(update_fields=['stage'])
+
     return Response({"message": "Converted successfully", "invoice_id": invoice.id})
 
 # =============================================================================
@@ -275,29 +347,23 @@ def quotation_detail(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def quotation_next_number(request):
+    from billing.sequence_service import preview_next_number
+
     tenant = request.user.active_tenant
     prefix = request.GET.get('prefix', 'QT-')
-
     tenant_code = str(tenant.id)[:4].upper()
-    full_prefix = f'{prefix}{tenant_code}-'
-    quotations = Quotation.objects.filter(created_by=tenant, quotation_number__startswith=full_prefix)
 
-    max_num = 0
-    for q in quotations:
-        suffix = q.quotation_number.replace(full_prefix, '')
-        try:
-            num = int(suffix)
-            if num > max_num:
-                max_num = num
-        except ValueError:
-            continue
+    next_number, suffix = preview_next_number(
+        tenant=tenant,
+        document_type='quotation',
+        prefix=prefix,
+    )
 
-    next_num = max_num + 1
     return Response({
         'success': True,
         'uuid_prefix': tenant_code,
-        'next_number': f'{full_prefix}{next_num:03d}',
-        'suffix': f'{next_num:03d}',
+        'next_number': next_number,
+        'suffix': suffix,
     })
 
 
@@ -360,8 +426,12 @@ def quotation_convert_to_sales_order(request, pk):
             order=order,
             product=item.product,
             quantity=item.quantity,
+            free_quantity=getattr(item, 'free_quantity', 0) or 0,
             price=item.price,
             amount=item.amount,
+            unit=item.unit or (item.product.unit if item.product else 'pcs') or 'pcs',
+            discount=getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'),
+            tax=getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00'),
         )
         item.converted_to_order = True
         item.save(update_fields=['converted_to_order'])
@@ -375,3 +445,47 @@ def quotation_convert_to_sales_order(request, pk):
         'sales_order_id': str(order.id),
         'sales_order_number': order.order_number,
     })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def quotation_pdf_download(request, pk):
+    from django.http import HttpResponse
+    from django.db.models import Q
+    from billing.models_sidecar import Quotation
+
+    tenant = request.user.active_tenant
+    try:
+        quotation = Quotation.objects.select_related('customer').prefetch_related('items__product').get(
+            Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
+        )
+    except Quotation.DoesNotExist:
+        return Response({'error': 'Quotation not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    template_data = None
+    if request.method == 'POST':
+        template_data = request.data.get('template')
+    elif request.GET.get('primary_color'):
+        template_data = {
+            'colors': {
+                'primary': request.GET.get('primary_color'),
+                'secondary': request.GET.get('secondary_color'),
+                'tableHeader': request.GET.get('table_header'),
+            },
+            'layoutType': request.GET.get('layout_type', 'classic'),
+        }
+
+    from billing.invoice_pdf_service import generate_invoice_pdf
+    pdf_bytes = generate_invoice_pdf(
+        invoice_obj=quotation,
+        tenant=tenant,
+        document_type='quotation',
+        template_data=template_data,
+    )
+
+    filename = f"quotation-{quotation.quotation_number or quotation.id}.pdf"
+    response = HttpResponse(pdf_bytes, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Content-Length'] = len(pdf_bytes)
+    return response
+

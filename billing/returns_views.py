@@ -41,16 +41,20 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = user
         
-        # Auto-generate credit note number if not provided
-        last_note = CreditNote.objects.order_by('-created_at').first()
-        if last_note and last_note.credit_note_number.startswith('CN-'):
-            try:
-                last_num = int(last_note.credit_note_number.split('-')[1])
-                validated_data['credit_note_number'] = f"CN-{last_num + 1:04d}"
-            except ValueError:
-                validated_data['credit_note_number'] = "CN-0001"
-        else:
-            validated_data['credit_note_number'] = "CN-0001"
+        # Auto-generate credit note number if not provided (scoped strictly to tenant)
+        if not validated_data.get('credit_note_number'):
+            existing_numbers = CreditNote.objects.filter(
+                created_by=user, credit_note_number__startswith='CN-'
+            ).values_list('credit_note_number', flat=True)
+            max_num = 0
+            for num_str in existing_numbers:
+                try:
+                    num = int(num_str.split('-')[1])
+                    if num > max_num:
+                        max_num = num
+                except (ValueError, IndexError):
+                    continue
+            validated_data['credit_note_number'] = f"CN-{max_num + 1:04d}"
             
         credit_note = CreditNote.objects.create(**validated_data)
 
@@ -110,16 +114,20 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = user
         
-        # Auto-generate debit note number if not provided
-        last_note = DebitNote.objects.order_by('-created_at').first()
-        if last_note and last_note.debit_note_number.startswith('DN-'):
-            try:
-                last_num = int(last_note.debit_note_number.split('-')[1])
-                validated_data['debit_note_number'] = f"DN-{last_num + 1:04d}"
-            except ValueError:
-                validated_data['debit_note_number'] = "DN-0001"
-        else:
-            validated_data['debit_note_number'] = "DN-0001"
+        # Auto-generate debit note number if not provided (scoped strictly to tenant)
+        if not validated_data.get('debit_note_number'):
+            existing_numbers = DebitNote.objects.filter(
+                created_by=user, debit_note_number__startswith='DN-'
+            ).values_list('debit_note_number', flat=True)
+            max_num = 0
+            for num_str in existing_numbers:
+                try:
+                    num = int(num_str.split('-')[1])
+                    if num > max_num:
+                        max_num = num
+                except (ValueError, IndexError):
+                    continue
+            validated_data['debit_note_number'] = f"DN-{max_num + 1:04d}"
             
         debit_note = DebitNote.objects.create(**validated_data)
 

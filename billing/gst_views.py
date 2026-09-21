@@ -30,14 +30,14 @@ def hsn_summary_report(request):
     HSN-wise tax summary — required for GSTR-1 filing.
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD&type=sales|purchase
     """
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
     report_type = request.query_params.get('type', 'sales')
 
     if report_type == 'sales':
         items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=user
+            sales_invoice__created_by=tenant
         )
         if from_date:
             items = items.filter(sales_invoice__invoice_date__gte=from_date)
@@ -45,7 +45,7 @@ def hsn_summary_report(request):
             items = items.filter(sales_invoice__invoice_date__lte=to_date)
     else:
         items = PurchaseBillItem.objects.filter(
-            purchase_bill__created_by=user
+            purchase_bill__created_by=tenant
         )
         if from_date:
             items = items.filter(purchase_bill__bill_date__gte=from_date)
@@ -112,20 +112,20 @@ def tax_register(request):
     Invoice-wise GST breakup register.
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD&type=sales|purchase
     """
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
     report_type = request.query_params.get('type', 'sales')
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(created_by=user).prefetch_related('items')
+        invoices = SalesInvoice.objects.filter(created_by=tenant).prefetch_related('items')
         if from_date:
             invoices = invoices.filter(invoice_date__gte=from_date)
         if to_date:
             invoices = invoices.filter(invoice_date__lte=to_date)
         invoices = invoices.order_by('-invoice_date')
     else:
-        invoices = PurchaseBill.objects.filter(created_by=user).prefetch_related('items')
+        invoices = PurchaseBill.objects.filter(created_by=tenant).prefetch_related('items')
         if from_date:
             invoices = invoices.filter(bill_date__gte=from_date)
         if to_date:
@@ -146,7 +146,7 @@ def tax_register(request):
         is_inter_state = False
         if report_type == 'sales':
             if hasattr(inv, 'place_of_supply') and inv.place_of_supply:
-                if hasattr(user, 'state') and user.state and inv.place_of_supply != user.state:
+                if hasattr(tenant, 'state') and tenant.state and inv.place_of_supply != tenant.state:
                     is_inter_state = True
 
         if is_inter_state:
@@ -197,20 +197,20 @@ def tax_register_invoice_detail(request, invoice_id):
     Drill-down for a single invoice/bill in tax register.
     Query Params: ?type=sales|purchase
     """
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     report_type = request.query_params.get('type', 'sales')
 
     if report_type == 'sales':
         try:
             invoice = SalesInvoice.objects.prefetch_related('items__product', 'customer').get(
-                id=invoice_id, created_by=user
+                id=invoice_id, created_by=tenant
             )
         except SalesInvoice.DoesNotExist:
             return Response({'error': 'Sales invoice not found'}, status=404)
 
         items = invoice.items.all()
         is_inter_state = bool(
-            invoice.place_of_supply and hasattr(user, 'state') and user.state and invoice.place_of_supply != user.state
+            invoice.place_of_supply and hasattr(tenant, 'state') and tenant.state and invoice.place_of_supply != tenant.state
         )
         invoice_number = invoice.invoice_number
         invoice_date = invoice.invoice_date
@@ -220,7 +220,7 @@ def tax_register_invoice_detail(request, invoice_id):
     else:
         try:
             invoice = PurchaseBill.objects.prefetch_related('items__product').get(
-                id=invoice_id, created_by=user
+                id=invoice_id, created_by=tenant
             )
         except PurchaseBill.DoesNotExist:
             return Response({'error': 'Purchase bill not found'}, status=404)
@@ -309,7 +309,7 @@ def gstr1_json_export(request):
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     Output JSON follows NIC portal GSTR-1 schema.
     """
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
 
@@ -317,7 +317,7 @@ def gstr1_json_export(request):
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
     invoices = SalesInvoice.objects.filter(
-        created_by=user,
+        created_by=tenant,
         invoice_date__gte=from_date,
         invoice_date__lte=to_date,
     ).select_related('customer').prefetch_related('items__product')
@@ -330,7 +330,7 @@ def gstr1_json_export(request):
         items_data = []
         for item in inv.items.all():
             total_tax = item.tax
-            is_inter = (inv.place_of_supply and hasattr(user, 'state') and user.state and inv.place_of_supply != user.state)
+            is_inter = (inv.place_of_supply and hasattr(tenant, 'state') and tenant.state and inv.place_of_supply != tenant.state)
 
             if is_inter:
                 igst = float(total_tax)
@@ -362,7 +362,7 @@ def gstr1_json_export(request):
                     'inum': inv.invoice_number,
                     'idt': inv.invoice_date.strftime('%d-%m-%Y'),
                     'val': float(inv.total_amount),
-                    'pos': inv.place_of_supply or (user.state if hasattr(user, 'state') else ''),
+                    'pos': inv.place_of_supply or (tenant.state if hasattr(tenant, 'state') else ''),
                     'rchrg': 'N',
                     'inv_typ': 'R',
                     'itms': items_data,
@@ -376,7 +376,7 @@ def gstr1_json_export(request):
                 b2b.append(b2b_entry)
         else:
             # B2C
-            is_inter = (inv.place_of_supply and hasattr(user, 'state') and user.state and inv.place_of_supply != user.state)
+            is_inter = (inv.place_of_supply and hasattr(tenant, 'state') and tenant.state and inv.place_of_supply != tenant.state)
             if is_inter and inv.total_amount >= 250000:
                 # B2C Large
                 b2cl.append({
@@ -393,7 +393,7 @@ def gstr1_json_export(request):
                 for item in items_data:
                     b2cs.append({
                         'sply_ty': 'INTER' if is_inter else 'INTRA',
-                        'pos': inv.place_of_supply or (user.state if hasattr(user, 'state') else ''),
+                        'pos': inv.place_of_supply or (tenant.state if hasattr(tenant, 'state') else ''),
                         'rt': item['itm_det']['rt'],
                         'txval': item['itm_det']['txval'],
                         'camt': item['itm_det']['camt'],
@@ -404,7 +404,7 @@ def gstr1_json_export(request):
 
     # HSN Summary
     hsn_items = SalesInvoiceItem.objects.filter(
-        sales_invoice__created_by=user,
+        sales_invoice__created_by=tenant,
         sales_invoice__invoice_date__gte=from_date,
         sales_invoice__invoice_date__lte=to_date,
     ).values('hsn_sac_code').annotate(
@@ -430,7 +430,7 @@ def gstr1_json_export(request):
             'csamt': 0,
         })
 
-    gstin = user.gstin if hasattr(user, 'gstin') and user.gstin else ''
+    gstin = tenant.gstin if hasattr(tenant, 'gstin') and tenant.gstin else ''
     fp = datetime.datetime.strptime(from_date, '%Y-%m-%d').strftime('%m%Y')
 
     gstr1 = {
@@ -461,15 +461,15 @@ def generate_einvoice(request):
     if not invoice_id:
         return Response({'error': 'invoice_id is required'}, status=400)
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
         invoice = SalesInvoice.objects.select_related('customer').prefetch_related('items__product').get(
-            pk=invoice_id, created_by=request.user
+            pk=invoice_id, created_by=tenant
         )
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Invoice not found'}, status=404)
 
-    user = request.user
-    gstin = user.gstin if hasattr(user, 'gstin') and user.gstin else 'UNREGISTERED'
+    gstin = tenant.gstin if hasattr(tenant, 'gstin') and tenant.gstin else 'UNREGISTERED'
 
     # Build IRN payload (simplified NIC schema)
     irn_payload = {
@@ -486,11 +486,11 @@ def generate_einvoice(request):
         },
         'SellerDtls': {
             'Gstin': gstin,
-            'LglNm': user.business_name or user.username,
-            'Addr1': user.business_address[:100] if hasattr(user, 'business_address') and user.business_address else 'N/A',
-            'Loc': user.state if hasattr(user, 'state') and user.state else '',
+            'LglNm': tenant.business_name or tenant.username,
+            'Addr1': tenant.business_address[:100] if hasattr(tenant, 'business_address') and tenant.business_address else 'N/A',
+            'Loc': tenant.state if hasattr(tenant, 'state') and tenant.state else '',
             'Pin': 0,
-            'Stcd': user.state if hasattr(user, 'state') and user.state else '',
+            'Stcd': tenant.state if hasattr(tenant, 'state') and tenant.state else '',
         },
         'BuyerDtls': {
             'Gstin': invoice.customer.gstin if invoice.customer and invoice.customer.gstin else 'URP',
@@ -553,9 +553,10 @@ def generate_eway_bill(request):
     if not invoice_id:
         return Response({'error': 'invoice_id is required'}, status=400)
 
+    tenant = getattr(request.user, 'active_tenant', request.user)
     try:
         invoice = SalesInvoice.objects.select_related('customer').get(
-            pk=invoice_id, created_by=request.user
+            pk=invoice_id, created_by=tenant
         )
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Invoice not found'}, status=404)
@@ -584,7 +585,7 @@ def generate_eway_bill(request):
             'generated_at': datetime.datetime.now(),
             'valid_until': datetime.datetime.now() + datetime.timedelta(days=1),
             'status': 'generated',
-            'created_by': request.user,
+            'created_by': tenant,
         }
     )
 

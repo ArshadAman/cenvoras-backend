@@ -6,6 +6,44 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def deduplicate_sales_invoices(apps, schema_editor):
+    """
+    Ensure any existing duplicate invoice numbers for the same tenant are gracefully
+    renumbered (e.g. INV-001-DUP1) before applying the unique constraint.
+    Prevents migration failures on production databases with pre-existing duplicates.
+    """
+    SalesInvoice = apps.get_model('billing', 'SalesInvoice')
+    from django.db.models import Count
+
+    duplicates = (
+        SalesInvoice.objects.values('created_by', 'invoice_number')
+        .annotate(cnt=Count('id'))
+        .filter(cnt__gt=1)
+    )
+
+    for item in duplicates:
+        created_by_id = item['created_by']
+        inv_num = item['invoice_number']
+        invoices = list(
+            SalesInvoice.objects.filter(
+                created_by_id=created_by_id,
+                invoice_number=inv_num
+            ).order_by('created_at', 'id')
+        )
+        for idx, inv in enumerate(invoices[1:], start=1):
+            counter = idx
+            prefix = inv_num if inv_num else "INV"
+            new_num = f"{prefix}-DUP{counter}"
+            while SalesInvoice.objects.filter(
+                created_by_id=created_by_id,
+                invoice_number=new_num
+            ).exists():
+                counter += 1
+                new_num = f"{prefix}-DUP{counter}"
+            inv.invoice_number = new_num
+            inv.save(update_fields=['invoice_number'])
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -25,6 +63,7 @@ class Migration(migrations.Migration):
                 ('updated_at', models.DateTimeField(auto_now=True)),
             ],
         ),
+        migrations.RunPython(deduplicate_sales_invoices, reverse_code=migrations.RunPython.noop),
         migrations.AlterUniqueTogether(
             name='salesinvoice',
             unique_together={('created_by', 'invoice_number')},

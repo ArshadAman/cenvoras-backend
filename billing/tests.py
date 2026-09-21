@@ -1863,6 +1863,36 @@ class InvoicePDFGenerationTests(TestCase):
         self.assertTrue(res.content.startswith(b'%PDF-'))
         self.assertLess(len(res.content) / 1024, 100.0)
 
+    def test_deduplicate_sales_invoices_migration_helper(self):
+        """deduplicate_sales_invoices must safely rename duplicate invoice numbers before unique constraint"""
+        import importlib
+        from unittest.mock import MagicMock
+        mig_mod = importlib.import_module("billing.migrations.0030_invoicesequence_alter_salesinvoice_unique_together_and_more")
+        deduplicate_sales_invoices = mig_mod.deduplicate_sales_invoices
 
+        inv1 = MagicMock(id='1', created_by='tenant1', invoice_number='INV-001', created_at=1)
+        inv2 = MagicMock(id='2', created_by='tenant1', invoice_number='INV-001', created_at=2)
+        inv3 = MagicMock(id='3', created_by='tenant1', invoice_number='INV-001', created_at=3)
 
+        mock_model = MagicMock()
+        mock_model.objects.values.return_value.annotate.return_value.filter.return_value = [
+            {'created_by': 'tenant1', 'invoice_number': 'INV-001', 'cnt': 3}
+        ]
+        mock_model.objects.filter.return_value.order_by.return_value = [inv1, inv2, inv3]
+        mock_model.objects.filter.return_value.exists.return_value = False
+
+        mock_apps = MagicMock()
+        mock_apps.get_model.return_value = mock_model
+
+        deduplicate_sales_invoices(mock_apps, None)
+
+        # inv1 should be untouched
+        self.assertEqual(inv1.invoice_number, 'INV-001')
+        inv1.save.assert_not_called()
+
+        # inv2 and inv3 should be renumbered and saved
+        self.assertEqual(inv2.invoice_number, 'INV-001-DUP1')
+        inv2.save.assert_called_once_with(update_fields=['invoice_number'])
+        self.assertEqual(inv3.invoice_number, 'INV-001-DUP2')
+        inv3.save.assert_called_once_with(update_fields=['invoice_number'])
 

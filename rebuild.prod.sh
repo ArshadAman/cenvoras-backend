@@ -75,8 +75,9 @@ free_http_ports
 
 echo " ---- Building new images with production overrides ----- "
 if ! $DOCKER_CMD $COMPOSE_FILES up --build -d; then
-  echo " ---- Error: compose up failed. Showing nginx logs ----- "
-  $DOCKER_CMD $COMPOSE_FILES logs --tail=120 nginx || true
+  echo " ---- Error: compose up failed. Showing web and nginx logs ----- "
+  $DOCKER_CMD $COMPOSE_FILES logs --tail=100 web || true
+  $DOCKER_CMD $COMPOSE_FILES logs --tail=50 nginx || true
   exit 1
 fi
 

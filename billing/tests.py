@@ -966,7 +966,7 @@ class MultiTenantSequenceAndStaffIsolationTests(TestCase):
             customer=self.cust_a,
             customer_name="Customer A",
             invoice_number="INV-A-001",
-            invoice_date=date.today(),
+            invoice_date=timezone.localdate(),
             total_amount=Decimal("0.00"),
             place_of_supply="Maharashtra",
             status="final"

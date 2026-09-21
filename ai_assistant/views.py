@@ -28,7 +28,7 @@ def gather_business_context(user):
     from inventory.models import Product, ProductBatch, StockPoint
 
     tenant = getattr(user, 'active_tenant', user)
-    today = timezone.now().date()
+    today = timezone.localdate()
     month_start = today.replace(day=1)
     week_start = today - timedelta(days=today.weekday())
 

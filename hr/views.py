@@ -884,6 +884,30 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         serializer = PayrollExceptionSerializer(exceptions, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'], url_path='bank_export')
+    def bank_export(self, request, pk=None):
+        """Generates a downloadable CSV batch payment file for corporate net banking."""
+        import csv
+        from django.http import HttpResponse
+        instance = self.get_object()
+        
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="salary_payout_{instance.month}_{instance.year}.csv"'
+        
+        writer = csv.writer(response)
+        writer.writerow(['Beneficiary Account Number', 'Beneficiary Name', 'IFSC Code', 'Amount', 'Remarks', 'Employee Code'])
+        
+        for ps in instance.payslips.select_related('employee'):
+            writer.writerow([
+                ps.employee.bank_account_number or '',
+                ps.employee.account_holder_name or ps.employee.full_name,
+                ps.employee.bank_ifsc or '',
+                f"{ps.net_salary:.2f}",
+                f"Salary for {instance.month}/{instance.year}",
+                ps.employee.employee_code,
+            ])
+        return response
+
     @action(detail=True, methods=['post'])
     def finalise(self, request, pk=None):
         """Backward-compatible action mapping to approval."""
@@ -1010,7 +1034,10 @@ class PayslipViewSet(viewsets.ReadOnlyModelViewSet):
     payroll_action = True
 
     def get_queryset(self):
-        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        user = self.request.user
+        if user.role == 'employee':
+            return Payslip.objects.filter(employee__user=user)
+        tenant = getattr(user, 'active_tenant', user)
         qs = Payslip.objects.filter(tenant=tenant)
         run_id = self.request.query_params.get('payroll_run')
         if run_id:
@@ -1090,6 +1117,9 @@ class PayslipPDFView(APIView):
             payslip = Payslip.objects.get(pk=pk, tenant=tenant)
         except Payslip.DoesNotExist:
             return Response({"error": "Payslip not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'employee' and payslip.employee.user != request.user:
+            return Response({"error": "You are not authorized to view this payslip."}, status=status.HTTP_403_FORBIDDEN)
 
         pdf_bytes = generate_payslip_pdf(payslip)
         
@@ -1618,7 +1648,7 @@ class EmployeeAdvanceLoanViewSet(viewsets.ModelViewSet):
             qs = qs.filter(employee_id=emp_id)
         loan_type = self.request.query_params.get('type')
         if loan_type:
-            qs = qs.filter(type=loan_type)
+            qs = qs.filter(record_type=loan_type)
         return qs
 
     def perform_create(self, serializer):
@@ -1629,10 +1659,8 @@ class EmployeeAdvanceLoanViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='approve')
     def approve(self, request, pk=None):
         loan = self.get_object()
-        if loan.status != 'requested':
-            return Response({"error": f"Cannot approve loan with status {loan.status}."}, status=status.HTTP_400_BAD_REQUEST)
         loan.status = 'active'
-        loan.approved_by = request.user
+        loan.disbursed_by = request.user
         loan.save()
         return Response({"status": "active"}, status=status.HTTP_200_OK)
 
@@ -1640,7 +1668,7 @@ class EmployeeAdvanceLoanViewSet(viewsets.ModelViewSet):
     def close(self, request, pk=None):
         loan = self.get_object()
         loan.status = 'closed'
-        loan.balance_amount = Decimal('0.00')
+        loan.outstanding_balance = Decimal('0.00')
         loan.save()
         return Response({"status": "closed"}, status=status.HTTP_200_OK)
 

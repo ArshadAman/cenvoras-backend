@@ -564,6 +564,20 @@ class OvertimeRecord(models.Model):
     class Meta:
         ordering = ['-date', '-created_at']
 
+    def save(self, *args, **kwargs):
+        from decimal import Decimal
+        if self.hours:
+            rate = self.hourly_rate
+            if not rate or rate == Decimal('0.00'):
+                active_assign = self.employee.salary_assignments.order_by('-effective_from').first()
+                if active_assign and active_assign.monthly_ctc:
+                    # 26 working days * 8 hours = 208 hours standard
+                    rate = (active_assign.monthly_ctc / Decimal('208.0')).quantize(Decimal('0.01'))
+                    self.hourly_rate = rate
+            multiplier = self.multiplier or Decimal('1.5')
+            self.amount = (Decimal(str(self.hours)) * (Decimal(str(rate)) if rate else Decimal('0.0')) * Decimal(str(multiplier))).quantize(Decimal('0.01'))
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.employee.employee_code} — {self.date}: {self.hours} hrs ({self.status})"
 
@@ -574,8 +588,10 @@ class EmployeeAdvanceLoan(models.Model):
         ('loan', 'Employee Loan'),
     ]
     STATUS_CHOICES = [
+        ('requested', 'Requested'),
         ('active', 'Active'),
         ('fully_recovered', 'Fully Recovered'),
+        ('closed', 'Closed'),
         ('cancelled', 'Cancelled'),
     ]
 
@@ -830,6 +846,11 @@ class Payslip(models.Model):
     deductions = models.JSONField(
         default=dict,
         help_text='Breakdown of each deduction.',
+    )
+    deduction_reasons = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Itemized breakdown explaining the reason and calculation for each deduction.',
     )
 
     # Employee statutory deductions

@@ -112,6 +112,13 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertEqual(challan.items.count(), 1)
         self.assertEqual(challan.items.first().quantity, 15)
 
+        # Check API serialization of sales order reference
+        detail_res = self.client.get(f"/api/billing/delivery-challans/{challan_id}/")
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["sales_order_number"], order.order_number)
+        self.assertIsNotNone(detail_res.data["sales_order_details"])
+        self.assertEqual(detail_res.data["sales_order_details"]["order_number"], order.order_number)
+
     def test_convert_sales_order_partial_quantity_to_delivery_challan(self):
         """Converting partial quantity (e.g. 3 out of 6) must decrease order quantity and reduce stock accurately."""
         initial_stock = self.product.stock

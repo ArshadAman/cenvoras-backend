@@ -328,6 +328,11 @@ def convert_order_to_challan(request, pk):
         from billing.sequence_service import allocate_next_number
         next_challan_number = allocate_next_number(tenant, document_type='delivery_challan', prefix='DC-')
 
+        vehicle_number = (request.data.get('vehicle_number') or '').strip()
+        transport_mode = (request.data.get('transport_mode') or '').strip()
+        eway_bill_number = (request.data.get('eway_bill_number') or '').strip()
+        custom_notes = (request.data.get('notes') or '').strip()
+
         challan = DeliveryChallan.objects.create(
             challan_number=next_challan_number,
             date=date.today(),
@@ -335,23 +340,67 @@ def convert_order_to_challan(request, pk):
             customer_name=order.customer.name if order.customer else '',
             customer_address=order.customer.address if order.customer else '',
             delivery_address=order.customer.address if order.customer else '',
+            vehicle_number=vehicle_number,
+            transport_mode=transport_mode,
+            eway_bill_number=eway_bill_number,
             sales_order=order,
             total_amount=Decimal('0.00'),
             status='open',
-            notes=f"Converted from Sales Order {order.order_number}",
+            notes=custom_notes or f"Converted from Sales Order {order.order_number}",
             created_by=tenant,
         )
+
+        # Parse requested conversion items & quantities
+        items_payload = request.data.get('items')
+        order_items_map = {item.id: item for item in order.items.all()}
+        
+        items_to_dispatch = []
+        if items_payload and isinstance(items_payload, list) and len(items_payload) > 0:
+            for entry in items_payload:
+                raw_id = entry.get('id') or entry.get('item_id')
+                if not raw_id:
+                    continue
+                try:
+                    item_id = int(raw_id)
+                except (ValueError, TypeError):
+                    continue
+                
+                order_item = order_items_map.get(item_id)
+                if not order_item:
+                    continue
+                
+                try:
+                    qty = int(entry.get('quantity', 0))
+                except (ValueError, TypeError):
+                    qty = 0
+                
+                if qty <= 0:
+                    continue
+                
+                if qty > order_item.quantity:
+                    return Response(
+                        {"message": f"Cannot dispatch {qty} for {order_item.product.name}. Only {order_item.quantity} remaining in order."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                items_to_dispatch.append((order_item, qty))
+        else:
+            # Fallback: dispatch all remaining items with their full current quantities
+            for item in order.items.all():
+                if item.quantity > 0:
+                    items_to_dispatch.append((item, item.quantity))
+
+        if not items_to_dispatch:
+            return Response({"message": "No valid items selected for dispatch."}, status=status.HTTP_400_BAD_REQUEST)
 
         total_amount = Decimal('0.00')
         from django.db.models import F
 
-        for item in order.items.all():
-            item_unit = getattr(item, 'unit', None) or (item.product.unit if item.product else 'pcs') or 'pcs'
-            item_tax = getattr(item, 'tax', None) if getattr(item, 'tax', None) is not None else (item.product.tax if item.product else Decimal('0.00'))
-            item_discount = getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00')
-            item_free_qty = getattr(item, 'free_quantity', 0) or 0
+        for order_item, dispatch_qty in items_to_dispatch:
+            item_unit = getattr(order_item, 'unit', None) or (order_item.product.unit if order_item.product else 'pcs') or 'pcs'
+            item_tax = getattr(order_item, 'tax', None) if getattr(order_item, 'tax', None) is not None else (order_item.product.tax if order_item.product else Decimal('0.00'))
+            item_discount = getattr(order_item, 'discount', Decimal('0.00')) or Decimal('0.00')
             
-            base_amt = Decimal(str(item.quantity)) * Decimal(str(item.price))
+            base_amt = Decimal(str(dispatch_qty)) * Decimal(str(order_item.price))
             disc_amt = (base_amt * Decimal(str(item_discount))) / Decimal('100')
             taxable = base_amt - disc_amt
             tax_amt = (taxable * Decimal(str(item_tax))) / Decimal('100')
@@ -360,10 +409,10 @@ def convert_order_to_challan(request, pk):
 
             DeliveryChallanItem.objects.create(
                 challan=challan,
-                product=item.product,
-                quantity=item.quantity,
-                free_quantity=item_free_qty,
-                price=item.price,
+                product=order_item.product,
+                quantity=dispatch_qty,
+                free_quantity=0,
+                price=order_item.price,
                 amount=line_amount,
                 unit=item_unit,
                 tax=item_tax,
@@ -371,16 +420,34 @@ def convert_order_to_challan(request, pk):
             )
 
             # Deduct stock for dispatched item
-            eff_qty = (item.quantity or 0) + item_free_qty
-            if eff_qty > 0:
-                Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
+            if dispatch_qty > 0:
+                Product.objects.filter(pk=order_item.product_id).update(stock=F('stock') - dispatch_qty)
+
+            # Decrement Sales Order item quantity
+            remaining_qty = order_item.quantity - dispatch_qty
+            if remaining_qty > 0:
+                order_item.quantity = remaining_qty
+                rem_base = Decimal(str(remaining_qty)) * Decimal(str(order_item.price))
+                rem_disc = (rem_base * Decimal(str(item_discount))) / Decimal('100')
+                rem_taxable = rem_base - rem_disc
+                rem_tax = (rem_taxable * Decimal(str(item_tax))) / Decimal('100')
+                order_item.amount = (rem_taxable + rem_tax).quantize(Decimal('0.01'))
+                order_item.save(update_fields=['quantity', 'amount'])
+            else:
+                order_item.delete()
 
         challan.total_amount = total_amount
         challan.save(update_fields=['total_amount'])
 
-        # Update order stage
-        order.stage = 'challan_created'
-        order.save(update_fields=['stage'])
+        # Recalculate remaining order total & update order stage
+        remaining_items = SalesOrderItem.objects.filter(order=order)
+        if remaining_items.exists():
+            order.total_amount = sum(i.amount for i in remaining_items)
+            order.stage = 'shipped'  # Partial dispatch, remains open for further dispatch
+        else:
+            order.total_amount = Decimal('0.00')
+            order.stage = 'completed'  # Fully dispatched!
+        order.save(update_fields=['total_amount', 'stage'])
 
     return Response({
         "message": "Converted to Delivery Challan successfully",

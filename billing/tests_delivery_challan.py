@@ -105,12 +105,72 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertEqual(self.product.stock, initial_stock - 15)  # Dispatched on challan
 
         order.refresh_from_db()
-        self.assertEqual(order.stage, 'challan_created')
+        self.assertEqual(order.stage, 'completed')  # Fully dispatched
 
         challan = DeliveryChallan.objects.get(id=challan_id)
         self.assertEqual(challan.sales_order_id, order.id)
         self.assertEqual(challan.items.count(), 1)
         self.assertEqual(challan.items.first().quantity, 15)
+
+    def test_convert_sales_order_partial_quantity_to_delivery_challan(self):
+        """Converting partial quantity (e.g. 3 out of 6) must decrease order quantity and reduce stock accurately."""
+        initial_stock = self.product.stock
+
+        order = SalesOrder.objects.create(
+            order_number="SO-PARTIAL-001",
+            date=date.today(),
+            customer=self.customer,
+            total_amount=Decimal("2400.00"),
+            stage="new",
+            created_by=self.tenant
+        )
+        order_item = SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=6,
+            price=Decimal("400.00"),
+            amount=Decimal("2400.00"),
+            tax=Decimal("0.00"),
+            discount=Decimal("0.00"),
+            unit="pcs"
+        )
+
+        # Convert 3 out of 6 to Delivery Challan
+        res = self.client.post(
+            f"/api/billing/sales-orders/{order.id}/convert_to_challan/",
+            data={"items": [{"id": order_item.id, "quantity": 3}]},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        challan_id = res.data["challan_id"]
+
+        # 1. Stock reduced by 3
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, initial_stock - 3)
+
+        # 2. Challan has quantity 3
+        challan = DeliveryChallan.objects.get(id=challan_id)
+        self.assertEqual(challan.items.count(), 1)
+        self.assertEqual(challan.items.first().quantity, 3)
+
+        # 3. Order item quantity decreased to 3, stage is shipped (open for remaining)
+        order.refresh_from_db()
+        order_item.refresh_from_db()
+        self.assertEqual(order_item.quantity, 3)
+        self.assertEqual(order.total_amount, Decimal("1200.00"))
+        self.assertEqual(order.stage, "shipped")
+
+        # 4. Convert the remaining 3
+        res2 = self.client.post(
+            f"/api/billing/sales-orders/{order.id}/convert_to_challan/",
+            data={"items": [{"id": order_item.id, "quantity": 3}]},
+            format="json"
+        )
+        self.assertEqual(res2.status_code, status.HTTP_201_CREATED, res2.data)
+
+        order.refresh_from_db()
+        self.assertEqual(order.stage, "completed")
+        self.assertEqual(order.items.count(), 0)
 
     def test_convert_challan_to_invoice_no_double_deduction(self):
         """Converting a delivery challan to sales invoice must NOT double-deduct stock."""

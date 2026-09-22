@@ -4,6 +4,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +612,46 @@ class EmployeeAdvanceLoan(models.Model):
 
     def __str__(self):
         return f"{self.employee.full_name} — {self.get_record_type_display()} ₹{self.original_amount} (Bal: ₹{self.outstanding_balance})"
+
+
+class EmployeeAllowanceBonus(models.Model):
+    TYPE_CHOICES = [
+        ('allowance', 'Allowance'),
+        ('bonus', 'Bonus'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('paid', 'Paid'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='hr_allowances_bonuses',
+    )
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='allowances_bonuses',
+    )
+    record_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='allowance')
+    title = models.CharField(max_length=150, help_text="e.g. Travel Allowance, Performance Bonus, Festive Bonus")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    is_recurring = models.BooleanField(default=False, help_text="If true, applies every monthly payroll run")
+    effective_date = models.DateField(default=timezone.now)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='approved')
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-effective_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.employee.full_name} — {self.get_record_type_display()}: {self.title} (₹{self.amount})"
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ from .models import (
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
     PayrollRun, Payslip, EmployeeTask, EmployeeQuery, EmployeeNotification,
     EmployeeSalaryHistory, OvertimeRecord, EmployeeAdvanceLoan, LoanRecoveryLog,
-    PayrollException, HRDocument, HRMSSettings
+    PayrollException, HRDocument, HRMSSettings, EmployeeAllowanceBonus
 )
 
 
@@ -141,6 +141,16 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'updated_at']
         validators = []
+
+    def validate(self, attrs):
+        employee = attrs.get('employee') or getattr(self.instance, 'employee', None)
+        date = attrs.get('date') or getattr(self.instance, 'date', None)
+        if employee and date and employee.date_of_joining:
+            if date < employee.date_of_joining:
+                raise serializers.ValidationError({
+                    'date': f"Attendance date ({date}) cannot be prior to employee joining date ({employee.date_of_joining})."
+                })
+        return attrs
 
 
 class LeaveTypeSerializer(serializers.ModelSerializer):
@@ -466,3 +476,14 @@ class EmployeeNotificationSerializer(serializers.ModelSerializer):
         model = EmployeeNotification
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'created_by', 'tenant']
+
+
+class EmployeeAllowanceBonusSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.full_name', read_only=True)
+    employee_code = serializers.CharField(source='employee.employee_code', read_only=True)
+    record_type_display = serializers.CharField(source='get_record_type_display', read_only=True)
+
+    class Meta:
+        model = EmployeeAllowanceBonus
+        exclude = ['tenant']
+        read_only_fields = ['id', 'created_at', 'updated_at']

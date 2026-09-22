@@ -55,10 +55,50 @@ class EmployeeSerializer(serializers.ModelSerializer):
     reporting_manager_name = serializers.CharField(source='reporting_manager.full_name', read_only=True, default='')
     current_ctc = serializers.SerializerMethodField()
 
+    personal_phone = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=15,
+        error_messages={'required': 'Phone number is mandatory.', 'blank': 'Phone number is mandatory.'}
+    )
+    bank_name = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=100,
+        error_messages={'required': 'Bank name is mandatory.', 'blank': 'Bank name is mandatory.'}
+    )
+    bank_account_number = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=20,
+        error_messages={'required': 'Bank account number is mandatory.', 'blank': 'Bank account number is mandatory.'}
+    )
+    bank_ifsc = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=11,
+        error_messages={'required': 'Bank IFSC code is mandatory.', 'blank': 'Bank IFSC code is mandatory.'}
+    )
+    account_holder_name = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=255,
+        error_messages={'required': 'Account holder name is mandatory.', 'blank': 'Account holder name is mandatory.'}
+    )
+
     class Meta:
         model = Employee
         exclude = ['tenant']
         read_only_fields = ['id', 'employee_code', 'created_at', 'updated_at']
+
+    def validate_date_of_birth(self, value):
+        if value:
+            from django.utils import timezone
+            today = timezone.now().date()
+            age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
+            if age < 13:
+                raise serializers.ValidationError("Employee must be at least 13 years old.")
+        return value
 
     def get_current_ctc(self, obj):
         latest = obj.salary_assignments.order_by('-effective_from').first()

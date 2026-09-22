@@ -119,6 +119,7 @@ class Employee(models.Model):
     bank_ifsc = models.CharField(max_length=11, blank=True, null=True)
     bank_name = models.CharField(max_length=100, blank=True, null=True)
     account_holder_name = models.CharField(max_length=255, blank=True, null=True)
+    upi_id = models.CharField(max_length=100, blank=True, null=True)
     uan = models.CharField(max_length=12, blank=True, null=True)
     esi_ip_number = models.CharField(max_length=20, blank=True, null=True)
     user = models.ForeignKey(
@@ -758,7 +759,7 @@ class Payslip(models.Model):
     )
     employee = models.ForeignKey(
         Employee,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name='payslips',
     )
 

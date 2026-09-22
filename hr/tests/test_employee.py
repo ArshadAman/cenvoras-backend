@@ -75,7 +75,12 @@ class EmployeeAPITests(APITestCase):
             'employment_type': 'full_time',
             'department': self.dept_t1.id,
             'designation': self.desig_t1.id,
-            'work_state': 'Maharashtra'
+            'work_state': 'Maharashtra',
+            'personal_phone': '9876543210',
+            'bank_name': 'HDFC Bank',
+            'bank_account_number': '1234567890',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Alice',
         }
         res1 = self.client.post(self.list_url, payload)
         self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
@@ -110,6 +115,11 @@ class EmployeeAPITests(APITestCase):
             'department': self.dept_t1.id,
             'designation': self.desig_t1.id,
             'work_state': 'Maharashtra',
+            'personal_phone': '9876543210',
+            'bank_name': 'HDFC Bank',
+            'bank_account_number': '1234567890',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Alice',
             'user': self.t2_user.id  # Trying to link T2's user to T1's employee
         }
         
@@ -189,3 +199,83 @@ class EmployeeAPITests(APITestCase):
         # Delete
         res_delete = self.client.delete(detail_url)
         self.assertEqual(res_delete.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_employee_validations_dob_phone_bank(self):
+        """Test mandatory phone, age >= 13, and bank details."""
+        self.client.force_authenticate(user=self.tenant1)
+
+        base_payload = {
+            'full_name': 'Validation Tester',
+            'date_of_birth': '2000-01-01',
+            'date_of_joining': '2023-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': self.dept_t1.id,
+            'designation': self.desig_t1.id,
+            'work_state': 'Maharashtra',
+            'personal_phone': '9876543210',
+            'bank_name': 'HDFC Bank',
+            'bank_account_number': '1234567890',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Validation Tester',
+        }
+
+        # 1. Missing phone
+        p1 = dict(base_payload)
+        del p1['personal_phone']
+        r1 = self.client.post(self.list_url, p1)
+        self.assertEqual(r1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('personal_phone', r1.data)
+
+        # 2. DOB under 13 years
+        p2 = dict(base_payload)
+        p2['date_of_birth'] = (datetime.date.today() - datetime.timedelta(days=365*10)).isoformat()
+        r2 = self.client.post(self.list_url, p2)
+        self.assertEqual(r2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('date_of_birth', r2.data)
+
+        # 3. Missing bank details
+        p3 = dict(base_payload)
+        del p3['bank_account_number']
+        r3 = self.client.post(self.list_url, p3)
+        self.assertEqual(r3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('bank_account_number', r3.data)
+
+    def test_delete_employee_with_payslip_cascades_cleanly(self):
+        """Test deleting employee with payslip does not return 500 and cascades."""
+        from decimal import Decimal
+        from hr.models import PayrollRun, Payslip
+        self.client.force_authenticate(user=self.tenant1)
+
+        emp = Employee.objects.create(
+            tenant=self.tenant1,
+            full_name='Deletable Emp',
+            date_of_birth=datetime.date(1995, 1, 1),
+            date_of_joining=datetime.date(2023, 1, 1),
+            gender='M',
+            employment_type='full_time',
+            department=self.dept_t1,
+            designation=self.desig_t1,
+            work_state='Maharashtra',
+            personal_phone='9876543210',
+            bank_name='HDFC',
+            bank_account_number='123456',
+            bank_ifsc='HDFC0001234',
+            account_holder_name='Deletable Emp'
+        )
+
+        pr = PayrollRun.objects.create(
+            tenant=self.tenant1, month=2, year=2025, status='draft',
+            total_gross=Decimal('0'), total_net=Decimal('0')
+        )
+        ps = Payslip.objects.create(
+            tenant=self.tenant1, payroll_run=pr, employee=emp,
+            present_days=20, total_working_days=20,
+            gross_salary=Decimal('50000.00'), net_salary=Decimal('45000.00')
+        )
+
+        detail_url = reverse('employee-detail', args=[emp.id])
+        res = self.client.delete(detail_url)
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Employee.objects.filter(id=emp.id).exists())
+        self.assertFalse(Payslip.objects.filter(id=ps.id).exists())

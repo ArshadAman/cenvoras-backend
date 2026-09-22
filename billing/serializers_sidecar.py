@@ -57,10 +57,26 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
+    dispatched_quantity = serializers.IntegerField(read_only=True)
+    pending_quantity = serializers.IntegerField(read_only=True)
+    fulfillment_status = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = SalesOrderItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'free_quantity', 'unit', 'price', 'discount', 'tax', 'amount']
+        fields = [
+            'id', 'product', 'product_name', 'quantity', 'dispatched_quantity', 
+            'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit', 
+            'price', 'discount', 'tax', 'amount'
+        ]
+
+    def get_fulfillment_status(self, obj):
+        dispatched = obj.dispatched_quantity or 0
+        total = obj.quantity or 0
+        if dispatched == 0:
+            return 'pending'
+        elif dispatched < total:
+            return 'partial'
+        return 'fulfilled'
 
     def to_internal_value(self, data):
         # Allow passing product name instead of UUID

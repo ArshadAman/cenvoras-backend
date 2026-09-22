@@ -89,9 +89,61 @@ def convert_order_to_invoice(request, pk):
         if order.stage == 'completed':
             return Response({"message": "Order has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Parse requested conversion items & quantities
+        items_payload = request.data.get('items')
+        order_items_map = {item.id: item for item in order.items.all()}
+        
+        items_to_invoice = []
+        if items_payload and isinstance(items_payload, list) and len(items_payload) > 0:
+            for entry in items_payload:
+                raw_id = entry.get('id') or entry.get('item_id')
+                if not raw_id:
+                    continue
+                try:
+                    item_id = int(raw_id)
+                except (ValueError, TypeError):
+                    continue
+                
+                order_item = order_items_map.get(item_id)
+                if not order_item:
+                    continue
+                
+                try:
+                    qty = int(entry.get('quantity', 0))
+                except (ValueError, TypeError):
+                    qty = 0
+                
+                if qty <= 0:
+                    continue
+                
+                pending_qty = order_item.pending_quantity
+                if qty > pending_qty:
+                    return Response(
+                        {"message": f"Cannot invoice {qty} for {order_item.product.name}. Only {pending_qty} pending in order."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                items_to_invoice.append((order_item, qty))
+        else:
+            # Fallback: invoice all items with pending quantities
+            for item in order.items.all():
+                if item.pending_quantity > 0:
+                    items_to_invoice.append((item, item.pending_quantity))
+
+        if not items_to_invoice:
+            return Response({"message": "No valid pending items selected for invoice."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Calculate estimated total for credit check
+        est_total = Decimal('0.00')
+        for order_item, inv_qty in items_to_invoice:
+            b_amt = Decimal(str(inv_qty)) * Decimal(str(order_item.price))
+            d_amt = (b_amt * Decimal(str(order_item.discount or 0))) / Decimal('100')
+            t_base = b_amt - d_amt
+            t_amt = (t_base * Decimal(str(order_item.tax or 0))) / Decimal('100')
+            est_total += (t_base + t_amt).quantize(Decimal('0.01'))
+
         # Check credit limit if allow_credit is disabled
         if order.customer and not order.customer.allow_credit:
-            new_balance = order.customer.current_balance + order.total_amount
+            new_balance = order.customer.current_balance + est_total
             if new_balance > order.customer.credit_limit:
                 return Response(
                     {"message": f"Credit limit exceeded. Current: {order.customer.current_balance}, Limit: {order.customer.credit_limit}"},
@@ -108,26 +160,34 @@ def convert_order_to_invoice(request, pk):
             place_of_supply=order.customer.state if order.customer and order.customer.state else None,
             invoice_number=next_invoice_number,
             invoice_date=date.today(),
+            po_number=order.order_number,
             created_by=tenant,
             total_amount=Decimal('0.00'),
             status='final',
         )
 
         raw_items = []
-        for item in order.items.all():
-            item_unit = getattr(item, 'unit', None) or (item.product.unit if item.product else 'pcs') or 'pcs'
-            item_tax = getattr(item, 'tax', None) if getattr(item, 'tax', None) is not None else (item.product.tax if item.product else Decimal('0.00'))
-            item_discount = getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00')
-            item_free_qty = getattr(item, 'free_quantity', 0) or 0
+        for order_item, inv_qty in items_to_invoice:
+            item_unit = getattr(order_item, 'unit', None) or (order_item.product.unit if order_item.product else 'pcs') or 'pcs'
+            item_tax = getattr(order_item, 'tax', None) if getattr(order_item, 'tax', None) is not None else (order_item.product.tax if order_item.product else Decimal('0.00'))
+            item_discount = getattr(order_item, 'discount', Decimal('0.00')) or Decimal('0.00')
+            
+            b_amt = Decimal(str(inv_qty)) * Decimal(str(order_item.price))
+            d_amt = (b_amt * Decimal(str(item_discount))) / Decimal('100')
+            taxable = b_amt - d_amt
+            tax_amt = (taxable * Decimal(str(item_tax))) / Decimal('100')
+            line_amount = (taxable + tax_amt).quantize(Decimal('0.01'))
+
             raw_items.append({
-                'product': item.product,
-                'quantity': item.quantity,
-                'price': item.price,
-                'amount': item.amount,
+                'product': order_item.product,
+                'quantity': inv_qty,
+                'price': order_item.price,
+                'amount': line_amount,
                 'unit': item_unit,
                 'tax': item_tax,
                 'discount': item_discount,
-                'free_quantity': item_free_qty,
+                'free_quantity': 0,
+                'order_item': order_item,
             })
 
         # Evaluate active schemes if any items have free_quantity == 0
@@ -137,7 +197,7 @@ def convert_order_to_invoice(request, pk):
             scheme_res = evaluate_schemes_for_items(tenant=tenant, items=raw_items, evaluation_date=invoice.invoice_date)
             raw_items = scheme_res.get('items', raw_items)
             bonus_items = scheme_res.get('additional_free_items', [])
-        except Exception as e:
+        except Exception:
             pass
 
         for r_item in raw_items:
@@ -152,6 +212,11 @@ def convert_order_to_invoice(request, pk):
                 tax=r_item['tax'],
                 discount=r_item['discount'],
             )
+            # Update order_item dispatched_quantity
+            o_item = r_item.get('order_item')
+            if o_item:
+                o_item.dispatched_quantity = (o_item.dispatched_quantity or 0) + r_item['quantity']
+                o_item.save(update_fields=['dispatched_quantity'])
 
         for b_item in bonus_items:
             b_prod = b_item.get('product')
@@ -193,11 +258,18 @@ def convert_order_to_invoice(request, pk):
         from .serializers import _rebuild_sales_invoice_ledger
         _rebuild_sales_invoice_ledger(invoice.id)
 
-        # Update Order Stage
-        order.stage = 'completed'
+        # Update Order Stage based on fulfillment of all items
+        all_order_items = list(SalesOrderItem.objects.filter(order=order))
+        all_fulfilled = all(item.is_fulfilled for item in all_order_items)
+        any_dispatched = any((item.dispatched_quantity or 0) > 0 for item in all_order_items)
+
+        if all_fulfilled:
+            order.stage = 'completed'
+        elif any_dispatched:
+            order.stage = 'shipped'
         order.save(update_fields=['stage'])
 
-    return Response({"message": "Converted successfully", "invoice_id": invoice.id})
+    return Response({"message": "Converted successfully", "invoice_id": invoice.id, "invoice_number": invoice.invoice_number})
 
 # =============================================================================
 # DELIVERY CHALLAN VIEWS
@@ -379,20 +451,21 @@ def convert_order_to_challan(request, pk):
                 if qty <= 0:
                     continue
                 
-                if qty > order_item.quantity:
+                pending_qty = order_item.pending_quantity
+                if qty > pending_qty:
                     return Response(
-                        {"message": f"Cannot dispatch {qty} for {order_item.product.name}. Only {order_item.quantity} remaining in order."},
+                        {"message": f"Cannot dispatch {qty} for {order_item.product.name}. Only {pending_qty} pending in order."},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 items_to_dispatch.append((order_item, qty))
         else:
-            # Fallback: dispatch all remaining items with their full current quantities
+            # Fallback: dispatch all remaining items with their pending quantities
             for item in order.items.all():
-                if item.quantity > 0:
-                    items_to_dispatch.append((item, item.quantity))
+                if item.pending_quantity > 0:
+                    items_to_dispatch.append((item, item.pending_quantity))
 
         if not items_to_dispatch:
-            return Response({"message": "No valid items selected for dispatch."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"message": "No valid pending items selected for dispatch."}, status=status.HTTP_400_BAD_REQUEST)
 
         total_amount = Decimal('0.00')
         from django.db.models import F
@@ -425,31 +498,23 @@ def convert_order_to_challan(request, pk):
             if dispatch_qty > 0:
                 Product.objects.filter(pk=order_item.product_id).update(stock=F('stock') - dispatch_qty)
 
-            # Decrement Sales Order item quantity
-            remaining_qty = order_item.quantity - dispatch_qty
-            if remaining_qty > 0:
-                order_item.quantity = remaining_qty
-                rem_base = Decimal(str(remaining_qty)) * Decimal(str(order_item.price))
-                rem_disc = (rem_base * Decimal(str(item_discount))) / Decimal('100')
-                rem_taxable = rem_base - rem_disc
-                rem_tax = (rem_taxable * Decimal(str(item_tax))) / Decimal('100')
-                order_item.amount = (rem_taxable + rem_tax).quantize(Decimal('0.01'))
-                order_item.save(update_fields=['quantity', 'amount'])
-            else:
-                order_item.delete()
+            # Update Sales Order item dispatched_quantity (NEVER delete the item!)
+            order_item.dispatched_quantity = (order_item.dispatched_quantity or 0) + dispatch_qty
+            order_item.save(update_fields=['dispatched_quantity'])
 
         challan.total_amount = total_amount
         challan.save(update_fields=['total_amount'])
 
-        # Recalculate remaining order total & update order stage
-        remaining_items = SalesOrderItem.objects.filter(order=order)
-        if remaining_items.exists():
-            order.total_amount = sum(i.amount for i in remaining_items)
-            order.stage = 'shipped'  # Partial dispatch, remains open for further dispatch
-        else:
-            order.total_amount = Decimal('0.00')
-            order.stage = 'completed'  # Fully dispatched!
-        order.save(update_fields=['total_amount', 'stage'])
+        # Update order stage based on item fulfillment
+        all_order_items = list(SalesOrderItem.objects.filter(order=order))
+        all_fulfilled = all(item.is_fulfilled for item in all_order_items)
+        any_dispatched = any((item.dispatched_quantity or 0) > 0 for item in all_order_items)
+
+        if all_fulfilled:
+            order.stage = 'completed'
+        elif any_dispatched:
+            order.stage = 'shipped'
+        order.save(update_fields=['stage'])
 
     return Response({
         "message": "Converted to Delivery Challan successfully",
@@ -463,108 +528,120 @@ def convert_order_to_challan(request, pk):
 def convert_challan_to_invoice(request, pk):
     tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer', 'warehouse').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
     except DeliveryChallan.DoesNotExist:
         return Response({"message": "Delivery Challan not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if challan.is_billed:
         return Response({"message": "Delivery Challan has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
-    with transaction.atomic():
-        challan = DeliveryChallan.objects.select_for_update().select_related('customer', 'warehouse').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
-        if challan.is_billed:
-            return Response({"message": "Delivery Challan has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        with transaction.atomic():
+            challan = DeliveryChallan.objects.select_for_update().select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+            if challan.is_billed:
+                return Response({"message": "Delivery Challan has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Check credit limit
-        if challan.customer and not challan.customer.allow_credit:
-            new_balance = challan.customer.current_balance + challan.total_amount
-            if new_balance > challan.customer.credit_limit:
-                return Response(
-                    {"message": f"Credit limit exceeded. Current: {challan.customer.current_balance}, Limit: {challan.customer.credit_limit}"},
-                    status=status.HTTP_400_BAD_REQUEST
+            # Check credit limit
+            if challan.customer and not challan.customer.allow_credit:
+                new_balance = challan.customer.current_balance + challan.total_amount
+                if new_balance > challan.customer.credit_limit:
+                    return Response(
+                        {"message": f"Credit limit exceeded. Current: {challan.customer.current_balance}, Limit: {challan.customer.credit_limit}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            from billing.sequence_service import allocate_next_number
+            next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+
+            invoice = SalesInvoice(
+                customer=challan.customer,
+                customer_name=challan.customer.name if challan.customer else (challan.customer_name or ''),
+                customer_address=challan.customer_address or (challan.customer.address if challan.customer else ''),
+                place_of_supply=challan.customer.state if challan.customer and challan.customer.state else None,
+                invoice_number=next_invoice_number,
+                invoice_date=date.today(),
+                challan_number=challan.challan_number,
+                challan_date=challan.date,
+                delivery_address=challan.delivery_address,
+                po_number=challan.po_number or (challan.sales_order.order_number if challan.sales_order else ''),
+                po_date=challan.po_date,
+                warehouse=challan.warehouse,
+                round_off=challan.round_off or Decimal('0.00'),
+                total_amount=Decimal('0.00'),  # Set to 0.00 initially so item signals add up cleanly
+                status='final',
+                created_by=tenant,
+            )
+            # CRUCIAL: Set flag so signal does NOT deduct stock a second time!
+            invoice._skip_stock_deduction = True
+            invoice.save()
+
+            for c_item in challan.items.all():
+                inv_item = SalesInvoiceItem(
+                    sales_invoice=invoice,
+                    product=c_item.product,
+                    batch=c_item.batch,
+                    hsn_sac_code=c_item.hsn_sac_code,
+                    quantity=c_item.quantity,
+                    free_quantity=c_item.free_quantity,
+                    price=c_item.price,
+                    amount=c_item.amount,
+                    unit=c_item.unit or 'pcs',
+                    discount=c_item.discount,
+                    tax=c_item.tax,
+                )
+                inv_item._skip_stock_deduction = True
+                inv_item.save()
+
+            invoice.refresh_from_db()
+
+            # Ensure TransactionMeta exists
+            TransactionMeta.objects.get_or_create(invoice=invoice)
+
+            # Accrue loyalty points (1 point per ₹100)
+            if challan.customer and hasattr(challan.customer, 'meta'):
+                try:
+                    points_earned = int(invoice.total_amount / 100)
+                    if points_earned > 0:
+                        challan.customer.meta.loyalty_points += points_earned
+                        challan.customer.meta.save(update_fields=['loyalty_points'])
+                except Exception:
+                    pass
+
+            # Update customer balance
+            if invoice.customer_id:
+                Customer.objects.filter(pk=invoice.customer_id).update(
+                    current_balance=F('current_balance') + invoice.total_amount
                 )
 
-        from billing.sequence_service import allocate_next_number
-        next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+            # Rebuild general ledger entries
+            from .serializers import _rebuild_sales_invoice_ledger
+            _rebuild_sales_invoice_ledger(invoice.id)
 
-        invoice = SalesInvoice(
-            customer=challan.customer,
-            customer_name=challan.customer.name if challan.customer else (challan.customer_name or ''),
-            customer_address=challan.customer_address or (challan.customer.address if challan.customer else ''),
-            place_of_supply=challan.customer.state if challan.customer and challan.customer.state else None,
-            invoice_number=next_invoice_number,
-            invoice_date=date.today(),
-            challan_number=challan.challan_number,
-            challan_date=challan.date,
-            delivery_address=challan.delivery_address,
-            po_number=challan.po_number,
-            po_date=challan.po_date,
-            warehouse=challan.warehouse,
-            round_off=challan.round_off or Decimal('0.00'),
-            total_amount=challan.total_amount,
-            status='final',
-            created_by=tenant,
-        )
-        # CRUCIAL: Set flag so signal does NOT deduct stock a second time!
-        invoice._skip_stock_deduction = True
-        invoice.save()
+            # Update Challan status
+            challan.is_billed = True
+            challan.status = 'billed'
+            challan.converted_invoice = invoice
+            challan.save(update_fields=['is_billed', 'status', 'converted_invoice'])
 
-        for c_item in challan.items.all():
-            inv_item = SalesInvoiceItem(
-                sales_invoice=invoice,
-                product=c_item.product,
-                batch=c_item.batch,
-                hsn_sac_code=c_item.hsn_sac_code,
-                quantity=c_item.quantity,
-                free_quantity=c_item.free_quantity,
-                price=c_item.price,
-                amount=c_item.amount,
-                unit=c_item.unit or 'pcs',
-                discount=c_item.discount,
-                tax=c_item.tax,
-            )
-            inv_item._skip_stock_deduction = True
-            inv_item.save()
+            # If linked to sales order, update sales order stage
+            if challan.sales_order_id:
+                so = SalesOrder.objects.filter(pk=challan.sales_order_id).first()
+                if so:
+                    all_so_items = list(SalesOrderItem.objects.filter(order=so))
+                    if all(i.is_fulfilled for i in all_so_items):
+                        so.stage = 'completed'
+                    else:
+                        so.stage = 'shipped'
+                    so.save(update_fields=['stage'])
 
-        # Ensure TransactionMeta exists
-        TransactionMeta.objects.get_or_create(invoice=invoice)
-
-        # Accrue loyalty points (1 point per ₹100)
-        if challan.customer and hasattr(challan.customer, 'meta'):
-            try:
-                points_earned = int(invoice.total_amount / 100)
-                if points_earned > 0:
-                    challan.customer.meta.loyalty_points += points_earned
-                    challan.customer.meta.save(update_fields=['loyalty_points'])
-            except Exception:
-                pass
-
-        # Update customer balance
-        if invoice.customer_id:
-            Customer.objects.filter(pk=invoice.customer_id).update(
-                current_balance=F('current_balance') + invoice.total_amount
-            )
-
-        # Rebuild general ledger entries
-        from .serializers import _rebuild_sales_invoice_ledger
-        _rebuild_sales_invoice_ledger(invoice.id)
-
-        # Update Challan status
-        challan.is_billed = True
-        challan.status = 'billed'
-        challan.converted_invoice = invoice
-        challan.save(update_fields=['is_billed', 'status', 'converted_invoice'])
-
-        # If linked to sales order, mark sales order completed
-        if challan.sales_order:
-            challan.sales_order.stage = 'completed'
-            challan.sales_order.save(update_fields=['stage'])
-
-    return Response({
-        "message": "Delivery Challan converted to Invoice successfully",
-        "invoice_id": str(invoice.id),
-        "invoice_number": invoice.invoice_number,
-    })
+        return Response({
+            "message": "Delivery Challan converted to Invoice successfully",
+            "invoice_id": str(invoice.id),
+            "invoice_number": invoice.invoice_number,
+        })
+    except Exception as e:
+        logger.error(f"Error converting delivery challan {pk} to invoice: {e}", exc_info=True)
+        return Response({"message": f"Failed to convert: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET', 'POST'])

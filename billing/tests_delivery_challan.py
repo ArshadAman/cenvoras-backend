@@ -119,6 +119,10 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertIsNotNone(detail_res.data["sales_order_details"])
         self.assertEqual(detail_res.data["sales_order_details"]["order_number"], order.order_number)
 
+        # Convert Challan to Invoice
+        inv_res = self.client.post(f"/api/billing/delivery-challans/{challan_id}/convert_to_invoice/")
+        self.assertEqual(inv_res.status_code, status.HTTP_200_OK, inv_res.data)
+
     def test_convert_sales_order_partial_quantity_to_delivery_challan(self):
         """Converting partial quantity (e.g. 3 out of 6) must decrease order quantity and reduce stock accurately."""
         initial_stock = self.product.stock
@@ -160,11 +164,12 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertEqual(challan.items.count(), 1)
         self.assertEqual(challan.items.first().quantity, 3)
 
-        # 3. Order item quantity decreased to 3, stage is shipped (open for remaining)
+        # 3. Order item quantity remains 6, dispatched_quantity is 3, pending_quantity is 3
         order.refresh_from_db()
         order_item.refresh_from_db()
-        self.assertEqual(order_item.quantity, 3)
-        self.assertEqual(order.total_amount, Decimal("1200.00"))
+        self.assertEqual(order_item.quantity, 6)
+        self.assertEqual(order_item.dispatched_quantity, 3)
+        self.assertEqual(order_item.pending_quantity, 3)
         self.assertEqual(order.stage, "shipped")
 
         # 4. Convert the remaining 3
@@ -176,8 +181,48 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertEqual(res2.status_code, status.HTTP_201_CREATED, res2.data)
 
         order.refresh_from_db()
+        order_item.refresh_from_db()
         self.assertEqual(order.stage, "completed")
-        self.assertEqual(order.items.count(), 0)
+        self.assertEqual(order_item.quantity, 6)
+        self.assertEqual(order_item.dispatched_quantity, 6)
+        self.assertEqual(order_item.pending_quantity, 0)
+        self.assertEqual(order.items.count(), 1)  # Items are NEVER deleted!
+
+    def test_convert_sales_order_partial_quantity_to_sales_invoice(self):
+        """Converting partial quantity (e.g. 2 out of 5) to Sales Invoice directly."""
+        order = SalesOrder.objects.create(
+            order_number="SO-INV-PARTIAL",
+            date=date.today(),
+            customer=self.customer,
+            total_amount=Decimal("2000.00"),
+            stage="new",
+            created_by=self.tenant
+        )
+        order_item = SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=5,
+            price=Decimal("400.00"),
+            amount=Decimal("2000.00"),
+            tax=Decimal("0.00"),
+            discount=Decimal("0.00"),
+            unit="pcs"
+        )
+
+        res = self.client.post(
+            f"/api/billing/sales-orders/{order.id}/convert_to_invoice/",
+            data={"items": [{"id": order_item.id, "quantity": 2}]},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.assertIn("invoice_number", res.data)
+
+        order.refresh_from_db()
+        order_item.refresh_from_db()
+        self.assertEqual(order.stage, "shipped")
+        self.assertEqual(order_item.quantity, 5)
+        self.assertEqual(order_item.dispatched_quantity, 2)
+        self.assertEqual(order_item.pending_quantity, 3)
 
     def test_convert_challan_to_invoice_no_double_deduction(self):
         """Converting a delivery challan to sales invoice must NOT double-deduct stock."""

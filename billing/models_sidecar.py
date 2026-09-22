@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 import uuid
 from .models import SalesInvoice, Customer
-from inventory.models import Product, Warehouse
+from inventory.models import Product, Warehouse, ProductBatch
 
 # =============================================================================
 # SIDECAR MODELS (Module 3 - Party & CRM Engine)
@@ -166,23 +166,69 @@ class DeliveryChallan(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     challan_number = models.CharField(max_length=100)
     date = models.DateField()
-    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
-    sales_order = models.ForeignKey(SalesOrder, on_delete=models.SET_NULL, null=True, blank=True)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True)
+    customer_name = models.CharField(max_length=255, null=True, blank=True)
+    customer_address = models.TextField(blank=True, null=True)
+    customer_gstin = models.CharField(max_length=15, blank=True, null=True)
     
+    delivery_address = models.TextField(blank=True, null=True)
+    vehicle_number = models.CharField(max_length=50, blank=True, null=True)
+    transport_mode = models.CharField(max_length=50, blank=True, null=True)
+    eway_bill_number = models.CharField(max_length=50, blank=True, null=True)
+    
+    po_number = models.CharField(max_length=100, blank=True, null=True)
+    po_date = models.DateField(null=True, blank=True)
+    
+    sales_order = models.ForeignKey(SalesOrder, on_delete=models.SET_NULL, null=True, blank=True)
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where goods are dispatched")
+    
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('billed', 'Billed'),
+        ('cancelled', 'Cancelled'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
     is_billed = models.BooleanField(default=False, help_text="True if converted to SalesInvoice")
+    converted_invoice = models.ForeignKey(
+        'billing.SalesInvoice',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='source_delivery_challans'
+    )
+    notes = models.TextField(blank=True, null=True)
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['created_by', 'challan_number']),
+            models.Index(fields=['created_by', 'date']),
+        ]
+
     def __str__(self):
-        return f"DC: {self.challan_number} ({self.customer.name})"
+        cname = self.customer.name if self.customer else (self.customer_name or "Unknown")
+        return f"DC: {self.challan_number} ({cname})"
 
 class DeliveryChallanItem(models.Model):
     challan = models.ForeignKey(DeliveryChallan, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    quantity = models.PositiveIntegerField()
-    
-    # Note: Stock impact happens here. Need signal or method to reduce stock.
+    batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being dispatched")
+    hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
+    quantity = models.PositiveIntegerField(default=1)
+    free_quantity = models.PositiveIntegerField(default=0, help_text="Free/sample quantity dispatched")
+    unit = models.CharField(max_length=20, blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    def __str__(self):
+        return f"{self.product.name} x{self.quantity}"
 
 class PurchaseIndent(models.Model):
     """

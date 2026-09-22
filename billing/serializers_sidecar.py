@@ -16,7 +16,9 @@ from .models_sidecar import (
     Quotation,
     QuotationItem,
 )
-from inventory.models import Product
+from inventory.models import Product, Warehouse, ProductBatch, StockPoint
+from billing.models import Customer
+from django.db.models import F
 
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -172,33 +174,272 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
 class DeliveryChallanItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    
+    product_detail = serializers.SerializerMethodField(read_only=True)
+    batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
+
     class Meta:
         model = DeliveryChallanItem
-        fields = ['id', 'product', 'product_name', 'quantity']
+        fields = [
+            'id',
+            'product',
+            'product_name',
+            'product_detail',
+            'quantity',
+            'free_quantity',
+            'unit',
+            'price',
+            'discount',
+            'tax',
+            'amount',
+            'hsn_sac_code',
+            'batch',
+        ]
+
+    def get_product_detail(self, obj):
+        if not obj.product:
+            return None
+        return {
+            "id": str(obj.product.id),
+            "name": obj.product.name,
+            "description": getattr(obj.product, 'description', '') or '',
+            "hsn_sac_code": getattr(obj.product, 'hsn_sac_code', '') or '',
+            "unit": getattr(obj.product, 'unit', 'pcs') or 'pcs',
+        }
+
+    def _get_tenant(self):
+        request = self.context.get('request')
+        if not request or not hasattr(request, 'user'):
+            raise serializers.ValidationError({'product': 'Authentication required.'})
+        return getattr(request.user, 'active_tenant', request.user)
+
+    def to_internal_value(self, data):
+        mutable = dict(data)
+        product_value = mutable.get('product')
+        if not product_value or not str(product_value).strip():
+            raise serializers.ValidationError({'product': 'Product is required.'})
+
+        tenant = self._get_tenant()
+        can_auto_create = can_auto_create_inventory_product(tenant)
+        product_obj = None
+
+        if isinstance(product_value, str):
+            product_value = product_value.strip()
+
+        try:
+            product_uuid = UUID(str(product_value))
+            product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
+            if not product_obj:
+                raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
+        except (ValueError, TypeError):
+            product_name = str(product_value).strip()
+            product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
+
+            if product_obj:
+                updated_fields = []
+                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                    field_value = mutable.get(field)
+                    if field_value is None:
+                        continue
+                    if isinstance(field_value, str) and not field_value.strip():
+                        continue
+                    setattr(product_obj, field, field_value)
+                    updated_fields.append(field)
+                if updated_fields:
+                    product_obj.save(update_fields=updated_fields)
+            else:
+                if not can_auto_create:
+                    raise serializers.ValidationError({
+                        'product': 'Only Pro and above plans can create new inventory products.'
+                    })
+                product_obj = Product.objects.create(
+                    name=product_name,
+                    hsn_sac_code=mutable.get('hsn_sac_code') or '',
+                    unit=mutable.get('unit') or 'pcs',
+                    price=mutable.get('price') or 0,
+                    tax=mutable.get('tax') or 0,
+                    created_by=tenant,
+                )
+
+        mutable['product'] = str(product_obj.id)
+        return super().to_internal_value(mutable)
+
 
 class DeliveryChallanSerializer(serializers.ModelSerializer):
-    items = DeliveryChallanItemSerializer(many=True)
-    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    items = DeliveryChallanItemSerializer(many=True, required=False)
+    customer_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_gstin = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_details = serializers.SerializerMethodField(read_only=True)
+    challan_number = serializers.CharField(required=False, allow_blank=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = DeliveryChallan
-        fields = ['id', 'challan_number', 'date', 'customer', 'customer_name', 'sales_order', 'is_billed', 'items', 'created_by', 'created_at']
-        read_only_fields = ['id', 'created_at', 'created_by', 'is_billed']
+        fields = [
+            'id',
+            'challan_number',
+            'date',
+            'customer',
+            'customer_name',
+            'customer_address',
+            'customer_gstin',
+            'customer_details',
+            'delivery_address',
+            'vehicle_number',
+            'transport_mode',
+            'eway_bill_number',
+            'po_number',
+            'po_date',
+            'sales_order',
+            'warehouse',
+            'total_amount',
+            'round_off',
+            'status',
+            'is_billed',
+            'converted_invoice',
+            'notes',
+            'items',
+            'created_by',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'created_by', 'is_billed', 'converted_invoice']
+
+    def get_customer_details(self, obj):
+        if obj.customer:
+            return {
+                "id": str(obj.customer.id),
+                "name": obj.customer.name,
+                "address": obj.customer.address or "",
+                "phone": getattr(obj.customer, 'phone', '') or '',
+                "email": getattr(obj.customer, 'email', '') or '',
+                "gstin": getattr(obj.customer, 'gstin', '') or '',
+                "state": getattr(obj.customer, 'state', '') or '',
+            }
+        return {
+            "name": obj.customer_name or "",
+            "address": obj.customer_address or "",
+            "gstin": obj.customer_gstin or "",
+        }
+
+    @staticmethod
+    def _calculate_line_amount(item_data):
+        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
+        price = Decimal(str(item_data.get('price', 0) or 0))
+        discount = Decimal(str(item_data.get('discount', 0) or 0))
+        tax = Decimal(str(item_data.get('tax', 0) or 0))
+
+        base_amount = quantity * price
+        discount_amount = (base_amount * discount) / Decimal('100')
+        taxable_amount = base_amount - discount_amount
+        tax_amount = (taxable_amount * tax) / Decimal('100')
+        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
 
     def create(self, validated_data):
-        items_data = validated_data.pop('items')
-        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
-        
-        challan = DeliveryChallan.objects.create(**validated_data)
-        
+        items_data = validated_data.pop('items', [])
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        validated_data['created_by'] = user
+
+        # Auto-allocate challan number if empty
+        if not validated_data.get('challan_number'):
+            from billing.sequence_service import allocate_next_number
+            raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
+            validated_data['challan_number'] = allocate_next_number(
+                tenant=user,
+                document_type='delivery_challan',
+                prefix=raw_prefix
+            )
+
+        # Smart customer resolution
+        cust_name = validated_data.get('customer_name')
+        if not validated_data.get('customer') and cust_name:
+            existing_cust = Customer.objects.filter(name__iexact=cust_name.strip(), created_by=user).first()
+            if existing_cust:
+                validated_data['customer'] = existing_cust
+            else:
+                validated_data['customer'] = Customer.objects.create(
+                    name=cust_name.strip(),
+                    address=validated_data.get('customer_address') or '',
+                    gstin=validated_data.get('customer_gstin') or '',
+                    created_by=user,
+                )
+
+        # Calculate line amounts and total
+        total = Decimal('0.00')
+        processed_items = []
         for item_data in items_data:
+            line_amt = self._calculate_line_amount(item_data)
+            item_data['amount'] = line_amt
+            total += line_amt
+            processed_items.append(item_data)
+
+        round_off = validated_data.get('round_off', Decimal('0.00')) or Decimal('0.00')
+        validated_data['total_amount'] = total + round_off
+
+        challan = DeliveryChallan.objects.create(**validated_data)
+
+        for item_data in processed_items:
             DeliveryChallanItem.objects.create(challan=challan, **item_data)
-            
-        # TODO: Decrease Stock here (implied by Sidecar Pattern)
-            
+
+        # Deduct stock for dispatched goods
+        target_warehouse = challan.warehouse
+        for item in challan.items.all():
+            eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
+            if eff_qty > 0:
+                Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
+                if item.batch and target_warehouse:
+                    sp, _ = StockPoint.objects.get_or_create(
+                        batch=item.batch, warehouse=target_warehouse, defaults={'quantity': 0}
+                    )
+                    StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
+
         return challan
+
+    def update(self, instance, validated_data):
+        if instance.is_billed:
+            raise serializers.ValidationError({"detail": "Cannot modify an invoiced delivery challan."})
+
+        items_data = validated_data.pop('items', None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if items_data is not None:
+            # Restore stock for existing items
+            old_warehouse = instance.warehouse
+            for old_item in instance.items.all():
+                old_qty = (old_item.quantity or 0) + (old_item.free_quantity or 0)
+                if old_qty > 0:
+                    Product.objects.filter(pk=old_item.product_id).update(stock=F('stock') + old_qty)
+                    if old_item.batch and old_warehouse:
+                        StockPoint.objects.filter(batch=old_item.batch, warehouse=old_warehouse).update(
+                            quantity=F('quantity') + old_qty
+                        )
+
+            instance.items.all().delete()
+
+            total = Decimal('0.00')
+            for item_data in items_data:
+                item_data['amount'] = self._calculate_line_amount(item_data)
+                total += item_data['amount']
+                DeliveryChallanItem.objects.create(challan=instance, **item_data)
+
+            round_off = instance.round_off or Decimal('0.00')
+            instance.total_amount = total + round_off
+
+            # Deduct stock for new items
+            new_warehouse = instance.warehouse
+            for new_item in instance.items.all():
+                eff_qty = (new_item.quantity or 0) + (new_item.free_quantity or 0)
+                if eff_qty > 0:
+                    Product.objects.filter(pk=new_item.product_id).update(stock=F('stock') - eff_qty)
+                    if new_item.batch and new_warehouse:
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch=new_item.batch, warehouse=new_warehouse, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
+
+        instance.save()
+        return instance
 
 class PurchaseIndentItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)

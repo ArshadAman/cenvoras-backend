@@ -42,6 +42,14 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None):
             base = f"{base}-"
         return base
 
+    elif document_type == 'delivery_challan':
+        base = (prefix or 'DC-').strip().upper()
+        if not base.endswith('-'):
+            base = f"{base}-"
+        if tenant_code in base:
+            return base
+        return f"{base}{tenant_code}-"
+
     # Fallback
     base = (prefix or 'DOC-').strip().upper()
     if not base.endswith('-'):

@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from rest_framework.decorators import action
 from django.db import transaction
+from django.db.models import ProtectedError
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -224,9 +225,34 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         }
         audit_service.log_update(self.request, updated, before=before, after=after)
 
-    def perform_destroy(self, instance):
-        audit_service.log_delete(self.request, instance)
-        instance.delete()
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        user_to_delete = instance.user
+
+        try:
+            audit_service.log_delete(self.request, instance)
+            instance.delete()
+        except ProtectedError:
+            return Response(
+                {'detail': 'Cannot delete employee because of protected related records (e.g. historical payroll or leaves). Please mark the employee as inactive or resigned instead.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            logger.exception("Failed to delete employee %s", instance.id)
+            return Response(
+                {'detail': f'Failed to delete employee: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Clean up linked user account if it was an employee user for this tenant
+        if user_to_delete and getattr(user_to_delete, 'role', None) == 'employee' and getattr(user_to_delete, 'parent', None) == tenant:
+            try:
+                user_to_delete.delete()
+            except Exception as e:
+                logger.warning("Could not delete linked user %s for employee: %s", user_to_delete.id, e)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])
     def increment_salary(self, request, pk=None):

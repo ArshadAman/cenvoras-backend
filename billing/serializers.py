@@ -500,8 +500,12 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         if data.get('tax') is None:
             data['tax'] = 0
             
+        # Clean empty batch value
+        if data.get('batch') == '' or data.get('batch') == 'null' or data.get('batch') is None:
+            data.pop('batch', None)
+
         # FEFO Logic: Auto-select batch if not provided
-        if 'batch' not in data and product:
+        if ('batch' not in data or not data.get('batch')) and product:
             print(f"DEBUG SalesInvoiceItemSerializer: No batch provided for {product.name}, attempting FEFO selection")
             # Find batch with earliest expiry that has stock > 0
             # Note: We filter by is_active=True to properly exclude deleted/blocked batches
@@ -522,6 +526,8 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                  if any_batch:
                      data['batch'] = any_batch.id
                      print(f"DEBUG SalesInvoiceItemSerializer: Fallback selected batch {any_batch.batch_number}")
+                 else:
+                     data['batch'] = None
 
         print("DEBUG SalesInvoiceItemSerializer: Product processed successfully, calling super()")
         print("DEBUG SalesInvoiceItemSerializer: Final data before super():", data)

@@ -135,6 +135,8 @@ def track_sale_item_pre_save(sender, instance, **kwargs):
 
 @receiver(post_save, sender=SalesInvoiceItem)
 def decrease_stock_on_sale(sender, instance, created, **kwargs):
+    if getattr(instance, '_skip_stock_deduction', False) or getattr(getattr(instance, 'sales_invoice', None), '_skip_stock_deduction', False):
+        return
     qty_to_remove = _get_item_effective_qty(instance)
     product_id = instance.product_id
     user = getattr(instance.sales_invoice, 'created_by', None)
@@ -232,6 +234,8 @@ def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
 
 @receiver(post_delete, sender=SalesInvoiceItem)
 def increase_stock_on_sale_delete(sender, instance, **kwargs):
+    if getattr(instance, '_skip_stock_deduction', False) or getattr(getattr(instance, 'sales_invoice', None), '_skip_stock_deduction', False):
+        return
     qty_to_restore = _get_item_effective_qty(instance)
     Product.objects.filter(pk=instance.product_id).update(stock=F('stock') + qty_to_restore)
 

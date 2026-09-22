@@ -212,13 +212,15 @@ def delivery_challan_list_create(request):
         status_filter = request.GET.get('status', '').strip()
         ordering = request.GET.get('ordering', '-date').strip() or '-date'
 
-        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse').prefetch_related('items__product', 'items__batch')
+        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch')
         
         if search:
             challans = challans.filter(
                 Q(challan_number__icontains=search) | 
                 Q(customer__name__icontains=search) |
-                Q(customer_name__icontains=search)
+                Q(customer_name__icontains=search) |
+                Q(sales_order__order_number__icontains=search) |
+                Q(vehicle_number__icontains=search)
             )
 
         if status_filter and status_filter != 'all':
@@ -252,7 +254,7 @@ def delivery_challan_list_create(request):
 def delivery_challan_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'converted_invoice').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'converted_invoice', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
     except DeliveryChallan.DoesNotExist:
         return Response({"message": "Delivery Challan not found"}, status=status.HTTP_404_NOT_FOUND)
         

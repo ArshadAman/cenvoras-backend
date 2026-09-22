@@ -231,11 +231,17 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         contacts = [c for c in [f"Ph: {biz_phone}" if biz_phone else "", f"Email: {biz_email}" if biz_email else ""] if c]
         company_info_text += f"{' | '.join(contacts)}<br/>"
 
+    so_ref = ""
+    if hasattr(invoice_obj, 'sales_order') and invoice_obj.sales_order:
+        so_ref = getattr(invoice_obj.sales_order, 'order_number', '') or str(invoice_obj.sales_order_id or '')
+
     invoice_meta_text = (
         f"<font size=13 color='{primary_color.hexval()}'><b>{doc_heading}</b></font><br/>"
         f"<b>{doc_no_label}:</b> {inv_num}<br/>"
         f"<b>Date:</b> {inv_date}<br/>"
     )
+    if so_ref:
+        invoice_meta_text += f"<b>Sales Order:</b> {so_ref}<br/>"
     if vehicle_no:
         invoice_meta_text += f"<b>Vehicle No:</b> {vehicle_no}<br/>"
     if due_date:

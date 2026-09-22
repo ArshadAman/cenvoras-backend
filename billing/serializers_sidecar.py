@@ -270,6 +270,8 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     customer_gstin = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     customer_details = serializers.SerializerMethodField(read_only=True)
+    sales_order_number = serializers.CharField(source='sales_order.order_number', read_only=True, allow_null=True)
+    sales_order_details = serializers.SerializerMethodField(read_only=True)
     challan_number = serializers.CharField(required=False, allow_blank=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
@@ -291,6 +293,8 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             'po_number',
             'po_date',
             'sales_order',
+            'sales_order_number',
+            'sales_order_details',
             'warehouse',
             'total_amount',
             'round_off',
@@ -320,6 +324,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             "address": obj.customer_address or "",
             "gstin": obj.customer_gstin or "",
         }
+
+    def get_sales_order_details(self, obj):
+        if obj.sales_order:
+            return {
+                "id": str(obj.sales_order.id),
+                "order_number": obj.sales_order.order_number,
+                "date": str(obj.sales_order.date),
+                "stage": obj.sales_order.stage,
+                "total_amount": str(obj.sales_order.total_amount),
+            }
+        return None
 
     @staticmethod
     def _calculate_line_amount(item_data):

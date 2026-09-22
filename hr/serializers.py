@@ -285,16 +285,32 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         assignment = super().create(validated_data)
         self._compute_components(assignment)
+        self._log_salary_history(assignment, previous_salary=Decimal('0.00'), reason="Initial salary structure assignment")
         return assignment
 
     def update(self, instance, validated_data):
+        old_ctc = instance.monthly_ctc
         assignment = super().update(instance, validated_data)
         self._compute_components(assignment)
+        if old_ctc != assignment.monthly_ctc:
+            self._log_salary_history(assignment, previous_salary=old_ctc, reason="Salary revision / increment")
         return assignment
+
+    def _log_salary_history(self, assignment, previous_salary, reason):
+        from hr.models import EmployeeSalaryHistory
+        EmployeeSalaryHistory.objects.create(
+            tenant=assignment.tenant,
+            employee=assignment.employee,
+            effective_date=assignment.effective_from,
+            previous_salary=previous_salary,
+            new_salary=assignment.monthly_ctc,
+            salary_structure=assignment.salary_structure,
+            reason=reason,
+        )
 
     def _compute_components(self, assignment):
         ctc = Decimal(str(assignment.monthly_ctc))
-        components = assignment.salary_structure.components.all()
+        components = assignment.salary_structure.components.filter(is_active=True)
 
         basic_comp = next((c for c in components if c.is_basic), None)
         if not basic_comp:
@@ -306,6 +322,7 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
         else:
             basic_value = ctc * (Decimal(str(basic_comp.value)) / Decimal('100.0'))
 
+        total_earnings = Decimal('0.0')
         for comp in components:
             if comp.component_type == 'fixed':
                 val = Decimal(str(comp.value))
@@ -317,6 +334,13 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
                 val = Decimal('0.0')
 
             computed[comp.name] = str(round(val, 2))
+            if comp.type == 'earning':
+                total_earnings += val
+
+        # Balancing component: If total earnings < ctc, add Special Allowance remainder
+        if total_earnings < ctc and 'Special Allowance' not in computed:
+            remainder = ctc - total_earnings
+            computed['Special Allowance'] = str(round(remainder, 2))
 
         assignment.computed_components = computed
         assignment.save(update_fields=['computed_components'])
@@ -424,6 +448,9 @@ class PayslipSerializer(serializers.ModelSerializer):
     bank_ifsc = serializers.CharField(source='employee.bank_ifsc', read_only=True, default='')
     pan_number = serializers.CharField(source='employee.pan_number', read_only=True, default='')
     uan = serializers.CharField(source='employee.uan', read_only=True, default='')
+    month = serializers.IntegerField(source='payroll_run.month', read_only=True)
+    year = serializers.IntegerField(source='payroll_run.year', read_only=True)
+    payroll_run_status = serializers.CharField(source='payroll_run.status', read_only=True)
 
     class Meta:
         model = Payslip

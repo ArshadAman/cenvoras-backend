@@ -21,6 +21,7 @@ class HRAccountingService:
         ('2202', 'ESI Payable', AccountType.LIABILITY),
         ('2203', 'TDS Payable', AccountType.LIABILITY),
         ('2204', 'Professional Tax Payable', AccountType.LIABILITY),
+        ('2205', 'Other Payroll Deductions Payable', AccountType.LIABILITY),
         ('1250', 'Employee Advances & Loans', AccountType.ASSET),
     ]
 
@@ -179,6 +180,19 @@ class HRAccountingService:
                 created_by=tenant,
             )
 
+        # 9. Cr. Other Payroll Deductions (Custom structure deductions / LOP balancing)
+        total_other_deductions = (total_gross - (total_net + total_emp_pf + total_emp_esi + total_tds + total_pt + total_advances)).quantize(Decimal('0.01'))
+        if total_other_deductions > 0:
+            GeneralLedgerEntry.objects.create(
+                date=entry_date,
+                account=accounts['2205'],
+                debit=Decimal('0.00'),
+                credit=total_other_deductions,
+                description=f"Other Payroll Deductions for {period_label}",
+                reference=ref,
+                created_by=tenant,
+            )
+
     @classmethod
     @transaction.atomic
     def post_payroll_disbursement(cls, payroll_run, payment_account, user):
@@ -259,16 +273,49 @@ class HRAccountingService:
                     )
                     remaining_to_deduct -= deduct
 
+        # Mark non-recurring approved allowances/bonuses as 'paid' for this period
+        from hr.models import EmployeeAllowanceBonus
+        EmployeeAllowanceBonus.objects.filter(
+            tenant=tenant,
+            is_recurring=False,
+            status='approved',
+            effective_date__year=payroll_run.year,
+            effective_date__month=payroll_run.month,
+        ).update(status='paid')
+
     @classmethod
     @transaction.atomic
     def reverse_payroll_accrual(cls, payroll_run, user, reason):
         """
         Reverses accounting entries when a locked or approved payroll run is reopened.
+        Restores employee loan outstanding balances before deleting recovery logs.
         """
         tenant = payroll_run.tenant
         accrual_ref = f"PAYROLL-ACCRUAL-{payroll_run.year}-{payroll_run.month:02d}"
         payment_ref = f"PAYROLL-PAID-{payroll_run.year}-{payroll_run.month:02d}"
 
-        # Remove both accrual and payment ledger entries
+        # 1. Restore loan outstanding balances from recovery logs before deleting
+        recovery_logs = LoanRecoveryLog.objects.filter(
+            payslip__payroll_run=payroll_run
+        ).select_related('loan')
+
+        for log in recovery_logs:
+            loan = log.loan
+            loan.outstanding_balance += log.amount_recovered
+            if loan.status in ['fully_recovered', 'closed']:
+                loan.status = 'active'
+            loan.save(update_fields=['outstanding_balance', 'status'])
+
+        # 2. Reset any allowances/bonuses marked 'paid' back to 'approved'
+        from hr.models import EmployeeAllowanceBonus
+        EmployeeAllowanceBonus.objects.filter(
+            tenant=tenant,
+            is_recurring=False,
+            status='paid',
+            effective_date__year=payroll_run.year,
+            effective_date__month=payroll_run.month,
+        ).update(status='approved')
+
+        # 3. Remove both accrual and payment ledger entries
         GeneralLedgerEntry.objects.filter(created_by=tenant, reference__in=[accrual_ref, payment_ref]).delete()
         LoanRecoveryLog.objects.filter(payslip__payroll_run=payroll_run).delete()

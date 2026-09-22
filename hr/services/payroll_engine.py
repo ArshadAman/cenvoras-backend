@@ -7,7 +7,7 @@ from hr.models import (
     PayrollRun, Employee, Payslip, AttendanceRecord,
     EmployeeSalaryAssignment, ProfessionalTaxSlab,
     OvertimeRecord, EmployeeAdvanceLoan, HRMSSettings,
-    EmployeeAllowanceBonus
+    EmployeeAllowanceBonus, LeaveApplication
 )
 from .exceptions_service import scan_payroll_exceptions
 
@@ -16,6 +16,24 @@ def get_hrms_settings(tenant):
     """Retrieve or create default tenant HRMS configuration."""
     settings, _ = HRMSSettings.objects.get_or_create(tenant=tenant)
     return settings
+
+
+def apply_rounding(amount, rounding_rule='nearest_one'):
+    """
+    Rounds an amount according to tenant HRMSSettings.salary_rounding:
+    - 'nearest_one': Rounds to the nearest ₹1 (e.g., 23800.40 -> 23800.00, 23800.50 -> 23801.00)
+    - 'nearest_ten': Rounds to the nearest ₹10 (e.g., 23804.00 -> 23800.00, 23806.00 -> 23810.00)
+    - 'exact': Keeps exact 2 decimal places.
+    """
+    amt = Decimal(str(amount))
+    if rounding_rule == 'nearest_ten':
+        val = round(float(amt) / 10.0) * 10
+        return Decimal(str(f"{val:.2f}"))
+    elif rounding_rule == 'exact':
+        return amt.quantize(Decimal('0.01'))
+    else:  # default 'nearest_one'
+        val = round(float(amt))
+        return Decimal(str(f"{val:.2f}"))
 
 
 def get_total_working_days(month, year, lop_rule='working_days'):
@@ -36,63 +54,97 @@ def get_total_working_days(month, year, lop_rule='working_days'):
 def get_attendance_breakdown(employee, month, year, total_working_days):
     """
     Computes effective present days, paid leave days, absent days, and LOP days.
+    Guarantees:
+    1. Unlogged days between joining date and month-end default to present (no partial-log penalty).
+    2. Mid-month joiners count pre-joining days as LOP while preserving post-joining absences.
+    3. Unpaid leaves and quota-exhausted leaves are tracked as LOP, not paid days.
     """
     start_date = datetime.date(year, month, 1)
-    end_date = datetime.date(year, month, calendar.monthrange(year, month)[1])
+    days_in_month = calendar.monthrange(year, month)[1]
+    end_date = datetime.date(year, month, days_in_month)
 
-    # Account for mid-month joinee
     doj = employee.date_of_joining
     if isinstance(doj, str):
         try:
             doj = datetime.date.fromisoformat(doj)
         except (ValueError, TypeError):
             doj = start_date
-    effective_start = max(start_date, doj) if doj else start_date
 
-    records = AttendanceRecord.objects.filter(
-        employee=employee,
-        date__range=(start_date, end_date)
-    )
-
-    present_days = Decimal('0.0')
-    paid_leave_days = Decimal('0.0')
-    absent_days = Decimal('0.0')
-    lop_days = Decimal('0.0')
-
-    has_records = records.exists()
-
-    if has_records:
-        for rec in records:
-            if rec.status == 'present':
-                present_days += Decimal('1.0')
-            elif rec.status == 'half_day':
-                present_days += Decimal('0.5')
-                lop_days += Decimal('0.5')
-            elif rec.status in ('leave', 'holiday'):
-                present_days += Decimal('1.0')
-                if rec.status == 'leave':
-                    paid_leave_days += Decimal('1.0')
-            elif rec.status == 'absent':
-                absent_days += Decimal('1.0')
-                lop_days += Decimal('1.0')
-    else:
-        # If no daily attendance entered, default to full working days present
-        present_days = Decimal(str(total_working_days))
-
-    # Mid-month joining proration
+    # Mid-month joining days before joining date
+    days_before_joining = 0
     if doj and doj > start_date and doj <= end_date:
-        days_before_joining = 0
         for d in range(1, doj.day):
             if datetime.date(year, month, d).isoweekday() != 7:
                 days_before_joining += 1
-        lop_days += Decimal(str(days_before_joining))
-        present_days = max(Decimal('0.0'), Decimal(str(total_working_days)) - lop_days)
+
+    records = {
+        r.date: r for r in AttendanceRecord.objects.filter(
+            employee=employee,
+            date__range=(start_date, end_date)
+        )
+    }
+
+    # Pre-fetch approved unpaid/LWP leave dates for accurate LOP detection
+    approved_leaves = LeaveApplication.objects.filter(
+        employee=employee,
+        status='approved',
+        start_date__lte=end_date,
+        end_date__gte=start_date
+    ).select_related('leave_type')
+
+    unpaid_leave_dates = set()
+    for app in approved_leaves:
+        if not app.leave_type.is_paid or app.lwp_days > 0:
+            cur = max(app.start_date, start_date)
+            app_end = min(app.end_date, end_date)
+            while cur <= app_end:
+                if cur.isoweekday() != 7:
+                    unpaid_leave_dates.add(cur)
+                cur += datetime.timedelta(days=1)
+
+    absent_days = Decimal('0.0')
+    paid_leave_days = Decimal('0.0')
+    logged_lop_days = Decimal('0.0')
+    absent_dates_list = []
+    unpaid_leave_dates_list = []
+
+    for d in range(1, days_in_month + 1):
+        cur_date = datetime.date(year, month, d)
+        if cur_date.isoweekday() == 7:
+            continue  # Sunday
+
+        # If before joining, it's counted in days_before_joining
+        if doj and cur_date < doj:
+            continue
+
+        rec = records.get(cur_date)
+        if rec:
+            if rec.status == 'absent':
+                absent_days += Decimal('1.0')
+                logged_lop_days += Decimal('1.0')
+                absent_dates_list.append(str(cur_date))
+            elif rec.status == 'half_day':
+                absent_days += Decimal('0.5')
+                logged_lop_days += Decimal('0.5')
+                absent_dates_list.append(f"{cur_date} (half-day)")
+            elif rec.status == 'leave':
+                if cur_date in unpaid_leave_dates:
+                    logged_lop_days += Decimal('1.0')
+                    unpaid_leave_dates_list.append(str(cur_date))
+                else:
+                    paid_leave_days += Decimal('1.0')
+
+    total_lop = Decimal(str(days_before_joining)) + logged_lop_days
+    effective_present = max(Decimal('0.0'), Decimal(str(total_working_days)) - total_lop)
 
     return {
-        'present_days': present_days,
+        'present_days': effective_present,
         'paid_leave_days': paid_leave_days,
         'absent_days': absent_days,
-        'lop_days': lop_days,
+        'lop_days': total_lop,
+        'days_before_joining': days_before_joining,
+        'absent_dates': absent_dates_list,
+        'unpaid_leave_dates': unpaid_leave_dates_list,
     }
 
 
@@ -123,7 +175,7 @@ def compute_overtime(employee, month, year):
 def compute_pf(basic_salary, hrms_settings=None):
     """
     Computes Employee PF and Employer PF contributions.
-    Supports statutory ₹15,000 wage ceiling if configured.
+    Supports statutory ₹15,000 wage ceiling and ₹1,250 statutory EPS cap.
     """
     basic = Decimal(str(basic_salary))
     if hrms_settings and hrms_settings.pf_apply_ceiling:
@@ -136,8 +188,16 @@ def compute_pf(basic_salary, hrms_settings=None):
 
     emp_pf = (pf_wage * emp_rate).quantize(Decimal('0.01'))
     employer_pf = (pf_wage * empr_rate).quantize(Decimal('0.01'))
-    employer_epf = (pf_wage * Decimal('0.0367')).quantize(Decimal('0.01'))
-    employer_eps = (pf_wage * Decimal('0.0833')).quantize(Decimal('0.01'))
+
+    # Statutory EPFO EPS Cap: 8.33% capped at ₹1,250 (which is 8.33% of ₹15,000 ceiling).
+    # The remainder of the 12% employer contribution goes to EPF.
+    eps_wage_ceiling = Decimal('15000.00')
+    eps_wage = min(pf_wage, eps_wage_ceiling)
+    if eps_wage >= eps_wage_ceiling:
+        employer_eps = Decimal('1250.00')
+    else:
+        employer_eps = min(Decimal(str(round(float(eps_wage) * (8.33 / 100.0), 2))), Decimal('1250.00'))
+    employer_epf = max(Decimal('0.00'), employer_pf - employer_eps)
 
     return {
         'employee_pf': emp_pf,
@@ -210,7 +270,9 @@ def compute_pt(gross_salary, work_state):
 
 def compute_gross(employee, month, year):
     """
-    Computes prorated gross salary from the employee's active salary assignment and attendance.
+    Computes prorated gross salary, differentiating earning components from deduction components.
+    Ensures that components defined with type='earning' form the gross salary,
+    while type='deduction' components are categorized as deductions.
     """
     start_date = datetime.date(year, month, 1)
     end_date = datetime.date(year, month, calendar.monthrange(year, month)[1])
@@ -221,33 +283,58 @@ def compute_gross(employee, month, year):
     ).order_by('-effective_from').first()
 
     if not assignment:
-        return Decimal('0.0'), None, Decimal('0.0')
+        return Decimal('0.0'), None, Decimal('0.0'), {}, {}
 
     settings = get_hrms_settings(employee.tenant)
     working_days = Decimal(str(get_total_working_days(month, year, settings.lop_calculation_rule)))
 
     if working_days == Decimal('0.0'):
-        return Decimal('0.0'), assignment, Decimal('0.0')
+        return Decimal('0.0'), assignment, Decimal('0.0'), {}, {}
 
     breakdown = get_attendance_breakdown(employee, month, year, int(working_days))
     present_days = breakdown['present_days']
 
-    computed_components = assignment.computed_components
-    total_monthly_gross = Decimal('0.0')
-
-    for comp_name, value in computed_components.items():
-        total_monthly_gross += Decimal(str(value))
-
     proration_factor = present_days / working_days
+
+    # Separate earnings from deductions based on SalaryStructure component types
+    structure_components = {c.name: c for c in assignment.salary_structure.components.all()}
+    
+    total_monthly_gross = Decimal('0.0')
+    earnings_map = {}
+    custom_deductions_map = {}
+
+    for comp_name, value_str in assignment.computed_components.items():
+        comp_obj = structure_components.get(comp_name)
+        comp_type = comp_obj.type if comp_obj else 'earning'
+        val = Decimal(str(value_str))
+
+        if comp_type == 'deduction':
+            # Custom deduction defined in salary structure (e.g. Canteen, Transport)
+            prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
+            custom_deductions_map[comp_name] = prorated_val
+        else:
+            total_monthly_gross += val
+            prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
+            earnings_map[comp_name] = prorated_val
+
+    # Balancing Component: If total earnings < monthly_ctc and no component covers it,
+    # allocate remainder to Special Allowance so employee receives full assigned compensation.
+    monthly_ctc = Decimal(str(assignment.monthly_ctc))
+    if total_monthly_gross < monthly_ctc and 'Special Allowance' not in earnings_map:
+        remainder = monthly_ctc - total_monthly_gross
+        total_monthly_gross = monthly_ctc
+        earnings_map['Special Allowance'] = (remainder * proration_factor).quantize(Decimal('0.01'))
+
     prorated_gross = (total_monthly_gross * proration_factor).quantize(Decimal('0.01'))
 
-    return prorated_gross, assignment, proration_factor
+    return prorated_gross, assignment, proration_factor, earnings_map, custom_deductions_map
 
 
 def compute_advances_and_loans(employee, gross_available, allow_negative=False):
     """
     Calculates monthly installment recovery for active advances and loans.
     Deduction is strictly capped at the outstanding balance.
+    Returns: advance_deduction, loan_deduction, recovery_details list
     """
     active_loans = EmployeeAdvanceLoan.objects.filter(
         employee=employee,
@@ -258,6 +345,7 @@ def compute_advances_and_loans(employee, gross_available, allow_negative=False):
     advance_deduction = Decimal('0.00')
     loan_deduction = Decimal('0.00')
     available = Decimal(str(gross_available))
+    recovery_details = []
 
     for loan in active_loans:
         if not allow_negative and available <= 0:
@@ -273,13 +361,21 @@ def compute_advances_and_loans(employee, gross_available, allow_negative=False):
             loan_deduction += installment
 
         available -= installment
+        recovery_details.append({
+            'loan_id': str(loan.id),
+            'record_type': loan.record_type,
+            'installment': installment,
+            'remaining_after': loan.outstanding_balance - installment,
+            'reason': f"{loan.get_record_type_display()} EMI recovery (Balance after: ₹{loan.outstanding_balance - installment})"
+        })
 
-    return advance_deduction, loan_deduction
+    return advance_deduction, loan_deduction, recovery_details
 
 
 def compute_payslip_for_employee(employee, payroll_run):
     """
     Computes a complete, transparent payslip for an employee within a payroll run.
+    Stores itemized earnings, deductions, and user-facing deduction reasons.
     """
     month = payroll_run.month
     year = payroll_run.year
@@ -289,7 +385,7 @@ def compute_payslip_for_employee(employee, payroll_run):
     working_days = get_total_working_days(month, year, settings.lop_calculation_rule)
     breakdown = get_attendance_breakdown(employee, month, year, working_days)
 
-    prorated_gross, assignment, proration_factor = compute_gross(employee, month, year)
+    prorated_gross, assignment, proration_factor, earnings_map, custom_deductions = compute_gross(employee, month, year)
 
     if not assignment:
         return None
@@ -322,27 +418,38 @@ def compute_payslip_for_employee(employee, payroll_run):
     tds_val = compute_tds(gross_with_earnings)
     pt_val = compute_pt(gross_with_earnings, employee.work_state)
 
+    # Custom deductions total
+    custom_deductions_total = sum(custom_deductions.values(), Decimal('0.00'))
+
     # Statutory Deductions subtotal
     statutory_deductions = (
         pf_details['employee_pf'] +
         esi_details['employee_esi'] +
         tds_val +
-        pt_val
+        pt_val +
+        custom_deductions_total
     )
 
     available_for_loans = max(Decimal('0.00'), gross_with_earnings - statutory_deductions)
-    advance_rec, loan_rec = compute_advances_and_loans(employee, available_for_loans, settings.allow_negative_salary)
+    advance_rec, loan_rec, loan_recovery_details = compute_advances_and_loans(
+        employee, available_for_loans, settings.allow_negative_salary
+    )
 
-    total_deductions = (statutory_deductions + advance_rec + loan_rec).quantize(Decimal('0.01'))
-    net_salary = (gross_with_earnings - total_deductions).quantize(Decimal('0.01'))
+    raw_total_deductions = (statutory_deductions + advance_rec + loan_rec).quantize(Decimal('0.01'))
+    raw_net_salary = (gross_with_earnings - raw_total_deductions).quantize(Decimal('0.01'))
+
+    # Apply tenant salary rounding rule
+    rounding_rule = settings.salary_rounding or 'nearest_one'
+    net_salary = apply_rounding(raw_net_salary, rounding_rule)
+    total_deductions = (gross_with_earnings - net_salary).quantize(Decimal('0.01'))
 
     # Employer Contributions
     employer_total = (pf_details['employer_pf'] + esi_details['employer_esi']).quantize(Decimal('0.01'))
 
     # Itemized Breakdown
     earnings = {}
-    for cname, cval in assignment.computed_components.items():
-        earnings[cname] = str((Decimal(str(cval)) * proration_factor).quantize(Decimal('0.01')))
+    for cname, cval in earnings_map.items():
+        earnings[cname] = str(cval)
 
     if ot_amount > 0:
         earnings['Overtime'] = str(ot_amount)
@@ -351,16 +458,82 @@ def compute_payslip_for_employee(employee, payroll_run):
         key_label = f"{ab.get_record_type_display()}: {ab.title}"
         earnings[key_label] = str(Decimal(str(ab.amount)).quantize(Decimal('0.01')))
 
-    deductions = {
-        'PF': str(pf_details['employee_pf']),
-        'ESI': str(esi_details['employee_esi']),
-        'TDS': str(tds_val),
-        'PT': str(pt_val),
-    }
+    deductions = {}
+    deduction_reasons = {}
+
+    # 1. Loss of Pay (LOP) Reason
+    if breakdown['lop_days'] > 0:
+        lop_reasons = []
+        if breakdown['days_before_joining'] > 0:
+            lop_reasons.append(f"{breakdown['days_before_joining']} day(s) before joining ({employee.date_of_joining})")
+        if breakdown['absent_dates']:
+            lop_reasons.append(f"Absences on: {', '.join(breakdown['absent_dates'][:4])}")
+        if breakdown['unpaid_leave_dates']:
+            lop_reasons.append(f"Unpaid leave on: {', '.join(breakdown['unpaid_leave_dates'][:4])}")
+        
+        reason_text = f"Prorated salary based on {breakdown['present_days']} present days of {working_days} working days. " + "; ".join(lop_reasons)
+        deduction_reasons['Loss of Pay (LOP)'] = {
+            'days': str(breakdown['lop_days']),
+            'reason': reason_text
+        }
+
+    # 2. Provident Fund (PF)
+    if pf_details['employee_pf'] > 0:
+        deductions['PF'] = str(pf_details['employee_pf'])
+        deduction_reasons['PF'] = {
+            'amount': str(pf_details['employee_pf']),
+            'reason': f"Employee statutory 12% contribution on Basic salary ₹{basic_salary}"
+        }
+
+    # 3. Employee State Insurance (ESI)
+    if esi_details['employee_esi'] > 0:
+        deductions['ESI'] = str(esi_details['employee_esi'])
+        deduction_reasons['ESI'] = {
+            'amount': str(esi_details['employee_esi']),
+            'reason': f"Employee statutory 0.75% contribution on gross ₹{gross_with_earnings} (≤ ₹21,000 threshold)"
+        }
+
+    # 4. Tax Deducted at Source (TDS)
+    if tds_val > 0:
+        deductions['TDS'] = str(tds_val)
+        deduction_reasons['TDS'] = {
+            'amount': str(tds_val),
+            'reason': f"Estimated monthly Income Tax withholding under Sec 192 (Projected Annual Gross: ₹{gross_with_earnings * 12})"
+        }
+
+    # 5. Professional Tax (PT)
+    if pt_val > 0:
+        deductions['PT'] = str(pt_val)
+        deduction_reasons['PT'] = {
+            'amount': str(pt_val),
+            'reason': f"State statutory Professional Tax slab deduction for {employee.work_state or 'registered state'}"
+        }
+
+    # 6. Custom Structure Deductions
+    for cname, cval in custom_deductions.items():
+        deductions[cname] = str(cval)
+        deduction_reasons[cname] = {
+            'amount': str(cval),
+            'reason': f"Recurring salary deduction component defined in {assignment.salary_structure.name}"
+        }
+
+    # 7. Salary Advance Recovery
     if advance_rec > 0:
         deductions['Salary Advance Recovery'] = str(advance_rec)
+        adv_details = [d['reason'] for d in loan_recovery_details if d['record_type'] == 'advance']
+        deduction_reasons['Salary Advance Recovery'] = {
+            'amount': str(advance_rec),
+            'reason': "; ".join(adv_details) or "Monthly salary advance recovery installment"
+        }
+
+    # 8. Loan Recovery
     if loan_rec > 0:
         deductions['Loan Recovery'] = str(loan_rec)
+        ln_details = [d['reason'] for d in loan_recovery_details if d['record_type'] == 'loan']
+        deduction_reasons['Loan Recovery'] = {
+            'amount': str(loan_rec),
+            'reason': "; ".join(ln_details) or "Monthly personal loan recovery installment"
+        }
 
     payslip = Payslip(
         tenant=tenant,
@@ -376,6 +549,7 @@ def compute_payslip_for_employee(employee, payroll_run):
         gross_salary=gross_with_earnings,
         earnings=earnings,
         deductions=deductions,
+        deduction_reasons=deduction_reasons,
         employee_pf=pf_details['employee_pf'],
         employee_esi=esi_details['employee_esi'],
         tds=tds_val,
@@ -395,7 +569,7 @@ def compute_payslip_for_employee(employee, payroll_run):
 
 def run_payroll(payroll_run_id):
     """
-    Executes the monthly payroll computation for all active employees.
+    Executes the monthly payroll computation for all eligible employees.
     Atomic, deterministic, and traceable.
     """
     try:
@@ -406,14 +580,19 @@ def run_payroll(payroll_run_id):
     with transaction.atomic():
         Payslip.objects.filter(payroll_run=run).delete()
 
-        # Eligible employees: joined on or before month-end, not resigned or terminated
+        # Eligible employees: joined on or before month-end
+        # Include active/probation employees, plus any employee who logged attendance in this month
         days_in_month = calendar.monthrange(run.year, run.month)[1]
+        start_date = datetime.date(run.year, run.month, 1)
         end_date = datetime.date(run.year, run.month, days_in_month)
 
         employees = Employee.objects.filter(
             tenant=run.tenant,
             date_of_joining__lte=end_date,
-        ).exclude(status__in=['resigned', 'terminated'])
+        ).filter(
+            Q(status__in=['active', 'probation', 'notice_period']) |
+            Q(attendance_records__date__range=(start_date, end_date))
+        ).distinct()
 
         payslips_to_create = []
         total_gross = Decimal('0.00')

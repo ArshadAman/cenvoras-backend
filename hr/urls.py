@@ -11,7 +11,8 @@ from .views import (
     PayslipPDFView, HRDashboardView, SetupDefaultsView,
     EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet,
     EmployeeSalaryHistoryViewSet, OvertimeRecordViewSet, EmployeeAdvanceLoanViewSet,
-    PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView
+    PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView,
+    EmployeeAllowanceBonusViewSet
 )
 
 router = DefaultRouter()
@@ -21,6 +22,7 @@ router.register(r'employees', EmployeeViewSet, basename='employee')
 router.register(r'salary-history', EmployeeSalaryHistoryViewSet, basename='salary-history')
 router.register(r'overtime', OvertimeRecordViewSet, basename='overtime')
 router.register(r'advances-loans', EmployeeAdvanceLoanViewSet, basename='advance-loan')
+router.register(r'allowances-bonuses', EmployeeAllowanceBonusViewSet, basename='allowance-bonus')
 router.register(r'exceptions', PayrollExceptionViewSet, basename='payroll-exception')
 router.register(r'documents', HRDocumentViewSet, basename='hr-document')
 router.register(r'attendance', AttendanceViewSet, basename='attendance')

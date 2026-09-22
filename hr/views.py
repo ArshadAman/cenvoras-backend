@@ -19,7 +19,7 @@ from .models import (
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
     PayrollRun, Payslip, EmployeeSalaryHistory, OvertimeRecord,
     EmployeeAdvanceLoan, LoanRecoveryLog, PayrollException,
-    HRDocument, HRMSSettings
+    HRDocument, HRMSSettings, EmployeeAllowanceBonus
 )
 from .serializers import (
     DepartmentSerializer, DesignationSerializer, EmployeeSerializer,
@@ -27,7 +27,8 @@ from .serializers import (
     LeaveApplicationSerializer, SalaryStructureSerializer, EmployeeSalaryAssignmentSerializer,
     PayrollRunSerializer, PayslipSerializer, EmployeeSalaryHistorySerializer,
     OvertimeRecordSerializer, EmployeeAdvanceLoanSerializer, LoanRecoveryLogSerializer,
-    PayrollExceptionSerializer, HRDocumentSerializer, HRMSSettingsSerializer
+    PayrollExceptionSerializer, HRDocumentSerializer, HRMSSettingsSerializer,
+    EmployeeAllowanceBonusSerializer
 )
 from .permissions import HRPermission
 from .services import audit_service, leave_service
@@ -509,6 +510,12 @@ class BulkAttendanceView(APIView):
                     emp = Employee.objects.get(id=employee_id, tenant=tenant)
                 except Employee.DoesNotExist:
                     continue
+
+                if emp.date_of_joining:
+                    import datetime
+                    rec_date = datetime.date.fromisoformat(date) if isinstance(date, str) else date
+                    if rec_date < emp.date_of_joining:
+                        continue
                 
                 record = AttendanceRecord.objects.filter(employee=emp, date=date).first()
                 if not record:
@@ -618,8 +625,17 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
             
         start_date = serializer.validated_data['start_date']
         end_date = serializer.validated_data['end_date']
+        leave_type = serializer.validated_data['leave_type']
         
         computed_days = leave_service.compute_leave_days(start_date, end_date, employee)
+
+        if leave_type.is_paid:
+            year = start_date.year
+            bal_record = leave_service.get_or_init_leave_balance(employee, leave_type, year)
+            if bal_record.balance <= 0:
+                raise ValidationError({"leave_type": f"Your paid leave quota for '{leave_type.name}' is fully exhausted (0 days remaining). Additional paid leave cannot be taken."})
+            if computed_days > bal_record.balance:
+                raise ValidationError({"end_date": f"Insufficient paid leave balance. You have {bal_record.balance} days available for '{leave_type.name}', but requested {computed_days} days. Additional paid leave cannot be taken once your quota is exhausted."})
         
         instance = serializer.save(tenant=tenant, computed_days=computed_days, status='pending')
         audit_service.log_create(self.request, instance, changes={
@@ -1736,9 +1752,9 @@ class HRReportsView(APIView):
                     "bank_account": p.employee.bank_account_number or '—',
                     "ifsc": p.employee.bank_ifsc or '—',
                     "pan": p.employee.pan_number or '—',
-                    "working_days": str(p.working_days),
+                    "working_days": str(p.total_working_days),
                     "lop_days": str(p.lop_days),
-                    "gross_salary": str(p.gross_earnings),
+                    "gross_salary": str(p.gross_salary),
                     "total_deductions": str(p.total_deductions),
                     "net_salary": str(p.net_salary),
                     "employer_contribution": str(p.employer_total_contribution),
@@ -1747,7 +1763,6 @@ class HRReportsView(APIView):
             return Response({"year": year, "month": month, "count": len(records), "records": records}, status=status.HTTP_200_OK)
 
         elif report_type == 'department_expenses':
-            from django.db.models import Sum
             payslips = Payslip.objects.filter(
                 payroll_run__tenant=tenant,
                 payroll_run__year=year,
@@ -1767,7 +1782,7 @@ class HRReportsView(APIView):
                         "employer_contribution": Decimal('0.00')
                     }
                 dept_map[dept_name]["headcount"] += 1
-                dept_map[dept_name]["gross"] += p.gross_earnings
+                dept_map[dept_name]["gross"] += p.gross_salary
                 dept_map[dept_name]["net"] += p.net_salary
                 dept_map[dept_name]["deductions"] += p.total_deductions
                 dept_map[dept_name]["employer_contribution"] += p.employer_total_contribution
@@ -1799,14 +1814,12 @@ class HRReportsView(APIView):
             total_employer_esi = Decimal('0.00')
 
             for p in payslips:
-                total_pf += p.pf_deduction
-                total_esi += p.esi_deduction
-                total_pt += p.pt_deduction
-                total_tds += p.tds_deduction
-                # check component breakdown if available
-                breakdown = p.employer_contribution_breakdown or {}
-                total_employer_pf += Decimal(str(breakdown.get('pf', 0)))
-                total_employer_esi += Decimal(str(breakdown.get('esi', 0)))
+                total_pf += p.employee_pf
+                total_esi += p.employee_esi
+                total_pt += p.professional_tax
+                total_tds += p.tds
+                total_employer_pf += p.employer_pf
+                total_employer_esi += p.employer_esi
 
             return Response({
                 "year": year,
@@ -1822,3 +1835,45 @@ class HRReportsView(APIView):
             }, status=status.HTTP_200_OK)
 
         return Response({"error": "Unknown report type."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class EmployeeAllowanceBonusViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for tracking and managing employee allowances and bonuses.
+    """
+    serializer_class = EmployeeAllowanceBonusSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        if user.role == 'employee':
+            return EmployeeAllowanceBonus.objects.filter(employee__user=user).select_related('employee')
+        qs = EmployeeAllowanceBonus.objects.filter(tenant=tenant).select_related('employee')
+        rec_type = self.request.query_params.get('type')
+        if rec_type:
+            qs = qs.filter(record_type=rec_type)
+        emp_id = self.request.query_params.get('employee')
+        if emp_id:
+            qs = qs.filter(employee_id=emp_id)
+        return qs
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        instance = serializer.save(tenant=tenant)
+        audit_service.log_create(self.request, instance, changes={'amount': str(instance.amount), 'record_type': instance.record_type})
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        audit_service.log_update(self.request, instance, after={'amount': str(instance.amount)})
+
+    def perform_destroy(self, instance):
+        audit_service.log_delete(self.request, instance)
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        item = self.get_object()
+        item.status = 'approved'
+        item.save(update_fields=['status', 'updated_at'])
+        return Response(self.get_serializer(item).data, status=status.HTTP_200_OK)

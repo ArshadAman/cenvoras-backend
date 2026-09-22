@@ -6,7 +6,8 @@ from django.db.models import Q
 from hr.models import (
     PayrollRun, Employee, Payslip, AttendanceRecord,
     EmployeeSalaryAssignment, ProfessionalTaxSlab,
-    OvertimeRecord, EmployeeAdvanceLoan, HRMSSettings
+    OvertimeRecord, EmployeeAdvanceLoan, HRMSSettings,
+    EmployeeAllowanceBonus
 )
 from .exceptions_service import scan_payroll_exceptions
 
@@ -295,7 +296,17 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # Overtime
     ot_hours, ot_amount = compute_overtime(employee, month, year)
-    gross_with_ot = (prorated_gross + ot_amount).quantize(Decimal('0.01'))
+
+    # Allowances and Bonuses for this month/year (or recurring)
+    allowances_bonuses = EmployeeAllowanceBonus.objects.filter(
+        employee=employee,
+        status='approved'
+    ).filter(
+        Q(is_recurring=True) | Q(effective_date__year=year, effective_date__month=month)
+    )
+    total_ab_amount = sum((Decimal(str(ab.amount)) for ab in allowances_bonuses), Decimal('0.00'))
+
+    gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
 
     # Basic component lookup for PF
     basic_comp = assignment.salary_structure.components.filter(is_basic=True).first()
@@ -307,9 +318,9 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # Statutory Calculations
     pf_details = compute_pf(basic_salary, settings)
-    esi_details = compute_esi(gross_with_ot, settings)
-    tds_val = compute_tds(gross_with_ot)
-    pt_val = compute_pt(gross_with_ot, employee.work_state)
+    esi_details = compute_esi(gross_with_earnings, settings)
+    tds_val = compute_tds(gross_with_earnings)
+    pt_val = compute_pt(gross_with_earnings, employee.work_state)
 
     # Statutory Deductions subtotal
     statutory_deductions = (
@@ -319,11 +330,11 @@ def compute_payslip_for_employee(employee, payroll_run):
         pt_val
     )
 
-    available_for_loans = max(Decimal('0.00'), gross_with_ot - statutory_deductions)
+    available_for_loans = max(Decimal('0.00'), gross_with_earnings - statutory_deductions)
     advance_rec, loan_rec = compute_advances_and_loans(employee, available_for_loans, settings.allow_negative_salary)
 
     total_deductions = (statutory_deductions + advance_rec + loan_rec).quantize(Decimal('0.01'))
-    net_salary = (gross_with_ot - total_deductions).quantize(Decimal('0.01'))
+    net_salary = (gross_with_earnings - total_deductions).quantize(Decimal('0.01'))
 
     # Employer Contributions
     employer_total = (pf_details['employer_pf'] + esi_details['employer_esi']).quantize(Decimal('0.01'))
@@ -335,6 +346,10 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     if ot_amount > 0:
         earnings['Overtime'] = str(ot_amount)
+
+    for ab in allowances_bonuses:
+        key_label = f"{ab.get_record_type_display()}: {ab.title}"
+        earnings[key_label] = str(Decimal(str(ab.amount)).quantize(Decimal('0.01')))
 
     deductions = {
         'PF': str(pf_details['employee_pf']),
@@ -358,7 +373,7 @@ def compute_payslip_for_employee(employee, payroll_run):
         lop_days=breakdown['lop_days'],
         overtime_hours=ot_hours,
         overtime_amount=ot_amount,
-        gross_salary=gross_with_ot,
+        gross_salary=gross_with_earnings,
         earnings=earnings,
         deductions=deductions,
         employee_pf=pf_details['employee_pf'],

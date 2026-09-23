@@ -397,6 +397,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
     approved_by_name = serializers.CharField(source='approved_by.username', read_only=True, default='')
     paid_by_name = serializers.CharField(source='paid_by.username', read_only=True, default='')
     locked_by_name = serializers.CharField(source='locked_by.username', read_only=True, default='')
+    reopened_by_name = serializers.CharField(source='reopened_by.username', read_only=True, default='')
     payment_account_name = serializers.CharField(source='payment_account.name', read_only=True, default='')
     critical_exceptions_count = serializers.SerializerMethodField()
     warning_exceptions_count = serializers.SerializerMethodField()
@@ -409,7 +410,8 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'id', 'status', 'total_gross', 'total_deductions', 'total_net',
             'total_employer_contributions', 'approved_at', 'approved_by',
             'paid_at', 'paid_by', 'locked_at', 'locked_by', 'finalised_at',
-            'is_reopened', 'reopened_at', 'reopened_by', 'created_at', 'updated_at'
+            'is_reopened', 'reopened_at', 'reopened_by', 'reopen_history',
+            'created_at', 'updated_at'
         ]
 
     def get_critical_exceptions_count(self, obj):

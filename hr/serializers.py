@@ -1,5 +1,6 @@
 # HR DRF serializers — fully enhanced for Payroll-Centric HRMS
 from decimal import Decimal
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import (
@@ -8,7 +9,8 @@ from .models import (
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
     PayrollRun, Payslip, EmployeeTask, EmployeeQuery, EmployeeNotification,
     EmployeeSalaryHistory, OvertimeRecord, EmployeeAdvanceLoan, LoanRecoveryLog,
-    PayrollException, HRDocument, HRMSSettings, EmployeeAllowanceBonus
+    PayrollException, HRDocument, HRMSSettings, EmployeeAllowanceBonus,
+    EmployeeTaxDeclaration
 )
 
 
@@ -54,6 +56,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
     reporting_manager_name = serializers.CharField(source='reporting_manager.full_name', read_only=True, default='')
     current_ctc = serializers.SerializerMethodField()
+    salary_details = serializers.SerializerMethodField()
 
     personal_phone = serializers.CharField(
         required=True,
@@ -109,6 +112,75 @@ class EmployeeSerializer(serializers.ModelSerializer):
             return str(latest_hist.new_salary)
         return '0.00'
 
+    def get_salary_details(self, obj):
+        latest = obj.salary_assignments.order_by('-effective_from').first()
+        if not latest or latest.monthly_ctc <= 0:
+            return None
+        ctc = latest.monthly_ctc
+        components = dict(latest.computed_components or {})
+        
+        basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))
+        hra = Decimal(str(components.get('HRA') or components.get('hra') or (basic * Decimal('0.50')))).quantize(Decimal('0.01'))
+        da = Decimal(str(components.get('DA') or components.get('da') or '0.00')).quantize(Decimal('0.01'))
+        special = Decimal(str(components.get('Special Allowance') or components.get('special_allowance') or (ctc - basic - hra - da))).quantize(Decimal('0.01'))
+
+        gross = ctc
+        # PF 12%
+        epf = (basic * Decimal('0.12')).quantize(Decimal('0.01'))
+        # ESI 0.75% if gross <= 21k
+        esi = (gross * Decimal('0.0075')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
+        
+        from hr.services.payroll_engine import compute_pt
+        pt = compute_pt(gross, obj.work_state)
+
+        from hr.services.tds_service import compute_tax_on_income
+        std_ded = Decimal('75000.00') if obj.tax_regime == 'new' else Decimal('50000.00')
+        annual_gross = gross * Decimal('12')
+        taxable = max(Decimal('0.00'), annual_gross - std_ded)
+        _, _, _, _, annual_tax = compute_tax_on_income(taxable, regime=obj.tax_regime)
+        estimated_tds = (annual_tax / Decimal('12')).quantize(Decimal('0.01'))
+
+        total_deductions = epf + esi + pt + estimated_tds
+        net_pay = max(Decimal('0.00'), gross - total_deductions)
+
+        # Employer contributions
+        employer_epf = (basic * Decimal('0.0367')).quantize(Decimal('0.01'))
+        employer_eps = min(basic * Decimal('0.0833'), Decimal('1250.00')).quantize(Decimal('0.01'))
+        employer_esi = (gross * Decimal('0.0325')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
+        total_employer = employer_epf + employer_eps + employer_esi
+
+        return {
+            'monthly_ctc': str(ctc),
+            'annual_ctc': str((ctc * Decimal('12')).quantize(Decimal('0.01'))),
+            'gross_salary': str(gross),
+            'estimated_net_salary': str(net_pay),
+            'salary_structure_id': str(latest.salary_structure_id),
+            'salary_structure_name': latest.salary_structure.name,
+            'effective_from': str(latest.effective_from),
+            'components': {
+                'basic': str(basic),
+                'hra': str(hra),
+                'da': str(da),
+                'special_allowance': str(special),
+                **{k: str(v) for k, v in components.items() if k not in ['Basic', 'HRA', 'DA', 'Special Allowance', 'basic', 'hra', 'da', 'special_allowance']}
+            },
+            'statutory_estimates': {
+                'employee_pf': str(epf),
+                'employee_esi': str(esi),
+                'professional_tax': str(pt),
+                'monthly_tds': str(estimated_tds),
+                'annual_tds': str(annual_tax),
+                'total_deductions': str(total_deductions),
+            },
+            'employer_estimates': {
+                'employer_epf': str(employer_epf),
+                'employer_eps': str(employer_eps),
+                'employer_esi': str(employer_esi),
+                'total_employer_contribution': str(total_employer),
+            },
+            'tax_regime': obj.tax_regime,
+        }
+
     def validate_user(self, value):
         if value:
             request = self.context.get('request')
@@ -118,6 +190,152 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 if user_tenant != tenant and value != tenant:
                     raise serializers.ValidationError("Assigned user does not belong to the active tenant.")
         return value
+
+    def create(self, validated_data):
+        salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
+        declaration_data = self.initial_data.get('tax_declaration')
+        employee = super().create(validated_data)
+        self._handle_salary_assignment(employee, salary_data)
+        self._handle_tax_declaration(employee, declaration_data)
+        return employee
+
+    def update(self, instance, validated_data):
+        salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
+        declaration_data = self.initial_data.get('tax_declaration')
+        employee = super().update(instance, validated_data)
+        if salary_data is not None:
+            self._handle_salary_assignment(employee, salary_data)
+        if declaration_data is not None:
+            self._handle_tax_declaration(employee, declaration_data)
+        return employee
+
+    def _handle_salary_assignment(self, employee, salary_data):
+        if not salary_data or not isinstance(salary_data, dict):
+            return
+        monthly_ctc = salary_data.get('monthly_ctc')
+        if not monthly_ctc or float(monthly_ctc) <= 0:
+            return
+
+        ctc = Decimal(str(monthly_ctc)).quantize(Decimal('0.01'))
+        effective_from = salary_data.get('effective_from') or employee.date_of_joining or timezone.now().date()
+        tenant = employee.tenant
+
+        structure_id = salary_data.get('salary_structure_id') or salary_data.get('salary_structure')
+        structure = None
+        if structure_id:
+            structure = SalaryStructure.objects.filter(id=structure_id, tenant=tenant).first()
+        if not structure:
+            structure = SalaryStructure.objects.filter(tenant=tenant).first()
+            if not structure:
+                structure = SalaryStructure.objects.create(
+                    tenant=tenant,
+                    name="Standard Salary Structure",
+                    description="Standard Indian compensation structure"
+                )
+                SalaryComponent.objects.create(
+                    salary_structure=structure, name="Basic", type="earning",
+                    component_type="pct_gross", value=Decimal('50.00'), is_basic=True, is_taxable=True, order=1
+                )
+                SalaryComponent.objects.create(
+                    salary_structure=structure, name="HRA", type="earning",
+                    component_type="pct_basic", value=Decimal('50.00'), is_basic=False, is_taxable=True, order=2
+                )
+                SalaryComponent.objects.create(
+                    salary_structure=structure, name="Special Allowance", type="earning",
+                    component_type="fixed", value=Decimal('0.00'), is_basic=False, is_taxable=True, order=3
+                )
+
+        custom_components = salary_data.get('components') or {}
+        assignment = EmployeeSalaryAssignment.objects.filter(
+            employee=employee,
+            effective_from=effective_from,
+        ).first()
+
+        prev_salary = Decimal('0.00')
+        latest_existing = employee.salary_assignments.order_by('-effective_from').first()
+        if latest_existing:
+            prev_salary = latest_existing.monthly_ctc
+
+        if assignment:
+            assignment.salary_structure = structure
+            assignment.monthly_ctc = ctc
+            assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
+        else:
+            assignment = EmployeeSalaryAssignment.objects.create(
+                tenant=tenant,
+                employee=employee,
+                salary_structure=structure,
+                effective_from=effective_from,
+                monthly_ctc=ctc,
+            )
+
+        if custom_components:
+            computed = {}
+            for k, v in custom_components.items():
+                try:
+                    computed[k] = str(Decimal(str(v)).quantize(Decimal('0.01')))
+                except Exception:
+                    computed[k] = str(v)
+            assignment.computed_components = computed
+            assignment.save(update_fields=['computed_components'])
+        else:
+            assignment_serializer = EmployeeSalaryAssignmentSerializer(context=self.context)
+            assignment_serializer._compute_components(assignment)
+
+        from hr.models import EmployeeSalaryHistory
+        EmployeeSalaryHistory.objects.create(
+            tenant=tenant,
+            employee=employee,
+            effective_date=effective_from,
+            previous_salary=prev_salary,
+            new_salary=ctc,
+            salary_structure=structure,
+            reason=salary_data.get('reason') or ("Initial salary assignment" if prev_salary == Decimal('0.00') else "Salary revision")
+        )
+
+    def _handle_tax_declaration(self, employee, declaration_data):
+        if not declaration_data or not isinstance(declaration_data, dict):
+            return
+        from hr.services.tds_service import get_financial_year_info
+        today = timezone.now().date()
+        fy_info = get_financial_year_info(today.month, today.year)
+        fy_str = declaration_data.get('financial_year') or fy_info['fy_string']
+        regime = declaration_data.get('regime') or declaration_data.get('tax_regime') or employee.tax_regime or 'new'
+
+        if regime != employee.tax_regime:
+            employee.tax_regime = regime
+            employee.save(update_fields=['tax_regime'])
+
+        defaults = {
+            'regime': regime,
+            'section_80c': Decimal(str(declaration_data.get('section_80c') or 0)),
+            'section_80d': Decimal(str(declaration_data.get('section_80d') or 0)),
+            'section_24b_home_loan': Decimal(str(declaration_data.get('section_24b_home_loan') or 0)),
+            'hra_exemption': Decimal(str(declaration_data.get('hra_exemption') or 0)),
+            'other_exemptions': Decimal(str(declaration_data.get('other_exemptions') or 0)),
+            'declared_previous_income': Decimal(str(declaration_data.get('declared_previous_income') or 0)),
+            'declared_previous_tds': Decimal(str(declaration_data.get('declared_previous_tds') or 0)),
+            'proof_submitted': bool(declaration_data.get('proof_submitted', False)),
+            'proof_verified': bool(declaration_data.get('proof_verified', False)),
+            'notes': declaration_data.get('notes', ''),
+        }
+
+        EmployeeTaxDeclaration.objects.update_or_create(
+            tenant=employee.tenant,
+            employee=employee,
+            financial_year=fy_str,
+            defaults=defaults,
+        )
+
+
+class EmployeeTaxDeclarationSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.full_name', read_only=True)
+    employee_code = serializers.CharField(source='employee.employee_code', read_only=True)
+
+    class Meta:
+        model = EmployeeTaxDeclaration
+        exclude = ['tenant']
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class EmployeeSalaryHistorySerializer(serializers.ModelSerializer):
@@ -337,10 +555,11 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
             if comp.type == 'earning':
                 total_earnings += val
 
-        # Balancing component: If total earnings < ctc, add Special Allowance remainder
-        if total_earnings < ctc and 'Special Allowance' not in computed:
-            remainder = ctc - total_earnings
-            computed['Special Allowance'] = str(round(remainder, 2))
+        # Balancing component: If total earnings < ctc, allocate remainder to Special Allowance
+        if total_earnings < ctc:
+            existing_sa = Decimal(str(computed.get('Special Allowance', '0.00')))
+            if 'Special Allowance' not in computed or existing_sa == Decimal('0.00'):
+                computed['Special Allowance'] = str(round(ctc - total_earnings, 2))
 
         assignment.computed_components = computed
         assignment.save(update_fields=['computed_components'])

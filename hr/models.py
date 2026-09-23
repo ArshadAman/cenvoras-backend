@@ -1,6 +1,7 @@
 # HR data models — implemented in task 2
 
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
@@ -106,6 +107,17 @@ class Employee(models.Model):
     work_state = models.CharField(max_length=100)  # For PT slab lookup
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active')
 
+    TAX_REGIME_CHOICES = [
+        ('new', 'New Regime'),
+        ('old', 'Old Regime'),
+    ]
+    tax_regime = models.CharField(
+        max_length=10,
+        choices=TAX_REGIME_CHOICES,
+        default='new',
+        help_text='Employee Indian Income Tax regime preference under Section 115BAC (defaults to New Regime).',
+    )
+
     # Optional fields
     profile_photo = models.ImageField(upload_to='employee_photos/', blank=True, null=True)
     profile_photo_url = models.URLField(max_length=500, blank=True, null=True)
@@ -145,7 +157,8 @@ class Employee(models.Model):
                 .first()
             )
             if last and last.employee_code.startswith('EMP-'):
-                next_num = int(last.employee_code[4:]) + 1
+                digits = ''.join(c for c in last.employee_code[4:] if c.isdigit())
+                next_num = int(digits) + 1 if digits else 1
             else:
                 next_num = 1
             self.employee_code = f'EMP-{next_num:04d}'
@@ -520,6 +533,86 @@ class EmployeeSalaryAssignment(models.Model):
             f'{self.employee} — {self.salary_structure.name} '
             f'(from {self.effective_from})'
         )
+
+
+class EmployeeTaxDeclaration(models.Model):
+    """
+    Stores employee Income Tax investment declarations and exemptions under Section 192.
+    Used for projecting annual taxable income and computing monthly TDS under Old & New Regimes.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='hr_tax_declarations',
+    )
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='tax_declarations',
+    )
+    financial_year = models.CharField(
+        max_length=10,
+        help_text='Financial year in format YYYY-YYYY, e.g. 2026-2027',
+    )
+    regime = models.CharField(
+        max_length=10,
+        choices=Employee.TAX_REGIME_CHOICES,
+        default='new',
+    )
+
+    # Chapter VI-A & Other Deductions (Old Regime)
+    section_80c = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        help_text='Section 80C deductions (PPF, ELSS, EPF, Life Insurance, etc. - max 1,50,000)'
+    )
+    section_80d = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        help_text='Section 80D medical health insurance premium'
+    )
+    section_24b_home_loan = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        help_text='Section 24(b) interest on self-occupied housing loan (max 2,00,000)'
+    )
+    hra_exemption = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        help_text='Declared annual House Rent Allowance exemption under Section 10(13A)'
+    )
+    other_exemptions = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'),
+        help_text='Other eligible chapter VI-A exemptions (80E, 80G, 80TTA)'
+    )
+
+    # Previous Employment Details (Mid-year Joiners)
+    declared_previous_income = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        help_text='Gross income earned from previous employer during current FY (Form 12B)'
+    )
+    declared_previous_tds = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        help_text='TDS deducted by previous employer during current FY (Form 12B)'
+    )
+
+    # Proof Verification Workflow
+    proof_submitted = models.BooleanField(
+        default=False,
+        help_text='Whether employee has uploaded formal supporting investment proofs for declarations.'
+    )
+    proof_verified = models.BooleanField(
+        default=False,
+        help_text='Whether HR has verified and approved supporting investment proofs.'
+    )
+    notes = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('tenant', 'employee', 'financial_year')
+        ordering = ['-financial_year', 'employee__full_name']
+
+    def __str__(self):
+        return f"{self.employee.full_name} ({self.financial_year}) - {self.get_regime_display()}"
 
 
 # ---------------------------------------------------------------------------

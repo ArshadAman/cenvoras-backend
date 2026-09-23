@@ -10,6 +10,7 @@ from hr.models import (
     EmployeeAllowanceBonus, LeaveApplication
 )
 from .exceptions_service import scan_payroll_exceptions
+from .tds_service import compute_dynamic_tds, compute_tax_on_income
 
 
 def get_hrms_settings(tenant):
@@ -230,26 +231,16 @@ def compute_esi(gross_salary, hrms_settings=None):
     }
 
 
-def compute_tds(gross_salary):
-    """Computes monthly Tax Deducted at Source based on projected annual gross."""
+def compute_tds(gross_salary, regime='new'):
+    """
+    Computes monthly Tax Deducted at Source based on projected annual gross and tax regime.
+    Defaults to New Regime (Sec 115BAC) with Standard Deduction (Rs. 75,000) and Sec 87A rebate.
+    """
     annual_gross = Decimal(str(gross_salary)) * Decimal('12')
-
-    tax = Decimal('0.0')
-    if annual_gross <= Decimal('250000'):
-        tax = Decimal('0.0')
-    elif annual_gross <= Decimal('500000'):
-        tax = (annual_gross - Decimal('250000')) * Decimal('0.05')
-        if tax <= Decimal('12500'):  # Section 87A rebate
-            tax = Decimal('0.0')
-    elif annual_gross <= Decimal('1000000'):
-        tax = Decimal('12500') + (annual_gross - Decimal('500000')) * Decimal('0.20')
-    else:
-        tax = Decimal('112500') + (annual_gross - Decimal('1000000')) * Decimal('0.30')
-
-    if tax > Decimal('0.0'):
-        tax += tax * Decimal('0.04')  # 4% Health & Education Cess
-
-    monthly_tax = tax / Decimal('12')
+    std_ded = Decimal('75000.00') if regime == 'new' else Decimal('50000.00')
+    taxable_income = max(Decimal('0.00'), annual_gross - std_ded)
+    _, _, _, _, total_annual_tax = compute_tax_on_income(taxable_income, regime=regime)
+    monthly_tax = total_annual_tax / Decimal('12')
     return monthly_tax.quantize(Decimal('0.01'))
 
 
@@ -415,7 +406,8 @@ def compute_payslip_for_employee(employee, payroll_run):
     # Statutory Calculations
     pf_details = compute_pf(basic_salary, settings)
     esi_details = compute_esi(gross_with_earnings, settings)
-    tds_val = compute_tds(gross_with_earnings)
+    tds_data = compute_dynamic_tds(employee, gross_with_earnings, month, year)
+    tds_val = tds_data['monthly_tds']
     pt_val = compute_pt(gross_with_earnings, employee.work_state)
 
     # Custom deductions total
@@ -493,12 +485,12 @@ def compute_payslip_for_employee(employee, payroll_run):
             'reason': f"Employee statutory 0.75% contribution on gross ₹{gross_with_earnings} (≤ ₹21,000 threshold)"
         }
 
-    # 4. Tax Deducted at Source (TDS)
+    # 4. Tax Deducted at Source (TDS under Section 192)
     if tds_val > 0:
         deductions['TDS'] = str(tds_val)
         deduction_reasons['TDS'] = {
             'amount': str(tds_val),
-            'reason': f"Estimated monthly Income Tax withholding under Sec 192 (Projected Annual Gross: ₹{gross_with_earnings * 12})"
+            'reason': tds_data['reason']
         }
 
     # 5. Professional Tax (PT)

@@ -164,35 +164,84 @@ def generate_payslip_pdf(payslip):
     story.append(Spacer(1, 14))
 
     # 3. Earnings & Deductions Tables
-    earnings_rows = [[Paragraph("Earnings Component", tbl_header), Paragraph("Amount (₹)", tbl_header)]]
-    for cname, amt in payslip.earnings.items():
+    earnings_rows = [[Paragraph("Earnings Component", tbl_header), Paragraph("Amount (Rs.)", tbl_header)]]
+    earnings_items = dict(payslip.earnings or {})
+    if not earnings_items and float(payslip.gross_salary or 0) > 0:
+        earnings_items["Base Earnings"] = payslip.gross_salary
+    if float(payslip.overtime_amount or 0) > 0 and "Overtime" not in earnings_items:
+        earnings_items["Overtime"] = payslip.overtime_amount
+
+    for cname, amt in earnings_items.items():
+        clean_name = str(cname).replace('₹', 'Rs. ')
         earnings_rows.append([
-            Paragraph(cname, tbl_cell),
-            Paragraph(f"₹{float(amt):,.2f}", tbl_cell),
+            Paragraph(clean_name, tbl_cell),
+            Paragraph(f"Rs. {float(amt):,.2f}", tbl_cell),
         ])
     earnings_rows.append([
         Paragraph("Gross Salary", tbl_cell_bold),
-        Paragraph(f"₹{float(payslip.gross_salary):,.2f}", tbl_cell_bold),
+        Paragraph(f"Rs. {float(payslip.gross_salary):,.2f}", tbl_cell_bold),
     ])
 
-    deductions_rows = [[Paragraph("Deductions Component", tbl_header), Paragraph("Amount (₹)", tbl_header)]]
-    reasons_map = payslip.deduction_reasons or {}
+    deductions_rows = [[Paragraph("Deductions Component", tbl_header), Paragraph("Amount (Rs.)", tbl_header)]]
+    raw_deductions = dict(payslip.deductions or {})
+    reasons_map = dict(payslip.deduction_reasons or {})
 
-    for cname, amt in payslip.deductions.items():
+    # Ensure statutory items are displayed even if not pre-populated in deductions json
+    if float(payslip.employee_pf or 0) > 0 and 'PF' not in raw_deductions and 'Provident Fund (PF)' not in raw_deductions:
+        raw_deductions['Provident Fund (PF)'] = payslip.employee_pf
+    if float(payslip.employee_esi or 0) > 0 and 'ESI' not in raw_deductions:
+        raw_deductions['State Insurance (ESI)'] = payslip.employee_esi
+    if float(payslip.tds or 0) > 0 and 'TDS' not in raw_deductions and 'Income Tax (TDS)' not in raw_deductions:
+        raw_deductions['Income Tax (TDS)'] = payslip.tds
+    if float(payslip.professional_tax or 0) > 0 and 'PT' not in raw_deductions and 'Professional Tax (PT)' not in raw_deductions:
+        raw_deductions['Professional Tax (PT)'] = payslip.professional_tax
+    if float(payslip.advance_recovery or 0) > 0 and 'Salary Advance Recovery' not in raw_deductions:
+        raw_deductions['Salary Advance Recovery'] = payslip.advance_recovery
+    if float(payslip.loan_recovery or 0) > 0 and 'Loan Recovery' not in raw_deductions:
+        raw_deductions['Loan Recovery'] = payslip.loan_recovery
+    if float(payslip.lop_days or 0) > 0 and 'Loss of Pay (LOP)' not in raw_deductions:
+        working_days = Decimal(str(payslip.total_working_days or 26))
+        present_days = Decimal(str(payslip.present_days or 0))
+        daily_rate = Decimal(str(payslip.gross_salary)) / (present_days if present_days > 0 else working_days)
+        lop_amt = (Decimal(str(payslip.lop_days)) * daily_rate).quantize(Decimal('0.01'))
+        if lop_amt > 0:
+            raw_deductions['Loss of Pay (LOP)'] = str(lop_amt)
+    if not raw_deductions and float(payslip.total_deductions or 0) > 0:
+        raw_deductions['Statutory & Other Deductions'] = str(payslip.total_deductions)
+
+    for cname, amt in raw_deductions.items():
         reason_info = reasons_map.get(cname, {})
-        reason_text = reason_info.get('reason', '') if isinstance(reason_info, dict) else str(reason_info)
+        reason_text = reason_info.get('reason', '') if isinstance(reason_info, dict) else str(reason_info or '')
+        if not reason_text:
+            if 'PF' in cname or 'Provident' in cname:
+                reason_text = "Employee statutory 12.00% Provident Fund contribution on Basic salary"
+            elif 'ESI' in cname:
+                reason_text = "Employee statutory 0.75% State Insurance contribution on gross earnings"
+            elif 'TDS' in cname or 'Tax' in cname:
+                reason_text = "Monthly income tax withholding deducted under Section 192"
+            elif 'PT' in cname or 'Professional' in cname:
+                reason_text = "State statutory Professional Tax slab deduction"
+            elif 'Advance' in cname:
+                reason_text = "Monthly installment recovered against active salary advance"
+            elif 'Loan' in cname:
+                reason_text = "Monthly personal loan recovery installment"
+            elif 'Loss of Pay' in cname or 'LOP' in cname:
+                reason_text = f"{payslip.lop_days} day(s) unpaid leave / absence docked from monthly salary"
+
+        clean_cname = str(cname).replace('₹', 'Rs. ')
+        clean_reason = str(reason_text).replace('₹', 'Rs. ').replace('≤', '<=').replace('≥', '>=')
         
-        comp_cell_content = [Paragraph(cname, tbl_cell)]
-        if reason_text:
-            comp_cell_content.append(Paragraph(reason_text, reason_subtext))
+        comp_cell_content = [Paragraph(clean_cname, tbl_cell)]
+        if clean_reason:
+            comp_cell_content.append(Paragraph(clean_reason, reason_subtext))
             
         deductions_rows.append([
             comp_cell_content,
-            Paragraph(f"₹{float(amt):,.2f}", tbl_cell),
+            Paragraph(f"Rs. {float(amt):,.2f}", tbl_cell),
         ])
     deductions_rows.append([
         Paragraph("Total Deductions", tbl_cell_bold),
-        Paragraph(f"₹{float(payslip.total_deductions):,.2f}", tbl_cell_bold),
+        Paragraph(f"Rs. {float(payslip.total_deductions):,.2f}", tbl_cell_bold),
     ])
 
     earn_table = Table(earnings_rows, colWidths=[160, 95])
@@ -232,7 +281,7 @@ def generate_payslip_pdf(payslip):
     net_data = [
         [
             Paragraph("NET TAKE-HOME SALARY:", ParagraphStyle('NetLabel', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#065F46'))),
-            Paragraph(f"₹{float(payslip.net_salary):,.2f}", ParagraphStyle('NetValue', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#065F46'), alignment=2)),
+            Paragraph(f"Rs. {float(payslip.net_salary):,.2f}", ParagraphStyle('NetValue', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#065F46'), alignment=2)),
         ]
     ]
     net_table = Table(net_data, colWidths=[260, 260])
@@ -250,9 +299,9 @@ def generate_payslip_pdf(payslip):
     # 5. Employer Contribution Summary (Compliance Transparency)
     empr_data = [
         [
-            Paragraph(f"Employer PF: ₹{float(payslip.employer_pf):,.2f} (EPF: ₹{float(payslip.employer_epf):,.2f}, EPS: ₹{float(payslip.employer_eps):,.2f})", cell_val),
-            Paragraph(f"Employer ESI: ₹{float(payslip.employer_esi):,.2f}", cell_val),
-            Paragraph(f"Total Employer Contribution: ₹{float(payslip.employer_total_contribution):,.2f}", cell_label),
+            Paragraph(f"Employer PF: Rs. {float(payslip.employer_pf):,.2f} (EPF: Rs. {float(payslip.employer_epf):,.2f}, EPS: Rs. {float(payslip.employer_eps):,.2f})", cell_val),
+            Paragraph(f"Employer ESI: Rs. {float(payslip.employer_esi):,.2f}", cell_val),
+            Paragraph(f"Total Employer Contribution: Rs. {float(payslip.employer_total_contribution):,.2f}", cell_label),
         ]
     ]
     empr_table = Table(empr_data, colWidths=[240, 130, 150])

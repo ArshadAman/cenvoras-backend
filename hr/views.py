@@ -1018,10 +1018,21 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         # Reverse accounting entries and restore loans if previously approved/paid/locked
         HRAccountingService.reverse_payroll_accrual(instance, request.user, reason)
 
+        now_dt = timezone.now()
+        history = list(instance.reopen_history or [])
+        user_display = f"{getattr(request.user, 'first_name', '')} {getattr(request.user, 'last_name', '')}".strip() or request.user.username
+        history.append({
+            'reopened_by': request.user.username,
+            'reopened_by_name': user_display,
+            'reopened_at': now_dt.isoformat(),
+            'reason': reason,
+        })
+
+        instance.reopen_history = history
         instance.status = 'draft'
         instance.is_reopened = True
         instance.reopened_by = request.user
-        instance.reopened_at = timezone.now()
+        instance.reopened_at = now_dt
         instance.reopen_reason = reason
         instance.approved_at = None
         instance.approved_by = None
@@ -1030,7 +1041,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance.locked_at = None
         instance.locked_by = None
         instance.save(update_fields=[
-            'status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason',
+            'status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason', 'reopen_history',
             'approved_at', 'approved_by', 'paid_at', 'paid_by', 'locked_at', 'locked_by'
         ])
 

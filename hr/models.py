@@ -785,6 +785,7 @@ class PayrollRun(models.Model):
     )
     reopened_at = models.DateTimeField(null=True, blank=True)
     reopen_reason = models.TextField(blank=True)
+    reopen_history = models.JSONField(default=list, blank=True, help_text="Audit log of all reopen events with user, timestamp, and reason.")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

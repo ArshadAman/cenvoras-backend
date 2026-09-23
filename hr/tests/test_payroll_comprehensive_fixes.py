@@ -362,6 +362,11 @@ class ComprehensivePayrollFixesTestCase(TestCase):
         self.assertEqual(self.payroll_run.status, 'draft')
         self.assertIsNone(self.payroll_run.locked_at)
 
+        # Verify audit history accumulated both reopen events
+        self.assertEqual(len(self.payroll_run.reopen_history), 2)
+        self.assertEqual(self.payroll_run.reopen_history[0]['reason'], 'Leave adjust requested')
+        self.assertEqual(self.payroll_run.reopen_history[1]['reason'], 'Manager revision')
+
         # 3. Missing reason raises validation error (400 Bad Request)
         self.payroll_run.status = 'approved'
         self.payroll_run.save()

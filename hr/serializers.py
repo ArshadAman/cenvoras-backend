@@ -137,7 +137,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         std_ded = Decimal('75000.00') if obj.tax_regime == 'new' else Decimal('50000.00')
         annual_gross = (gross * Decimal('12')).quantize(Decimal('0.01'))
         taxable = max(Decimal('0.00'), annual_gross - std_ded)
-        _, _, _, _, annual_tax = compute_tax_on_income(taxable, regime=obj.tax_regime)
+        _, rebate_applied, _, _, annual_tax = compute_tax_on_income(taxable, regime=obj.tax_regime)
         estimated_tds = (annual_tax / Decimal('12')).quantize(Decimal('0.01'))
 
         total_deductions = epf + esi + pt + estimated_tds
@@ -150,7 +150,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         employer_esi = (gross * Decimal('0.0325')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
         total_employer = employer_epf + employer_eps + employer_esi
 
-        is_rebate = taxable <= (Decimal('1200000.00') if obj.tax_regime == 'new' else Decimal('500000.00'))
+        rebate_threshold = Decimal('700000.00') if obj.tax_regime == 'new' else Decimal('500000.00')
+        is_rebate = rebate_applied  # True for full rebate or marginal relief
+        marginal_relief = rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
 
         # Clean display dictionary for earnings (Title Case, no duplicate lower/upper keys)
         earnings_dict = {
@@ -193,6 +195,14 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'total_employer_contribution': str(total_employer),
         }
 
+        if is_rebate and annual_tax == Decimal('0.00'):
+            tds_reason_str = 'Zero tax under Section 87A rebate limit'
+        elif marginal_relief:
+            excess = taxable - rebate_threshold
+            tds_reason_str = f'Marginal Relief applied (Sec 87A): Income exceeds threshold by ₹{excess:,.2f}. Tax capped at excess + 4% cess = ₹{annual_tax:,.2f}/year.'
+        else:
+            tds_reason_str = ''
+
         tds_dict = {
             'monthly_tds': str(estimated_tds),
             'annual_tax': str(annual_tax),
@@ -200,7 +210,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'taxable_income': str(taxable),
             'standard_deduction': str(std_ded),
             'rebate_applied': is_rebate,
-            'reason': 'Zero tax under rebate limit' if is_rebate and annual_tax == Decimal('0.00') else '',
+            'marginal_relief': marginal_relief,
+            'reason': tds_reason_str,
         }
 
         return {

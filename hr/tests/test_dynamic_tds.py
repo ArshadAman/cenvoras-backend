@@ -161,6 +161,57 @@ class DynamicTDSEngineTests(TestCase):
         self.assertTrue(tds_data['q4_unverified_dropped'])
         self.assertIn("Q4 Proofs Unverified", tds_data['reason'])
 
+    def test_marginal_relief_new_regime_income_just_above_threshold(self):
+        """
+        Section 87A Marginal Relief – New Regime.
+        Monthly gross ₹65,000 -> Annual gross ₹7,80,000.
+        After standard deduction ₹75,000 -> Taxable ₹7,05,000.
+        Without marginal relief: base tax ₹20,500 + 4% cess ₹820 = ₹21,320.
+        Excess over ₹7,00,000 threshold = ₹5,000.
+        Marginal relief: total tax (₹21,320) > excess (₹5,000) -> cap base to ₹5,000/1.04 = ₹4,807.69.
+        Total annual tax = ₹4,807.69 + ₹192.31 ≈ ₹5,000 (≤ ₹5,000 excess).
+        Monthly TDS ≈ ₹5,000/12 ≈ ₹416.67.
+        """
+        base_tax, rebate_applied, _, cess, total_tax = compute_tax_on_income(
+            Decimal('705000.00'), regime='new'
+        )
+        # Should be much less than ₹21,320 due to marginal relief
+        self.assertTrue(rebate_applied, "Marginal relief should mark rebate_applied=True")
+        self.assertLess(total_tax, Decimal('21320.00'), "Tax must be reduced by marginal relief")
+        self.assertLessEqual(total_tax, Decimal('5000.00'),
+                             "Total tax with cess must not exceed excess income ₹5,000")
+        self.assertGreater(total_tax, Decimal('0.00'), "TDS must still be deducted (not zero)")
+
+    def test_marginal_relief_new_regime_income_far_above_threshold(self):
+        """
+        Income well above ₹7,00,000 – no marginal relief should be needed.
+        Monthly ₹1,00,000 -> Annual ₹12,00,000, Taxable ₹11,25,000.
+        Tax: 20,000 + 10% of 3,00,000 + 15% of 1,25,000 = 20,000+30,000+18,750 = 68,750.
+        + 4% cess = 2,750 -> Total ₹71,500. No marginal relief.
+        """
+        base_tax, rebate_applied, _, cess, total_tax = compute_tax_on_income(
+            Decimal('1125000.00'), regime='new'
+        )
+        self.assertFalse(rebate_applied, "No marginal relief for income well above threshold")
+        self.assertEqual(total_tax, Decimal('71500.00'))
+
+    def test_marginal_relief_old_regime_income_just_above_threshold(self):
+        """
+        Section 87A Marginal Relief – Old Regime.
+        Taxable income ₹5,05,000 (just above ₹5,00,000 threshold).
+        Without relief: tax = 12,500 + 20% of 5,000 = 13,500 + 4% cess 540 = 14,040.
+        Excess = ₹5,000.
+        14,040 > 5,000 -> marginal relief capped at 5,000/1.04 = ₹4,807.69.
+        Total annual tax ≈ ₹5,000.
+        """
+        _, rebate_applied, _, _, total_tax = compute_tax_on_income(
+            Decimal('505000.00'), regime='old'
+        )
+        self.assertTrue(rebate_applied, "Marginal relief should mark rebate_applied=True (old regime)")
+        self.assertLessEqual(total_tax, Decimal('5000.00'),
+                             "Total tax must not exceed excess income ₹5,000 (old regime)")
+        self.assertGreater(total_tax, Decimal('0.00'), "TDS must still be deducted")
+
     def test_calculate_salary_breakdown_endpoint(self):
         """Test POST /api/hr/employees/calculate_salary_breakdown/ returns real-time components."""
         payload = {

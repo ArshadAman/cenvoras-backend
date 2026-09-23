@@ -463,13 +463,36 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             return Response({
                 'monthly_ctc': '0.00',
                 'annual_ctc': '0.00',
+                'contracted_monthly_ctc': '0.00',
+                'contracted_annual_ctc': '0.00',
                 'gross_salary': '0.00',
+                'monthly_gross': '0.00',
+                'annual_gross': '0.00',
+                'ad_hoc_monthly_total': '0.00',
                 'net_take_home_monthly': '0.00',
+                'monthly_net_take_home': '0.00',
                 'net_take_home_annual': '0.00',
+                'annual_net_take_home': '0.00',
                 'earnings': {'basic': '0.00', 'hra': '0.00', 'da': '0.00', 'special_allowance': '0.00'},
+                'fixed_allowances': {},
+                'ad_hoc_earnings': {},
                 'employee_deductions': {'employee_pf': '0.00', 'employee_esi': '0.00', 'professional_tax': '0.00', 'monthly_tds': '0.00', 'total_deductions': '0.00'},
                 'employer_contributions': {'employer_epf': '0.00', 'employer_eps': '0.00', 'employer_esi': '0.00', 'total_employer_cost': '0.00'},
-                'tds_details': {'regime': regime, 'projected_annual_gross': '0.00', 'net_taxable_income': '0.00', 'annual_tax': '0.00', 'rebate_applied': False, 'reason': 'No earnings provided.'}
+                'tds_details': {
+                    'regime': regime,
+                    'tax_regime': regime,
+                    'standard_deduction': '0.00',
+                    'taxable_income': '0.00',
+                    'projected_annual_gross': '0.00',
+                    'net_taxable_income': '0.00',
+                    'annual_tax': '0.00',
+                    'annual_net_tax': '0.00',
+                    'monthly_tds': '0.00',
+                    'rebate_applied': False,
+                    'rebate_amount': '0.00',
+                    'cess': '0.00',
+                    'reason': 'No earnings provided.'
+                }
             })
 
         basic_pct = Decimal(str(data.get('basic_pct', '50.0')))
@@ -479,16 +502,37 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         hra = Decimal(str(custom_components.get('hra') or custom_components.get('HRA') or (basic * (hra_pct_of_basic / Decimal('100.0'))))).quantize(Decimal('0.01'))
         da = Decimal(str(custom_components.get('da') or custom_components.get('DA') or '0.00')).quantize(Decimal('0.01'))
 
-        subtotal_earnings = basic + hra + da
+        # Fixed recurring allowances (part of Contracted CTC)
+        fixed_allowances_dict = {}
+        subtotal_fixed_earnings = basic + hra + da
         for k, v in custom_components.items():
             if k.lower() not in ['basic', 'hra', 'da', 'special_allowance', 'special allowance']:
                 try:
-                    subtotal_earnings += Decimal(str(v)).quantize(Decimal('0.01'))
+                    dec_val = Decimal(str(v)).quantize(Decimal('0.01'))
+                    subtotal_fixed_earnings += dec_val
+                    fixed_allowances_dict[k] = dec_val
                 except Exception:
                     pass
 
-        special_allowance = max(Decimal('0.00'), ctc - subtotal_earnings).quantize(Decimal('0.01'))
-        gross_salary = subtotal_earnings + special_allowance
+        # Balancing Component: Special Allowance absorbs the remainder to equal 100% of Fixed Contracted CTC
+        special_allowance = max(Decimal('0.00'), ctc - subtotal_fixed_earnings).quantize(Decimal('0.01'))
+        contracted_gross_salary = subtotal_fixed_earnings + special_allowance
+
+        # Ad-hoc / Variable Additions (outside Fixed Contracted CTC: Spot Bonus, Retention Bonus, Overtime)
+        ad_hoc_components = data.get('ad_hoc_earnings') or {}
+        ad_hoc_dict = {}
+        ad_hoc_monthly_total = Decimal('0.00')
+        for k, v in ad_hoc_components.items():
+            try:
+                val = Decimal(str(v)).quantize(Decimal('0.01'))
+                if val > 0:
+                    ad_hoc_monthly_total += val
+                    ad_hoc_dict[k] = val
+            except Exception:
+                pass
+
+        # Realized gross salary for this pay cycle (Contracted Gross + Ad-hoc Additions)
+        gross_salary = contracted_gross_salary + ad_hoc_monthly_total
 
         employee_pf = (basic * Decimal('0.12')).quantize(Decimal('0.01'))
         employee_esi = (gross_salary * Decimal('0.0075')).quantize(Decimal('0.01')) if gross_salary <= Decimal('21000.00') else Decimal('0.00')
@@ -532,22 +576,34 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         else:
             tds_reason = f"TDS under Sec 192 ({regime_label}): Annual Tax Rs. {total_annual_tax:,.2f} (incl. 4% cess) spread as Rs. {monthly_tds:,.2f}/mo."
 
+        earnings_dict = {
+            'basic': str(basic),
+            'hra': str(hra),
+            'da': str(da),
+        }
+        for k, v in fixed_allowances_dict.items():
+            earnings_dict[k] = str(v)
+        earnings_dict['special_allowance'] = str(special_allowance)
+        for k, v in ad_hoc_dict.items():
+            earnings_dict[f"[Ad-hoc] {k}"] = str(v)
+
         return Response({
             'monthly_ctc': str(ctc),
             'annual_ctc': str((ctc * Decimal('12.0')).quantize(Decimal('0.01'))),
+            'contracted_monthly_ctc': str(ctc),
+            'contracted_annual_ctc': str((ctc * Decimal('12.0')).quantize(Decimal('0.01'))),
             'gross_salary': str(gross_salary),
             'monthly_gross': str(gross_salary),
             'annual_gross': str(annual_gross),
+            'contracted_gross_monthly': str(contracted_gross_salary),
+            'ad_hoc_monthly_total': str(ad_hoc_monthly_total),
             'net_take_home_monthly': str(net_take_home),
             'monthly_net_take_home': str(net_take_home),
             'net_take_home_annual': str((net_take_home * Decimal('12.0')).quantize(Decimal('0.01'))),
             'annual_net_take_home': str((net_take_home * Decimal('12.0')).quantize(Decimal('0.01'))),
-            'earnings': {
-                'basic': str(basic),
-                'hra': str(hra),
-                'da': str(da),
-                'special_allowance': str(special_allowance),
-            },
+            'earnings': earnings_dict,
+            'fixed_allowances': {k: str(v) for k, v in fixed_allowances_dict.items()},
+            'ad_hoc_earnings': {k: str(v) for k, v in ad_hoc_dict.items()},
             'employee_deductions': {
                 'employee_pf': str(employee_pf),
                 'employee_esi': str(employee_esi),
@@ -560,6 +616,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 'employer_eps': str(employer_eps),
                 'employer_esi': str(employer_esi),
                 'total_employer_cost': str(total_employer_cost),
+                'actual_realized_monthly_ctc': str(total_employer_cost + ad_hoc_monthly_total),
             },
             'tds_details': {
                 'regime': regime,

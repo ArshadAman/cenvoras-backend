@@ -1961,25 +1961,58 @@ class HRReportsView(APIView):
                 payroll_run__tenant=tenant,
                 payroll_run__year=year,
                 payroll_run__month=month
-            ).select_related('employee', 'employee__department', 'employee__branch')
+            ).select_related('employee', 'employee__department', 'employee__branch', 'employee__designation', 'payroll_run')
 
             records = []
             for p in payslips:
                 records.append({
+                    "payslip_id": str(p.id),
+                    "employee_id": str(p.employee.id),
                     "employee_code": p.employee.employee_code,
                     "employee_name": p.employee.full_name,
+                    "designation": p.employee.designation.name if p.employee.designation else '—',
                     "department": p.employee.department.name if p.employee.department else '—',
                     "branch": p.employee.branch.name if p.employee.branch else 'Head Office',
+                    "employment_type": p.employee.employment_type or 'full_time',
+                    "date_of_joining": str(p.employee.date_of_joining or ''),
+                    "work_state": p.employee.work_state or '—',
+                    "personal_email": p.employee.personal_email or '',
+                    "personal_phone": p.employee.personal_phone or '',
+                    "bank_name": p.employee.bank_name or '—',
                     "bank_account": p.employee.bank_account_number or '—',
                     "ifsc": p.employee.bank_ifsc or '—',
+                    "upi_id": p.employee.upi_id or '',
                     "pan": p.employee.pan_number or '—',
+                    "uan": getattr(p.employee, 'uan', None) or '—',
+                    "aadhaar": getattr(p.employee, 'aadhaar_number', None) or '—',
+                    "esi_ip_number": getattr(p.employee, 'esi_ip_number', None) or '—',
+                    "tax_regime": getattr(p.employee, 'tax_regime', 'new') or 'new',
                     "working_days": str(p.total_working_days),
+                    "present_days": str(p.present_days),
+                    "absent_days": str(p.absent_days),
+                    "paid_leave_days": str(p.paid_leave_days),
                     "lop_days": str(p.lop_days),
+                    "overtime_hours": str(p.overtime_hours),
+                    "overtime_amount": str(p.overtime_amount),
                     "gross_salary": str(p.gross_salary),
+                    "earnings": p.earnings or {},
+                    "deductions": p.deductions or {},
+                    "deduction_reasons": p.deduction_reasons or {},
+                    "employee_pf": str(p.employee_pf),
+                    "employee_esi": str(p.employee_esi),
+                    "professional_tax": str(p.professional_tax),
+                    "tds": str(p.tds),
+                    "advance_recovery": str(p.advance_recovery),
+                    "loan_recovery": str(p.loan_recovery),
                     "total_deductions": str(p.total_deductions),
-                    "net_salary": str(p.net_salary),
+                    "employer_pf": str(p.employer_pf),
+                    "employer_epf": str(p.employer_epf),
+                    "employer_eps": str(p.employer_eps),
+                    "employer_esi": str(p.employer_esi),
                     "employer_contribution": str(p.employer_total_contribution),
-                    "status": p.payroll_run.status
+                    "net_salary": str(p.net_salary),
+                    "status": p.payroll_run.status,
+                    "payroll_run_id": str(p.payroll_run.id),
                 })
             return Response({"year": year, "month": month, "count": len(records), "records": records}, status=status.HTTP_200_OK)
 

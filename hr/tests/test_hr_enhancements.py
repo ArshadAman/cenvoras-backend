@@ -105,7 +105,16 @@ class HREnhancementsTests(APITestCase):
         r1 = self.client.get(url, {'type': 'payroll_register', 'year': 2025, 'month': 3})
         self.assertEqual(r1.status_code, status.HTTP_200_OK)
         self.assertEqual(len(r1.data['records']), 1)
-        self.assertEqual(r1.data['records'][0]['working_days'], '25')
+        rec = r1.data['records'][0]
+        self.assertEqual(rec['working_days'], '25')
+        self.assertIn('payslip_id', rec)
+        self.assertIn('employee_id', rec)
+        self.assertIn('designation', rec)
+        self.assertIn('earnings', rec)
+        self.assertIn('deduction_reasons', rec)
+        self.assertIn('pan', rec)
+        self.assertIn('uan', rec)
+        self.assertIn('tax_regime', rec)
 
         # 2. department_expenses
         r2 = self.client.get(url, {'type': 'department_expenses', 'year': 2025, 'month': 3})

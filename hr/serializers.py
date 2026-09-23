@@ -152,16 +152,28 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
         is_rebate = taxable <= (Decimal('1200000.00') if obj.tax_regime == 'new' else Decimal('500000.00'))
 
-        comp_dict = {
+        # Clean display dictionary for earnings (Title Case, no duplicate lower/upper keys)
+        earnings_dict = {
             'Basic': str(basic),
             'HRA': str(hra),
             'DA': str(da),
             'Special Allowance': str(special),
+        }
+        core_names = {'basic', 'hra', 'da', 'special allowance', 'special_allowance'}
+        for k, v in components.items():
+            if k.lower().replace('_', ' ').strip() not in core_names and k not in earnings_dict:
+                try:
+                    earnings_dict[k] = str(Decimal(str(v)).quantize(Decimal('0.01')))
+                except Exception:
+                    earnings_dict[k] = str(v)
+
+        # Components dictionary for backwards compatibility
+        components_dict = {
             'basic': str(basic),
             'hra': str(hra),
             'da': str(da),
             'special_allowance': str(special),
-            **{k: str(v) for k, v in components.items() if k not in ['Basic', 'HRA', 'DA', 'Special Allowance', 'basic', 'hra', 'da', 'special_allowance']}
+            **{k: str(v) for k, v in earnings_dict.items() if k not in ['Basic', 'HRA', 'DA', 'Special Allowance']}
         }
 
         deductions_dict = {
@@ -205,8 +217,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'salary_structure_id': str(latest.salary_structure_id),
             'salary_structure_name': latest.salary_structure.name,
             'effective_from': str(latest.effective_from),
-            'components': comp_dict,
-            'earnings': comp_dict,
+            'components': components_dict,
+            'earnings': earnings_dict,
             'employee_deductions': deductions_dict,
             'statutory_estimates': deductions_dict,
             'employer_contributions': employer_dict,
@@ -313,10 +325,21 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if custom_components:
             computed = {}
             for k, v in custom_components.items():
+                norm_lower = k.strip().lower().replace('_', ' ')
+                canonical_name = k.strip()
+                if norm_lower == 'basic':
+                    canonical_name = 'Basic'
+                elif norm_lower == 'hra':
+                    canonical_name = 'HRA'
+                elif norm_lower == 'da':
+                    canonical_name = 'DA'
+                elif norm_lower in ('special allowance', 'special_allowance'):
+                    canonical_name = 'Special Allowance'
+
                 try:
-                    computed[k] = str(Decimal(str(v)).quantize(Decimal('0.01')))
+                    computed[canonical_name] = str(Decimal(str(v)).quantize(Decimal('0.01')))
                 except Exception:
-                    computed[k] = str(v)
+                    computed[canonical_name] = str(v)
             assignment.computed_components = computed
             assignment.save(update_fields=['computed_components'])
         else:

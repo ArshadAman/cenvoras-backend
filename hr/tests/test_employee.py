@@ -340,3 +340,10 @@ class EmployeeAPITests(APITestCase):
         self.assertEqual(res_update2.status_code, status.HTTP_200_OK)
         self.assertEqual(res_update2.data['current_ctc'], '120000.00')
         self.assertEqual(res_update2.data['salary_details']['monthly_ctc'], '120000.00')
+        earnings = res_update2.data['salary_details']['earnings']
+        self.assertIn('Basic', earnings)
+        self.assertNotIn('basic', earnings)
+        self.assertIn('HRA', earnings)
+        self.assertNotIn('hra', earnings)
+        self.assertIn('Special Allowance', earnings)
+        self.assertNotIn('special_allowance', earnings)

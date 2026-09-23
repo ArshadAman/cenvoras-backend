@@ -933,7 +933,12 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         critical_exceptions = instance.exceptions.filter(severity='critical', is_resolved=False)
         if critical_exceptions.exists():
             count = critical_exceptions.count()
-            err_msg = f"Cannot approve payroll: {count} unresolved critical exception(s) detected. Please review and resolve."
+            details = []
+            for exc in critical_exceptions:
+                emp_label = f"{exc.employee.full_name} ({exc.employee.employee_code})" if exc.employee else "System"
+                details.append(f"{emp_label}: {exc.message}")
+            issues_text = "; ".join(details)
+            err_msg = f"Cannot approve payroll ({count} unresolved critical issue{'s' if count > 1 else ''}): {issues_text}. Please review and resolve in the Exceptions panel before approving."
             raise ValidationError(err_msg)
 
         before = {'status': instance.status}
@@ -943,7 +948,17 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance.save(update_fields=['status', 'approved_by', 'approved_at'])
 
         # Create Double-Entry Accounting Accrual entries in Ledger
-        HRAccountingService.post_payroll_accrual(instance, request.user)
+        try:
+            HRAccountingService.post_payroll_accrual(instance, request.user)
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception("Failed to post accounting accrual for payroll run %s", instance.id)
+            instance.status = before.get('status', 'calculated')
+            instance.approved_by = None
+            instance.approved_at = None
+            instance.save(update_fields=['status', 'approved_by', 'approved_at'])
+            raise ValidationError(f"Accounting accrual failed: {str(exc)}. Please check ledger chart of accounts.")
 
         audit_service.log_update(request, instance, before=before, after={'status': 'approved'})
         return Response({'status': 'Payroll approved and accounting accrual entries posted successfully'}, status=status.HTTP_200_OK)

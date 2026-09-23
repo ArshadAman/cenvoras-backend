@@ -315,10 +315,10 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         Paragraph("Item & Description", th_style),
         Paragraph("HSN/SAC", th_style),
         Paragraph("Qty", th_style_right),
-        Paragraph("Rate (₹)", th_style_right),
-        Paragraph("Disc (₹)", th_style_right),
+        Paragraph("Rate (Rs.)", th_style_right),
+        Paragraph("Disc (Rs.)", th_style_right),
         Paragraph("Tax (%)", th_style_right),
-        Paragraph("Amount (₹)", th_style_right),
+        Paragraph("Amount (Rs.)", th_style_right),
     ]
     items_data = [table_headers]
 
@@ -399,22 +399,22 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     is_interstate = bool(seller_state and customer_state and seller_state.strip().upper() != customer_state.strip().upper())
 
     summary_rows = [
-        [Paragraph("Taxable Subtotal:", body_style), Paragraph(f"₹ {subtotal:,.2f}", td_style_right)],
+        [Paragraph("Taxable Subtotal:", body_style), Paragraph(f"Rs. {subtotal:,.2f}", td_style_right)],
     ]
     if total_tax > 0:
         if is_interstate:
-            summary_rows.append([Paragraph("Output IGST:", body_style), Paragraph(f"₹ {total_tax:,.2f}", td_style_right)])
+            summary_rows.append([Paragraph("Output IGST:", body_style), Paragraph(f"Rs. {total_tax:,.2f}", td_style_right)])
         else:
             half_tax = total_tax / Decimal('2.0')
-            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"₹ {half_tax:,.2f}", td_style_right)])
-            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"₹ {half_tax:,.2f}", td_style_right)])
+            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
+            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
 
     if round_off != 0:
-        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"₹ {round_off:,.2f}", td_style_right)])
+        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"Rs. {round_off:,.2f}", td_style_right)])
 
     summary_rows.append([
         Paragraph(f"<b><font size=10 color='{total_text_color.hexval()}'>TOTAL AMOUNT:</font></b>", body_bold),
-        Paragraph(f"<b><font size=10 color='{total_text_color.hexval()}'>₹ {grand_total:,.2f}</font></b>", td_style_right)
+        Paragraph(f"<b><font size=10 color='{total_text_color.hexval()}'>Rs. {grand_total:,.2f}</font></b>", td_style_right)
     ])
 
     summary_table = Table(summary_rows, colWidths=[45 * mm, 45 * mm])

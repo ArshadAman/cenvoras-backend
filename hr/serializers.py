@@ -454,10 +454,121 @@ class PayslipSerializer(serializers.ModelSerializer):
     year = serializers.IntegerField(source='payroll_run.year', read_only=True)
     payroll_run_status = serializers.CharField(source='payroll_run.status', read_only=True)
 
+    earnings_breakdown = serializers.SerializerMethodField()
+    deductions_breakdown = serializers.SerializerMethodField()
+    attendance_summary = serializers.SerializerMethodField()
+    employer_contributions = serializers.SerializerMethodField()
+    deduction_reasons = serializers.SerializerMethodField()
+    lop_amount = serializers.SerializerMethodField()
+
     class Meta:
         model = Payslip
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at']
+
+    def get_earnings_breakdown(self, obj):
+        eb = dict(obj.earnings or {})
+        if not eb and obj.gross_salary > 0:
+            eb['Base Earnings'] = str(obj.gross_salary)
+        if obj.overtime_amount > 0 and 'Overtime' not in eb:
+            eb['Overtime'] = str(obj.overtime_amount)
+        return eb
+
+    def get_deductions_breakdown(self, obj):
+        db = dict(obj.deductions or {})
+        # Ensure standard statutory items are present if calculated on payslip
+        if obj.employee_pf > 0 and 'PF' not in db and 'Provident Fund (PF)' not in db:
+            db['Provident Fund (PF)'] = str(obj.employee_pf)
+        if obj.employee_esi > 0 and 'ESI' not in db:
+            db['ESI'] = str(obj.employee_esi)
+        if obj.tds > 0 and 'TDS' not in db and 'Income Tax (TDS)' not in db:
+            db['Income Tax (TDS)'] = str(obj.tds)
+        if obj.professional_tax > 0 and 'PT' not in db and 'Professional Tax (PT)' not in db:
+            db['Professional Tax (PT)'] = str(obj.professional_tax)
+        if obj.advance_recovery > 0 and 'Salary Advance Recovery' not in db:
+            db['Salary Advance Recovery'] = str(obj.advance_recovery)
+        if obj.loan_recovery > 0 and 'Loan Recovery' not in db:
+            db['Loan Recovery'] = str(obj.loan_recovery)
+
+        # Loss of Pay docked amount if any
+        if obj.lop_days > 0 and 'Loss of Pay (LOP)' not in db:
+            working_days = Decimal(str(obj.total_working_days or 26))
+            present_days = Decimal(str(obj.present_days or 0))
+            if present_days > 0:
+                daily_rate = Decimal(str(obj.gross_salary)) / present_days
+            else:
+                daily_rate = Decimal(str(obj.gross_salary)) / working_days
+            lop_amt = (Decimal(str(obj.lop_days)) * daily_rate).quantize(Decimal('0.01'))
+            if lop_amt > 0:
+                db['Loss of Pay (LOP)'] = str(lop_amt)
+
+        # Fallback if total_deductions > 0 but db is still empty
+        if not db and obj.total_deductions > 0:
+            db['Statutory / Payroll Deductions'] = str(obj.total_deductions)
+        return db
+
+    def get_deduction_reasons(self, obj):
+        reasons = {}
+        raw_reasons = obj.deduction_reasons or {}
+        # Normalize any nested dictionary structures into clear strings
+        for k, v in raw_reasons.items():
+            if isinstance(v, dict):
+                reasons[k] = v.get('reason') or v.get('amount') or str(v)
+            else:
+                reasons[k] = str(v)
+
+        # Provide human-friendly explanations for standard deductions if missing
+        if obj.employee_pf > 0:
+            reasons.setdefault('PF', "Employee statutory 12.00% Provident Fund contribution on Basic salary")
+            reasons.setdefault('Provident Fund (PF)', "Employee statutory 12.00% Provident Fund contribution on Basic salary")
+        if obj.employee_esi > 0:
+            reasons.setdefault('ESI', "Employee statutory 0.75% State Insurance contribution on gross earnings")
+        if obj.tds > 0:
+            reasons.setdefault('TDS', "Monthly income tax withholding deducted under Section 192")
+            reasons.setdefault('Income Tax (TDS)', "Monthly income tax withholding deducted under Section 192")
+        if obj.professional_tax > 0:
+            reasons.setdefault('PT', "State statutory Professional Tax slab deduction")
+            reasons.setdefault('Professional Tax (PT)', "State statutory Professional Tax slab deduction")
+        if obj.advance_recovery > 0:
+            reasons.setdefault('Salary Advance Recovery', "Monthly installment recovered against active salary advance")
+        if obj.loan_recovery > 0:
+            reasons.setdefault('Loan Recovery', "Monthly personal loan recovery installment")
+        if obj.lop_days > 0:
+            reasons.setdefault(
+                'Loss of Pay (LOP)',
+                f"{obj.lop_days} day(s) unpaid leave / absence docked from monthly salary based on {obj.total_working_days} working days"
+            )
+        return reasons
+
+    def get_attendance_summary(self, obj):
+        return {
+            'working_days': obj.total_working_days,
+            'present_days': float(obj.present_days),
+            'paid_leaves': float(obj.paid_leave_days),
+            'unpaid_leaves': float(obj.lop_days),
+            'absent_days': float(obj.absent_days),
+            'overtime_hours': float(obj.overtime_hours),
+            'overtime_amount': float(obj.overtime_amount),
+        }
+
+    def get_employer_contributions(self, obj):
+        return {
+            'Employer EPF': str(obj.employer_epf or obj.employer_pf),
+            'Employer EPS': str(obj.employer_eps),
+            'Employer ESI': str(obj.employer_esi),
+            'Total Employer Benefits': str(obj.employer_total_contribution),
+        }
+
+    def get_lop_amount(self, obj):
+        if obj.lop_days > 0:
+            working_days = Decimal(str(obj.total_working_days or 26))
+            present_days = Decimal(str(obj.present_days or 0))
+            if present_days > 0:
+                daily_rate = Decimal(str(obj.gross_salary)) / present_days
+            else:
+                daily_rate = Decimal(str(obj.gross_salary)) / working_days
+            return str((Decimal(str(obj.lop_days)) * daily_rate).quantize(Decimal('0.01')))
+        return '0.00'
 
 
 class HRDocumentSerializer(serializers.ModelSerializer):

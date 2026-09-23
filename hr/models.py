@@ -1106,10 +1106,19 @@ class HRMSSettings(models.Model):
         max_length=30,
         choices=[
             ('working_days', 'Working Days (Excluding Weekends)'),
+            ('working_days_5', '5-Day Week (Excluding Saturdays & Sundays)'),
             ('calendar_days', 'Calendar Days in Month'),
             ('fixed_30', 'Fixed 30 Days Basis'),
         ],
         default='working_days',
+    )
+    weekend_rule = models.CharField(
+        max_length=30,
+        choices=[
+            ('sunday_only', 'Sunday Only (6-Day Work Week)'),
+            ('sat_sun', 'Saturday & Sunday (5-Day Work Week)'),
+        ],
+        default='sunday_only',
     )
     overtime_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.5)
     allow_negative_salary = models.BooleanField(default=False)

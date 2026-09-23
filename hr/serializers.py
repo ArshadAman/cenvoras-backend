@@ -806,6 +806,21 @@ class HRMSSettingsSerializer(serializers.ModelSerializer):
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_salary_rounding(self, value):
+        mapping = {
+            'nearest_1': 'nearest_one',
+            'nearest_10': 'nearest_ten',
+            'exact_2': 'exact',
+        }
+        return mapping.get(value, value)
+
+    def validate_lop_calculation_rule(self, value):
+        mapping = {
+            'exclude_sat_sun': 'working_days_5',
+            '5_day_week': 'working_days_5',
+        }
+        return mapping.get(value, value)
+
 
 class EmployeeTaskSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.full_name', read_only=True)

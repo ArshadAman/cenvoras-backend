@@ -37,34 +37,49 @@ def apply_rounding(amount, rounding_rule='nearest_one'):
         return Decimal(str(f"{val:.2f}"))
 
 
-def get_total_working_days(month, year, lop_rule='working_days'):
+def get_total_working_days(month, year, lop_rule='working_days', weekend_rule='sunday_only'):
     """Calculate total expected working days in the month according to the configured rule."""
     days_in_month = calendar.monthrange(year, month)[1]
     if lop_rule == 'calendar_days':
         return days_in_month
     elif lop_rule == 'fixed_30':
         return 30
-    else:  # 'working_days' (Mon-Sat, excluding Sundays)
-        working_days = 0
-        for day in range(1, days_in_month + 1):
-            if datetime.date(year, month, day).isoweekday() != 7:  # Sunday = 7
-                working_days += 1
-        return working_days or days_in_month
+
+    exclude_weekdays = {7}  # Sunday
+    if weekend_rule == 'sat_sun' or lop_rule in ['working_days_5', 'exclude_sat_sun', '5_day_week']:
+        exclude_weekdays = {6, 7}  # Saturday & Sunday
+
+    working_days = 0
+    for day in range(1, days_in_month + 1):
+        if datetime.date(year, month, day).isoweekday() not in exclude_weekdays:
+            working_days += 1
+    return working_days or days_in_month
 
 
-def get_attendance_breakdown(employee, month, year, total_working_days):
+def get_attendance_breakdown(employee, month, year, total_working_days, hrms_settings=None):
     """
     Computes effective present days, paid leave days, absent days, and LOP days.
     Guarantees:
     1. Unlogged days between joining date and month-end default to present (no partial-log penalty).
     2. Mid-month joiners count pre-joining days as LOP while preserving post-joining absences.
     3. Unpaid leaves and quota-exhausted leaves are tracked as LOP, not paid days.
+    4. Respects tenant weekend settings (Sunday only vs. Saturday & Sunday).
     """
+    if hrms_settings is None and employee:
+        hrms_settings = get_hrms_settings(employee.tenant)
+
+    weekend_rule = getattr(hrms_settings, 'weekend_rule', 'sunday_only') if hrms_settings else 'sunday_only'
+    lop_rule = getattr(hrms_settings, 'lop_calculation_rule', 'working_days') if hrms_settings else 'working_days'
+
+    exclude_weekdays = {7}
+    if weekend_rule == 'sat_sun' or lop_rule in ['working_days_5', 'exclude_sat_sun', '5_day_week']:
+        exclude_weekdays = {6, 7}
+
     start_date = datetime.date(year, month, 1)
     days_in_month = calendar.monthrange(year, month)[1]
     end_date = datetime.date(year, month, days_in_month)
 
-    doj = employee.date_of_joining
+    doj = employee.date_of_joining if employee else None
     if isinstance(doj, str):
         try:
             doj = datetime.date.fromisoformat(doj)
@@ -75,7 +90,7 @@ def get_attendance_breakdown(employee, month, year, total_working_days):
     days_before_joining = 0
     if doj and doj > start_date and doj <= end_date:
         for d in range(1, doj.day):
-            if datetime.date(year, month, d).isoweekday() != 7:
+            if datetime.date(year, month, d).isoweekday() not in exclude_weekdays:
                 days_before_joining += 1
 
     records = {
@@ -99,7 +114,7 @@ def get_attendance_breakdown(employee, month, year, total_working_days):
             cur = max(app.start_date, start_date)
             app_end = min(app.end_date, end_date)
             while cur <= app_end:
-                if cur.isoweekday() != 7:
+                if cur.isoweekday() not in exclude_weekdays:
                     unpaid_leave_dates.add(cur)
                 cur += datetime.timedelta(days=1)
 
@@ -111,8 +126,8 @@ def get_attendance_breakdown(employee, month, year, total_working_days):
 
     for d in range(1, days_in_month + 1):
         cur_date = datetime.date(year, month, d)
-        if cur_date.isoweekday() == 7:
-            continue  # Sunday
+        if cur_date.isoweekday() in exclude_weekdays:
+            continue  # Weekend
 
         # If before joining, it's counted in days_before_joining
         if doj and cur_date < doj:

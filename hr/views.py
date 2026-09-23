@@ -19,7 +19,8 @@ from .models import (
     SalaryStructure, SalaryComponent, EmployeeSalaryAssignment,
     PayrollRun, Payslip, EmployeeSalaryHistory, OvertimeRecord,
     EmployeeAdvanceLoan, LoanRecoveryLog, PayrollException,
-    HRDocument, HRMSSettings, EmployeeAllowanceBonus
+    HRDocument, HRMSSettings, EmployeeAllowanceBonus,
+    EmployeeTaxDeclaration
 )
 from .serializers import (
     DepartmentSerializer, DesignationSerializer, EmployeeSerializer,
@@ -28,7 +29,7 @@ from .serializers import (
     PayrollRunSerializer, PayslipSerializer, EmployeeSalaryHistorySerializer,
     OvertimeRecordSerializer, EmployeeAdvanceLoanSerializer, LoanRecoveryLogSerializer,
     PayrollExceptionSerializer, HRDocumentSerializer, HRMSSettingsSerializer,
-    EmployeeAllowanceBonusSerializer
+    EmployeeAllowanceBonusSerializer, EmployeeTaxDeclarationSerializer
 )
 from .permissions import HRPermission
 from .services import audit_service, leave_service
@@ -425,6 +426,149 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         history = instance.salary_history.all().order_by('-effective_date', '-created_at')
         serializer = EmployeeSalaryHistorySerializer(history, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'])
+    def calculate_salary_breakdown(self, request):
+        """
+        Real-time interactive salary & tax calculator.
+        Given monthly_ctc (or annual_ctc), tax_regime, and optional component overrides,
+        returns instant computed breakdown of Basic, HRA, DA, Special Allowance,
+        Employee PF, ESI, PT, dynamic projected TDS, Net Take-Home, and Employer contributions.
+        """
+        from hr.services.tds_service import compute_tax_on_income
+        from hr.services.payroll_engine import compute_pt
+
+        data = request.data
+        monthly_ctc = data.get('monthly_ctc')
+        annual_ctc = data.get('annual_ctc')
+
+        if monthly_ctc is not None and str(monthly_ctc).strip() != '':
+            try:
+                ctc = Decimal(str(monthly_ctc)).quantize(Decimal('0.01'))
+            except Exception:
+                raise ValidationError("Invalid monthly_ctc format.")
+        elif annual_ctc is not None and str(annual_ctc).strip() != '':
+            try:
+                ctc = (Decimal(str(annual_ctc)) / Decimal('12.0')).quantize(Decimal('0.01'))
+            except Exception:
+                raise ValidationError("Invalid annual_ctc format.")
+        else:
+            ctc = Decimal('0.00')
+
+        regime = (data.get('tax_regime') or 'new').lower()
+        work_state = data.get('work_state') or ''
+        custom_components = data.get('components') or {}
+
+        if ctc <= Decimal('0.00'):
+            return Response({
+                'monthly_ctc': '0.00',
+                'annual_ctc': '0.00',
+                'gross_salary': '0.00',
+                'net_take_home_monthly': '0.00',
+                'net_take_home_annual': '0.00',
+                'earnings': {'basic': '0.00', 'hra': '0.00', 'da': '0.00', 'special_allowance': '0.00'},
+                'employee_deductions': {'employee_pf': '0.00', 'employee_esi': '0.00', 'professional_tax': '0.00', 'monthly_tds': '0.00', 'total_deductions': '0.00'},
+                'employer_contributions': {'employer_epf': '0.00', 'employer_eps': '0.00', 'employer_esi': '0.00', 'total_employer_cost': '0.00'},
+                'tds_details': {'regime': regime, 'projected_annual_gross': '0.00', 'net_taxable_income': '0.00', 'annual_tax': '0.00', 'rebate_applied': False, 'reason': 'No earnings provided.'}
+            })
+
+        basic_pct = Decimal(str(data.get('basic_pct', '50.0')))
+        hra_pct_of_basic = Decimal(str(data.get('hra_pct', '50.0')))
+
+        basic = Decimal(str(custom_components.get('basic') or custom_components.get('Basic') or (ctc * (basic_pct / Decimal('100.0'))))).quantize(Decimal('0.01'))
+        hra = Decimal(str(custom_components.get('hra') or custom_components.get('HRA') or (basic * (hra_pct_of_basic / Decimal('100.0'))))).quantize(Decimal('0.01'))
+        da = Decimal(str(custom_components.get('da') or custom_components.get('DA') or '0.00')).quantize(Decimal('0.01'))
+
+        subtotal_earnings = basic + hra + da
+        for k, v in custom_components.items():
+            if k.lower() not in ['basic', 'hra', 'da', 'special_allowance', 'special allowance']:
+                try:
+                    subtotal_earnings += Decimal(str(v)).quantize(Decimal('0.01'))
+                except Exception:
+                    pass
+
+        special_allowance = max(Decimal('0.00'), ctc - subtotal_earnings).quantize(Decimal('0.01'))
+        gross_salary = subtotal_earnings + special_allowance
+
+        employee_pf = (basic * Decimal('0.12')).quantize(Decimal('0.01'))
+        employee_esi = (gross_salary * Decimal('0.0075')).quantize(Decimal('0.01')) if gross_salary <= Decimal('21000.00') else Decimal('0.00')
+        pt = compute_pt(gross_salary, work_state)
+
+        decl = data.get('declarations') or {}
+        sec_80c = min(Decimal(str(decl.get('section_80c') or 0)), Decimal('150000.00'))
+        sec_80d = Decimal(str(decl.get('section_80d') or 0))
+        sec_24b = min(Decimal(str(decl.get('section_24b_home_loan') or 0)), Decimal('200000.00'))
+        hra_exempt = Decimal(str(decl.get('hra_exemption') or 0))
+        prev_income = Decimal(str(decl.get('declared_previous_income') or 0))
+        prev_tds = Decimal(str(decl.get('declared_previous_tds') or 0))
+
+        annual_gross = (gross_salary * Decimal('12.0')) + prev_income
+        if regime == 'new':
+            std_ded = Decimal('75000.00')
+            exemptions = std_ded
+        else:
+            std_ded = Decimal('50000.00')
+            exemptions = std_ded + sec_80c + sec_80d + sec_24b + hra_exempt
+
+        net_taxable = max(Decimal('0.00'), annual_gross - exemptions)
+        base_tax, rebate_applied, rebate_amount, cess, total_annual_tax = compute_tax_on_income(net_taxable, regime=regime)
+        remaining_tax = max(Decimal('0.00'), total_annual_tax - prev_tds)
+        monthly_tds = (remaining_tax / Decimal('12.0')).quantize(Decimal('0.01'))
+
+        total_deductions = employee_pf + employee_esi + pt + monthly_tds
+        net_take_home = max(Decimal('0.00'), gross_salary - total_deductions)
+
+        employer_epf = (basic * Decimal('0.0367')).quantize(Decimal('0.01'))
+        employer_eps = min(basic * Decimal('0.0833'), Decimal('1250.00')).quantize(Decimal('0.01'))
+        employer_esi = (gross_salary * Decimal('0.0325')).quantize(Decimal('0.01')) if gross_salary <= Decimal('21000.00') else Decimal('0.00')
+        total_employer_cost = ctc + employer_epf + employer_eps + employer_esi
+
+        regime_label = "New Regime (Sec 115BAC)" if regime == 'new' else "Old Tax Regime"
+        if monthly_tds == Decimal('0.00'):
+            if rebate_applied:
+                tds_reason = f"TDS skipped ({regime_label}): Taxable income Rs. {net_taxable:,.2f} is within Section 87A rebate threshold (Annual tax Rs. 0.00)."
+            else:
+                tds_reason = f"TDS skipped ({regime_label}): Annual income does not cross taxable slab."
+        else:
+            tds_reason = f"TDS under Sec 192 ({regime_label}): Annual Tax Rs. {total_annual_tax:,.2f} (incl. 4% cess) spread as Rs. {monthly_tds:,.2f}/mo."
+
+        return Response({
+            'monthly_ctc': str(ctc),
+            'annual_ctc': str((ctc * Decimal('12.0')).quantize(Decimal('0.01'))),
+            'gross_salary': str(gross_salary),
+            'net_take_home_monthly': str(net_take_home),
+            'net_take_home_annual': str((net_take_home * Decimal('12.0')).quantize(Decimal('0.01'))),
+            'earnings': {
+                'basic': str(basic),
+                'hra': str(hra),
+                'da': str(da),
+                'special_allowance': str(special_allowance),
+            },
+            'employee_deductions': {
+                'employee_pf': str(employee_pf),
+                'employee_esi': str(employee_esi),
+                'professional_tax': str(pt),
+                'monthly_tds': str(monthly_tds),
+                'total_deductions': str(total_deductions),
+            },
+            'employer_contributions': {
+                'employer_epf': str(employer_epf),
+                'employer_eps': str(employer_eps),
+                'employer_esi': str(employer_esi),
+                'total_employer_cost': str(total_employer_cost),
+            },
+            'tds_details': {
+                'regime': regime,
+                'projected_annual_gross': str(annual_gross),
+                'net_taxable_income': str(net_taxable),
+                'annual_tax': str(total_annual_tax),
+                'monthly_tds': str(monthly_tds),
+                'rebate_applied': rebate_applied,
+                'rebate_amount': str(rebate_amount),
+                'cess': str(cess),
+                'reason': tds_reason,
+            }
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get', 'post'])
     def documents(self, request, pk=None):
@@ -1954,3 +2098,36 @@ class EmployeeAllowanceBonusViewSet(viewsets.ModelViewSet):
         item.status = 'approved'
         item.save(update_fields=['status', 'updated_at'])
         return Response(self.get_serializer(item).data, status=status.HTTP_200_OK)
+
+
+class EmployeeTaxDeclarationViewSet(viewsets.ModelViewSet):
+    """
+    CRUD ViewSet for EmployeeTaxDeclaration under Section 192.
+    """
+    serializer_class = EmployeeTaxDeclarationSerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        qs = EmployeeTaxDeclaration.objects.filter(tenant=tenant)
+        employee_id = self.request.query_params.get('employee')
+        if employee_id:
+            qs = qs.filter(employee_id=employee_id)
+        fy = self.request.query_params.get('financial_year')
+        if fy:
+            qs = qs.filter(financial_year=fy)
+        return qs
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        instance = serializer.save(tenant=tenant)
+        audit_service.log_create(self.request, instance, changes={'employee': str(instance.employee_id), 'financial_year': instance.financial_year})
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        audit_service.log_update(self.request, instance, after={'regime': instance.regime, 'proof_verified': instance.proof_verified})
+
+    def perform_destroy(self, instance):
+        audit_service.log_delete(self.request, instance)
+        instance.delete()
+

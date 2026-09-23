@@ -12,13 +12,14 @@ from .views import (
     EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet,
     EmployeeSalaryHistoryViewSet, OvertimeRecordViewSet, EmployeeAdvanceLoanViewSet,
     PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView,
-    EmployeeAllowanceBonusViewSet
+    EmployeeAllowanceBonusViewSet, EmployeeTaxDeclarationViewSet
 )
 
 router = DefaultRouter()
 router.register(r'departments', DepartmentViewSet, basename='department')
 router.register(r'designations', DesignationViewSet, basename='designation')
 router.register(r'employees', EmployeeViewSet, basename='employee')
+router.register(r'tax-declarations', EmployeeTaxDeclarationViewSet, basename='tax-declaration')
 router.register(r'salary-history', EmployeeSalaryHistoryViewSet, basename='salary-history')
 router.register(r'overtime', OvertimeRecordViewSet, basename='overtime')
 router.register(r'advances-loans', EmployeeAdvanceLoanViewSet, basename='advance-loan')

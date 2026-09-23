@@ -155,10 +155,11 @@ class ComprehensivePayrollFixesTestCase(TestCase):
         self.assertEqual(payslip.deductions['Canteen Deduction'], '1000.00')
 
         # Net salary should subtract Canteen Deduction and statutory deductions
-        # Gross (50,000) - Deductions (PF: 2,400 + TDS: 2,817 + Canteen: 1,000 = 6,217) = 43,783
+        # Gross (50,000) - Deductions (PF: 2,400 + TDS: 0 [Sec 87A rebate for <=7L] + Canteen: 1,000 = 3,400) = 46,600
         self.assertEqual(payslip.employee_pf, Decimal('2400.00'))
-        self.assertEqual(payslip.total_deductions, Decimal('6217.00'))
-        self.assertEqual(payslip.net_salary, Decimal('43783.00'))
+        self.assertEqual(payslip.tds, Decimal('0.00'))
+        self.assertEqual(payslip.total_deductions, Decimal('3400.00'))
+        self.assertEqual(payslip.net_salary, Decimal('46600.00'))
 
         # Check deduction reason transparency
         self.assertIn('Canteen Deduction', payslip.deduction_reasons)

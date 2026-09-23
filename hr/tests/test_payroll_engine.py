@@ -35,18 +35,20 @@ class PayrollEngineTests(TestCase):
 
     def test_compute_tds_taxable(self):
         # 100k/mo = 12L/yr.
-        # Taxable:
-        # 0 to 2.5L = 0
-        # 2.5L to 5L = 12,500
-        # 5L to 10L = 100,000
-        # 10L to 12L = 60,000
-        # Total tax = 172,500
-        # Cess = 4% of 172,500 = 6,900
-        # Total = 179,400
-        # Monthly = 14,950.00
+        # New Regime (Sec 115BAC): Standard deduction Rs. 75,000 -> Taxable Rs. 11,25,000
+        # 0 to 3L = 0
+        # 3L to 7L = 20,000
+        # 7L to 10L = 30,000
+        # 10L to 11.25L = 18,750
+        # Total tax = 68,750 + 4% cess (2,750) = 71,500 -> Monthly = 5,958.33
         gross = Decimal('100000.00')
-        tds = compute_tds(gross)
-        self.assertEqual(tds, Decimal('14950.00'))
+        tds_new = compute_tds(gross, regime='new')
+        self.assertEqual(tds_new, Decimal('5958.33'))
+
+        # Old Regime: Standard deduction Rs. 50,000 -> Taxable Rs. 11,50,000
+        # Total tax = 157,500 + 4% cess (6,300) = 163,800 -> Monthly = 13,650.00
+        tds_old = compute_tds(gross, regime='old')
+        self.assertEqual(tds_old, Decimal('13650.00'))
         
     def test_compute_pt_with_slab(self):
         ProfessionalTaxSlab.objects.create(

@@ -568,13 +568,23 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         total_employer_cost = ctc + employer_epf + employer_eps + employer_esi
 
         regime_label = "New Regime (Sec 115BAC)" if regime == 'new' else "Old Tax Regime"
+        rebate_threshold = Decimal('700000.00') if regime == 'new' else Decimal('500000.00')
         if monthly_tds == Decimal('0.00'):
-            if rebate_applied:
+            if rebate_applied and net_taxable <= rebate_threshold:
                 tds_reason = f"TDS skipped ({regime_label}): Taxable income Rs. {net_taxable:,.2f} is within Section 87A rebate threshold (Annual tax Rs. 0.00)."
             else:
                 tds_reason = f"TDS skipped ({regime_label}): Annual income does not cross taxable slab."
         else:
-            tds_reason = f"TDS under Sec 192 ({regime_label}): Annual Tax Rs. {total_annual_tax:,.2f} (incl. 4% cess) spread as Rs. {monthly_tds:,.2f}/mo."
+            if rebate_applied and net_taxable > rebate_threshold:
+                excess = net_taxable - rebate_threshold
+                tds_reason = (
+                    f"TDS under Sec 192 with Marginal Relief ({regime_label}): "
+                    f"Taxable income Rs. {net_taxable:,.2f} exceeds ₹{rebate_threshold:,.0f} threshold by Rs. {excess:,.2f}. "
+                    f"Marginal relief applied – tax capped at excess Rs. {excess:,.2f}. "
+                    f"Annual Tax Rs. {total_annual_tax:,.2f} (incl. 4% cess), Rs. {monthly_tds:,.2f}/month."
+                )
+            else:
+                tds_reason = f"TDS under Sec 192 ({regime_label}): Annual Tax Rs. {total_annual_tax:,.2f} (incl. 4% cess) spread as Rs. {monthly_tds:,.2f}/mo."
 
         earnings_dict = {
             'basic': str(basic),

@@ -36,7 +36,13 @@ def get_financial_year_info(month, year):
 
 def compute_tax_on_income(taxable_income, regime='new'):
     """
-    Computes Indian Income Tax under New (Sec 115BAC) or Old Regime with Section 87A rebate.
+    Computes Indian Income Tax under New (Sec 115BAC) or Old Regime with Section 87A rebate
+    and Marginal Relief.
+
+    Marginal Relief (Section 87A): When taxable income slightly exceeds the rebate threshold
+    (₹7,00,000 for new regime, ₹5,00,000 for old regime), the total tax liability including
+    cess cannot exceed the amount by which income exceeds the threshold.
+
     Returns: (base_tax, rebate_applied, rebate_amount, cess, total_annual_tax)
     """
     ti = Decimal(str(taxable_income)).quantize(Decimal('0.01'))
@@ -47,6 +53,7 @@ def compute_tax_on_income(taxable_income, regime='new'):
 
     rebate_applied = False
     rebate_amount = Decimal('0.00')
+    marginal_relief_applied = False
 
     if regime == 'new':
         # New Tax Regime Slabs (Finance Act 2024 / Sec 115BAC)
@@ -69,13 +76,29 @@ def compute_tax_on_income(taxable_income, regime='new'):
         else:
             raw_tax = Decimal('140000.00') + (ti - Decimal('1500000.00')) * Decimal('0.30')
 
-        # Section 87A Rebate: Full rebate up to ₹25,000 if taxable income <= ₹7,00,000
-        if ti <= Decimal('700000.00') and raw_tax > 0:
-            rebate_amount = min(raw_tax, Decimal('25000.00'))
+        rebate_threshold = Decimal('700000.00')
+        max_rebate = Decimal('25000.00')
+
+        # Section 87A Rebate: Full rebate if taxable income <= ₹7,00,000
+        if ti <= rebate_threshold and raw_tax > 0:
+            rebate_amount = min(raw_tax, max_rebate)
             base_tax = max(Decimal('0.00'), raw_tax - rebate_amount)
             rebate_applied = True
         else:
             base_tax = raw_tax
+            # Marginal Relief: If income slightly exceeds ₹7,00,000, total tax (incl. cess)
+            # cannot exceed the excess income over the threshold
+            if ti > rebate_threshold:
+                excess_income = (ti - rebate_threshold).quantize(Decimal('0.01'))
+                normal_cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01'))
+                normal_total = (base_tax + normal_cess).quantize(Decimal('0.01'))
+                if normal_total > excess_income:
+                    # Apply marginal relief - cap total tax at excess income
+                    # Reverse engineer: total_with_cess = base * 1.04 = excess → base = excess / 1.04
+                    relieved_base = (excess_income / Decimal('1.04')).quantize(Decimal('0.01'))
+                    base_tax = relieved_base
+                    marginal_relief_applied = True
+
     else:
         # Old Tax Regime Slabs
         # 0 to 2,50,000        : Nil
@@ -91,19 +114,32 @@ def compute_tax_on_income(taxable_income, regime='new'):
         else:
             raw_tax = Decimal('112500.00') + (ti - Decimal('1000000.00')) * Decimal('0.30')
 
-        # Section 87A Rebate: Rebate up to ₹12,500 if taxable income <= ₹5,00,000
-        if ti <= Decimal('500000.00') and raw_tax > 0:
-            rebate_amount = min(raw_tax, Decimal('12500.00'))
+        rebate_threshold = Decimal('500000.00')
+        max_rebate = Decimal('12500.00')
+
+        # Section 87A Rebate: Full rebate if taxable income <= ₹5,00,000
+        if ti <= rebate_threshold and raw_tax > 0:
+            rebate_amount = min(raw_tax, max_rebate)
             base_tax = max(Decimal('0.00'), raw_tax - rebate_amount)
             rebate_applied = True
         else:
             base_tax = raw_tax
+            # Marginal Relief: If income slightly exceeds ₹5,00,000, total tax (incl. cess)
+            # cannot exceed the excess income over the threshold
+            if ti > rebate_threshold:
+                excess_income = (ti - rebate_threshold).quantize(Decimal('0.01'))
+                normal_cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01'))
+                normal_total = (base_tax + normal_cess).quantize(Decimal('0.01'))
+                if normal_total > excess_income:
+                    relieved_base = (excess_income / Decimal('1.04')).quantize(Decimal('0.01'))
+                    base_tax = relieved_base
+                    marginal_relief_applied = True
 
     base_tax = base_tax.quantize(Decimal('0.01'))
     cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01')) if base_tax > 0 else Decimal('0.00')
     total_annual_tax = (base_tax + cess).quantize(Decimal('0.01'))
 
-    return base_tax, rebate_applied, rebate_amount, cess, total_annual_tax
+    return base_tax, rebate_applied or marginal_relief_applied, rebate_amount, cess, total_annual_tax
 
 
 def compute_dynamic_tds(employee, current_month_gross, month, year):

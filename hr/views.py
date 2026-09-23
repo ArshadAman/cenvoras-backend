@@ -994,18 +994,28 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reopen(self, request, pk=None):
         instance = self.get_object()
-        if instance.status != 'locked' and not getattr(instance, 'finalised_at', None):
-            raise ValidationError("Only locked or finalised payroll runs can be reopened.")
+        if instance.status == 'draft':
+            raise ValidationError("Payroll run is already in draft status.")
 
-        if request.user.role not in ['admin', 'hr']:
-            raise ValidationError("Only HR Admin or Admin roles are authorized to reopen payroll.")
+        if instance.status not in ['calculated', 'review', 'approved', 'paid', 'locked'] and not getattr(instance, 'finalised_at', None):
+            raise ValidationError("Only processed, approved, paid, or locked payroll runs can be reopened.")
+
+        role = getattr(request.user, 'role', '')
+        is_owner_or_admin = (
+            request.user.is_superuser
+            or request.user.is_staff
+            or getattr(request.user, 'parent', None) is None
+            or role in ['admin', 'hr', 'accountant']
+        )
+        if not is_owner_or_admin:
+            raise ValidationError("Only HR, Admin, or authorized roles are authorized to reopen payroll.")
 
         reason = request.data.get('reason', '').strip()
         if not reason:
             raise ValidationError("A mandatory reason must be provided to reopen payroll.")
 
         before = {'status': instance.status}
-        # Reverse accounting entries
+        # Reverse accounting entries and restore loans if previously approved/paid/locked
         HRAccountingService.reverse_payroll_accrual(instance, request.user, reason)
 
         instance.status = 'draft'
@@ -1013,15 +1023,28 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance.reopened_by = request.user
         instance.reopened_at = timezone.now()
         instance.reopen_reason = reason
-        instance.save(update_fields=['status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason'])
+        instance.approved_at = None
+        instance.approved_by = None
+        instance.paid_at = None
+        instance.paid_by = None
+        instance.locked_at = None
+        instance.locked_by = None
+        instance.save(update_fields=[
+            'status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason',
+            'approved_at', 'approved_by', 'paid_at', 'paid_by', 'locked_at', 'locked_by'
+        ])
 
-        audit_service.log_update(
-            request,
-            instance,
-            before=before,
-            after={'status': 'draft', 'reopened_reason': reason},
-            model_name="PayrollReopen"
-        )
+        try:
+            audit_service.log_update(
+                request,
+                instance,
+                before=before,
+                after={'status': 'draft', 'reopened_reason': reason},
+                model_name="PayrollReopen"
+            )
+        except Exception:
+            pass
+
         return Response({'status': 'Payroll run reopened and accounting entries reversed for editing'}, status=status.HTTP_200_OK)
 
 

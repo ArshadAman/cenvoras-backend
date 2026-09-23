@@ -279,3 +279,64 @@ class EmployeeAPITests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Employee.objects.filter(id=emp.id).exists())
         self.assertFalse(Payslip.objects.filter(id=ps.id).exists())
+
+    def test_update_employee_salary_updates_latest_assignment(self):
+        """Test editing an existing employee's salary properly updates the latest assignment and salary details."""
+        from decimal import Decimal
+        self.client.force_authenticate(user=self.tenant1)
+
+        # 1. Create employee with initial salary of 50k and joining date in 2024
+        create_payload = {
+            'full_name': 'Salary Update Test',
+            'date_of_birth': '1992-05-15',
+            'date_of_joining': '2024-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'work_state': 'Karnataka',
+            'personal_phone': '9876543210',
+            'bank_name': 'HDFC',
+            'bank_account_number': '987654321',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Salary Update Test',
+            'salary': {
+                'monthly_ctc': 50000,
+                'components': {'Basic': 25000, 'HRA': 12500, 'Special Allowance': 12500}
+            }
+        }
+        res = self.client.post(self.list_url, create_payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        emp_id = res.data['id']
+        self.assertEqual(res.data['current_ctc'], '50000.00')
+
+        # 2. Update employee salary to 100k (with or without backdated effective_from)
+        update_payload = {
+            'salary': {
+                'monthly_ctc': 100000,
+                'components': {'Basic': 50000, 'HRA': 25000, 'Special Allowance': 25000}
+            }
+        }
+        detail_url = reverse('employee-detail', args=[emp_id])
+        res_update = self.client.patch(detail_url, update_payload, format='json')
+        self.assertEqual(res_update.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_update.data['current_ctc'], '100000.00')
+        self.assertIsNotNone(res_update.data.get('salary_details'))
+        self.assertEqual(res_update.data['salary_details']['monthly_ctc'], '100000.00')
+        self.assertIn('monthly_net_take_home', res_update.data['salary_details'])
+        self.assertIn('earnings', res_update.data['salary_details'])
+        self.assertIn('employee_deductions', res_update.data['salary_details'])
+        self.assertIn('tds_details', res_update.data['salary_details'])
+
+        # 3. Update again passing effective_from as date_of_joining (the previous bug condition)
+        update_payload_backdated = {
+            'salary': {
+                'monthly_ctc': 120000,
+                'effective_from': '2024-01-01',
+                'components': {'Basic': 60000, 'HRA': 30000, 'Special Allowance': 30000}
+            }
+        }
+        res_update2 = self.client.patch(detail_url, update_payload_backdated, format='json')
+        self.assertEqual(res_update2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_update2.data['current_ctc'], '120000.00')
+        self.assertEqual(res_update2.data['salary_details']['monthly_ctc'], '120000.00')

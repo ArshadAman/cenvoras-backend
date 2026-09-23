@@ -113,7 +113,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return '0.00'
 
     def get_salary_details(self, obj):
-        latest = obj.salary_assignments.order_by('-effective_from').first()
+        latest = obj.salary_assignments.order_by('-effective_from', '-id').first()
         if not latest or latest.monthly_ctc <= 0:
             return None
         ctc = latest.monthly_ctc
@@ -135,13 +135,14 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
         from hr.services.tds_service import compute_tax_on_income
         std_ded = Decimal('75000.00') if obj.tax_regime == 'new' else Decimal('50000.00')
-        annual_gross = gross * Decimal('12')
+        annual_gross = (gross * Decimal('12')).quantize(Decimal('0.01'))
         taxable = max(Decimal('0.00'), annual_gross - std_ded)
         _, _, _, _, annual_tax = compute_tax_on_income(taxable, regime=obj.tax_regime)
         estimated_tds = (annual_tax / Decimal('12')).quantize(Decimal('0.01'))
 
         total_deductions = epf + esi + pt + estimated_tds
         net_pay = max(Decimal('0.00'), gross - total_deductions)
+        annual_net_pay = (net_pay * Decimal('12')).quantize(Decimal('0.01'))
 
         # Employer contributions
         employer_epf = (basic * Decimal('0.0367')).quantize(Decimal('0.01'))
@@ -149,35 +150,68 @@ class EmployeeSerializer(serializers.ModelSerializer):
         employer_esi = (gross * Decimal('0.0325')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
         total_employer = employer_epf + employer_eps + employer_esi
 
+        is_rebate = taxable <= (Decimal('1200000.00') if obj.tax_regime == 'new' else Decimal('500000.00'))
+
+        comp_dict = {
+            'Basic': str(basic),
+            'HRA': str(hra),
+            'DA': str(da),
+            'Special Allowance': str(special),
+            'basic': str(basic),
+            'hra': str(hra),
+            'da': str(da),
+            'special_allowance': str(special),
+            **{k: str(v) for k, v in components.items() if k not in ['Basic', 'HRA', 'DA', 'Special Allowance', 'basic', 'hra', 'da', 'special_allowance']}
+        }
+
+        deductions_dict = {
+            'employee_pf': str(epf),
+            'employee_esi': str(esi),
+            'professional_tax': str(pt),
+            'monthly_tds': str(estimated_tds),
+            'annual_tds': str(annual_tax),
+            'total_deductions': str(total_deductions),
+        }
+
+        employer_dict = {
+            'employer_epf': str(employer_epf),
+            'employer_eps': str(employer_eps),
+            'employer_esi': str(employer_esi),
+            'total_employer_cost': str(total_employer),
+            'total_employer_contribution': str(total_employer),
+        }
+
+        tds_dict = {
+            'monthly_tds': str(estimated_tds),
+            'annual_tax': str(annual_tax),
+            'annual_net_tax': str(annual_tax),
+            'taxable_income': str(taxable),
+            'standard_deduction': str(std_ded),
+            'rebate_applied': is_rebate,
+            'reason': 'Zero tax under rebate limit' if is_rebate and annual_tax == Decimal('0.00') else '',
+        }
+
         return {
             'monthly_ctc': str(ctc),
             'annual_ctc': str((ctc * Decimal('12')).quantize(Decimal('0.01'))),
             'gross_salary': str(gross),
+            'monthly_gross': str(gross),
+            'annual_gross': str(annual_gross),
             'estimated_net_salary': str(net_pay),
+            'monthly_net_take_home': str(net_pay),
+            'net_take_home_monthly': str(net_pay),
+            'annual_net_take_home': str(annual_net_pay),
+            'net_take_home_annual': str(annual_net_pay),
             'salary_structure_id': str(latest.salary_structure_id),
             'salary_structure_name': latest.salary_structure.name,
             'effective_from': str(latest.effective_from),
-            'components': {
-                'basic': str(basic),
-                'hra': str(hra),
-                'da': str(da),
-                'special_allowance': str(special),
-                **{k: str(v) for k, v in components.items() if k not in ['Basic', 'HRA', 'DA', 'Special Allowance', 'basic', 'hra', 'da', 'special_allowance']}
-            },
-            'statutory_estimates': {
-                'employee_pf': str(epf),
-                'employee_esi': str(esi),
-                'professional_tax': str(pt),
-                'monthly_tds': str(estimated_tds),
-                'annual_tds': str(annual_tax),
-                'total_deductions': str(total_deductions),
-            },
-            'employer_estimates': {
-                'employer_epf': str(employer_epf),
-                'employer_eps': str(employer_eps),
-                'employer_esi': str(employer_esi),
-                'total_employer_contribution': str(total_employer),
-            },
+            'components': comp_dict,
+            'earnings': comp_dict,
+            'employee_deductions': deductions_dict,
+            'statutory_estimates': deductions_dict,
+            'employer_contributions': employer_dict,
+            'employer_estimates': employer_dict,
+            'tds_details': tds_dict,
             'tax_regime': obj.tax_regime,
         }
 
@@ -246,20 +280,27 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 )
 
         custom_components = salary_data.get('components') or {}
-        assignment = EmployeeSalaryAssignment.objects.filter(
-            employee=employee,
-            effective_from=effective_from,
-        ).first()
+        latest_existing = employee.salary_assignments.order_by('-effective_from', '-id').first()
+        prev_salary = latest_existing.monthly_ctc if latest_existing else Decimal('0.00')
 
-        prev_salary = Decimal('0.00')
-        latest_existing = employee.salary_assignments.order_by('-effective_from').first()
         if latest_existing:
-            prev_salary = latest_existing.monthly_ctc
-
-        if assignment:
-            assignment.salary_structure = structure
-            assignment.monthly_ctc = ctc
-            assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
+            # If explicit effective_from is given and strictly after latest_existing, create/update a new future assignment
+            if salary_data.get('effective_from') and str(salary_data.get('effective_from')) > str(latest_existing.effective_from):
+                assignment, _ = EmployeeSalaryAssignment.objects.get_or_create(
+                    tenant=tenant,
+                    employee=employee,
+                    effective_from=salary_data['effective_from'],
+                    defaults={'salary_structure': structure, 'monthly_ctc': ctc}
+                )
+                assignment.salary_structure = structure
+                assignment.monthly_ctc = ctc
+                assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
+            else:
+                # Update the active/latest assignment so current_ctc and salary_details immediately reflect the edit
+                assignment = latest_existing
+                assignment.salary_structure = structure
+                assignment.monthly_ctc = ctc
+                assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
         else:
             assignment = EmployeeSalaryAssignment.objects.create(
                 tenant=tenant,
@@ -283,15 +324,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
             assignment_serializer._compute_components(assignment)
 
         from hr.models import EmployeeSalaryHistory
-        EmployeeSalaryHistory.objects.create(
-            tenant=tenant,
-            employee=employee,
-            effective_date=effective_from,
-            previous_salary=prev_salary,
-            new_salary=ctc,
-            salary_structure=structure,
-            reason=salary_data.get('reason') or ("Initial salary assignment" if prev_salary == Decimal('0.00') else "Salary revision")
-        )
+        if prev_salary != ctc or not employee.salary_history.exists():
+            EmployeeSalaryHistory.objects.create(
+                tenant=tenant,
+                employee=employee,
+                effective_date=assignment.effective_from,
+                previous_salary=prev_salary,
+                new_salary=ctc,
+                salary_structure=structure,
+                reason=salary_data.get('reason') or ("Initial salary assignment" if prev_salary == Decimal('0.00') else "Salary revision")
+            )
 
     def _handle_tax_declaration(self, employee, declaration_data):
         if not declaration_data or not isinstance(declaration_data, dict):

@@ -333,3 +333,37 @@ class ComprehensivePayrollFixesTestCase(TestCase):
         self.assertIn('Beneficiary Account Number', content)
         self.assertIn('50100234567890', content)  # John's account
         self.assertIn('HDFC0001234', content)
+
+    def test_reopen_approved_and_locked_payroll_runs(self):
+        """Verify that an approved or locked payroll run can be reopened via API action."""
+        run_payroll(str(self.payroll_run.id))
+        self.payroll_run.refresh_from_db()
+        self.payroll_run.status = 'approved'
+        self.payroll_run.save()
+
+        client = APIClient()
+        client.force_authenticate(user=self.tenant)
+
+        # 1. Reopening an approved run should succeed (200 OK)
+        resp = client.post(f'/api/hr/payroll-runs/{self.payroll_run.id}/reopen/', {'reason': 'Leave adjust requested'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.payroll_run.refresh_from_db()
+        self.assertEqual(self.payroll_run.status, 'draft')
+        self.assertTrue(self.payroll_run.is_reopened)
+        self.assertEqual(self.payroll_run.reopen_reason, 'Leave adjust requested')
+        self.assertIsNone(self.payroll_run.approved_at)
+
+        # 2. Lock and reopen locked run
+        self.payroll_run.status = 'locked'
+        self.payroll_run.save()
+        resp2 = client.post(f'/api/hr/payroll-runs/{self.payroll_run.id}/reopen/', {'reason': 'Manager revision'})
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.payroll_run.refresh_from_db()
+        self.assertEqual(self.payroll_run.status, 'draft')
+        self.assertIsNone(self.payroll_run.locked_at)
+
+        # 3. Missing reason raises validation error (400 Bad Request)
+        self.payroll_run.status = 'approved'
+        self.payroll_run.save()
+        resp3 = client.post(f'/api/hr/payroll-runs/{self.payroll_run.id}/reopen/', {'reason': '   '})
+        self.assertEqual(resp3.status_code, status.HTTP_400_BAD_REQUEST)

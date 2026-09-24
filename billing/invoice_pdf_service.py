@@ -26,14 +26,19 @@ def safe_hex_color(hex_str, default_hex):
 
 
 def number_to_words(number):
-    """Convert amount to Indian numbering system words (Lakhs, Crores)."""
+    """Convert amount to Indian numbering system words (Rupees & Paise, Lakhs, Crores)."""
     try:
-        n = int(round(float(number)))
-    except (ValueError, TypeError):
-        return ""
-
-    if n == 0:
+        val = Decimal(str(number if number is not None else 0)).quantize(Decimal('0.01'))
+    except Exception:
         return "Zero Rupees Only"
+
+    if val == Decimal('0.00'):
+        return "Zero Rupees Only"
+
+    is_negative = val < 0
+    val = abs(val)
+    rupees = int(val)
+    paise = int((val - Decimal(rupees)) * 100)
 
     units = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
              "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
@@ -53,26 +58,45 @@ def number_to_words(number):
             words.append(units[num])
         return " ".join(words)
 
-    parts = []
-    crore = n // 10000000
-    if crore > 0:
-        parts.append(convert_upto_999(crore) + " Crore")
-        n %= 10000000
+    def convert_indian_number(n):
+        if n == 0:
+            return ""
+        parts = []
+        crore = n // 10000000
+        if crore > 0:
+            parts.append(convert_indian_number(crore) + " Crore")
+            n %= 10000000
+        lakh = n // 100000
+        if lakh > 0:
+            parts.append(convert_upto_999(lakh) + " Lakh")
+            n %= 100000
+        thousand = n // 1000
+        if thousand > 0:
+            parts.append(convert_upto_999(thousand) + " Thousand")
+            n %= 1000
+        if n > 0:
+            parts.append(convert_upto_999(n))
+        return " ".join(parts).strip()
 
-    lakh = n // 100000
-    if lakh > 0:
-        parts.append(convert_upto_999(lakh) + " Lakh")
-        n %= 100000
+    result_parts = []
+    if is_negative:
+        result_parts.append("Minus")
 
-    thousand = n // 1000
-    if thousand > 0:
-        parts.append(convert_upto_999(thousand) + " Thousand")
-        n %= 1000
+    if rupees > 0:
+        rupees_str = convert_indian_number(rupees)
+        result_parts.append(f"{rupees_str} {'Rupee' if rupees == 1 else 'Rupees'}")
 
-    if n > 0:
-        parts.append(convert_upto_999(n))
+    if paise > 0:
+        paise_str = convert_upto_999(paise)
+        paise_unit = 'Paisa' if paise == 1 else 'Paise'
+        if rupees > 0:
+            result_parts.append(f"and {paise_str} {paise_unit}")
+        else:
+            result_parts.append(f"{paise_str} {paise_unit}")
 
-    return " ".join(parts).strip() + " Rupees Only"
+    result_parts.append("Only")
+    return " ".join(result_parts).strip()
+
 
 
 def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_data=None):

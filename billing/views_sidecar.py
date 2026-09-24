@@ -660,13 +660,16 @@ def delivery_challan_pdf_download(request, pk):
 
     template_data = None
     if request.method == 'POST':
-        template_data = request.data.get('template')
+        template_data = request.data.get('template') if (isinstance(request.data, dict) and 'template' in request.data) else request.data
     elif request.GET.get('primary_color'):
         template_data = {
             'colors': {
                 'primary': request.GET.get('primary_color'),
                 'secondary': request.GET.get('secondary_color'),
                 'tableHeader': request.GET.get('table_header'),
+                'tableBorder': request.GET.get('table_border'),
+                'totalRow': request.GET.get('total_row'),
+                'totalText': request.GET.get('total_text'),
             },
             'layoutType': request.GET.get('layout_type', 'classic'),
         }
@@ -894,13 +897,16 @@ def quotation_pdf_download(request, pk):
 
     template_data = None
     if request.method == 'POST':
-        template_data = request.data.get('template')
+        template_data = request.data.get('template') if (isinstance(request.data, dict) and 'template' in request.data) else request.data
     elif request.GET.get('primary_color'):
         template_data = {
             'colors': {
                 'primary': request.GET.get('primary_color'),
                 'secondary': request.GET.get('secondary_color'),
                 'tableHeader': request.GET.get('table_header'),
+                'tableBorder': request.GET.get('table_border'),
+                'totalRow': request.GET.get('total_row'),
+                'totalText': request.GET.get('total_text'),
             },
             'layoutType': request.GET.get('layout_type', 'classic'),
         }

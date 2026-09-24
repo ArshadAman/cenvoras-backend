@@ -1863,6 +1863,47 @@ class InvoicePDFGenerationTests(TestCase):
         self.assertTrue(res.content.startswith(b'%PDF-'))
         self.assertLess(len(res.content) / 1024, 100.0)
 
+    def test_generate_invoice_pdf_layout_variations_and_size_benchmark(self):
+        """Vector engine generates lightweight PDFs (<50KB) across professional, legend, and classic layouts"""
+        from billing.invoice_pdf_service import generate_invoice_pdf
+
+        for layout in ['professional', 'legend', 'billship', 'service', 'classic']:
+            pdf_bytes = generate_invoice_pdf(
+                invoice_obj=self.invoice,
+                tenant=self.tenant,
+                document_type='invoice',
+                template_data={
+                    'layoutType': layout,
+                    'colors': {
+                        'primary': '#0f172a',
+                        'secondary': '#334155',
+                        'accent': '#2563eb',
+                    }
+                }
+            )
+            self.assertTrue(pdf_bytes.startswith(b'%PDF-'))
+            file_size_kb = len(pdf_bytes) / 1024
+            print(f"[PDF Benchmark] Layout '{layout}' file size: {file_size_kb:.2f} KB (Odoo Target: < 50 KB)")
+            self.assertLess(file_size_kb, 50.0, f"Layout {layout} size {file_size_kb:.2f} KB exceeds 50 KB")
+
+    def test_direct_template_payload_without_wrapper(self):
+        """POST /api/billing/sales-invoices/<id>/pdf/ works when template dict is passed at top level"""
+        client = APIClient()
+        client.force_authenticate(user=self.tenant)
+
+        payload = {
+            "layoutType": "professional",
+            "colors": {
+                "primary": "#1e3a8a",
+                "secondary": "#1d4ed8",
+            }
+        }
+        res = client.post(f"/api/billing/sales-invoices/{self.invoice.id}/pdf/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertTrue(res.content.startswith(b'%PDF-'))
+        self.assertLess(len(res.content) / 1024, 50.0)
+
     def test_deduplicate_sales_invoices_migration_helper(self):
         """deduplicate_sales_invoices must safely rename duplicate invoice numbers before unique constraint"""
         import importlib

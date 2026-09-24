@@ -355,6 +355,20 @@ def sales_invoice_pdf_download(request, pk):
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Invoice not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+    # If client passed rendered HTML of the exact template preview, generate pixel-perfect vector PDF
+    if request.method == 'POST' and isinstance(request.data, dict) and request.data.get('html'):
+        try:
+            from billing.html_pdf_service import render_html_to_vector_pdf
+            pdf_bytes = render_html_to_vector_pdf(request.data['html'])
+            filename = f"invoice-{invoice.invoice_number or invoice.id}.pdf"
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Content-Length'] = len(pdf_bytes)
+            return response
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"HTML vector PDF rendering fallback to ReportLab: {e}")
+
     template_data = None
     if request.method == 'POST':
         template_data = request.data.get('template') if (isinstance(request.data, dict) and 'template' in request.data) else request.data

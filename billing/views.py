@@ -367,7 +367,11 @@ def sales_invoice_pdf_download(request, pk):
             return response
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"HTML vector PDF rendering fallback to ReportLab: {e}")
+            logging.getLogger(__name__).warning(f"HTML vector PDF rendering failed: {e}")
+            return Response(
+                {'error': f'Server vector PDF rendering unavailable: {str(e)}', 'fallback_client': True},
+                status=status.HTTP_501_NOT_IMPLEMENTED
+            )
 
     template_data = None
     if request.method == 'POST':

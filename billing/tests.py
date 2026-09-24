@@ -1904,6 +1904,28 @@ class InvoicePDFGenerationTests(TestCase):
         self.assertTrue(res.content.startswith(b'%PDF-'))
         self.assertLess(len(res.content) / 1024, 50.0)
 
+    def test_sales_invoice_pdf_post_rendered_html(self):
+        """POST /api/billing/sales-invoices/<id>/pdf/ with html renders pixel-perfect vector PDF"""
+        client = APIClient()
+        client.force_authenticate(user=self.tenant)
+
+        sample_html = (
+            "<!DOCTYPE html><html><head><style>@page{size:A4;margin:10mm;}"
+            "body{font-family:sans-serif;color:#1e293b;}</style></head>"
+            "<body><h1>Cenvora Invoice</h1><p>Invoice #INV-001</p></body></html>"
+        )
+        res = client.post(
+            f"/api/billing/sales-invoices/{self.invoice.id}/pdf/",
+            {"html": sample_html},
+            format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertTrue(res.content.startswith(b'%PDF-'))
+        file_size_kb = len(res.content) / 1024
+        print(f"\n[PDF Benchmark] HTML Vector PDF size: {file_size_kb:.2f} KB (Odoo Target: < 50 KB)")
+        self.assertLess(file_size_kb, 50.0)
+
     def test_deduplicate_sales_invoices_migration_helper(self):
         """deduplicate_sales_invoices must safely rename duplicate invoice numbers before unique constraint"""
         import importlib

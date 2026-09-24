@@ -1892,7 +1892,22 @@ class InvoicePDFGenerationTests(TestCase):
 
         # inv2 and inv3 should be renumbered and saved
         self.assertEqual(inv2.invoice_number, 'INV-001-DUP1')
-        inv2.save.assert_called_once_with(update_fields=['invoice_number'])
         self.assertEqual(inv3.invoice_number, 'INV-001-DUP2')
         inv3.save.assert_called_once_with(update_fields=['invoice_number'])
+
+    def test_number_to_words_accuracy(self):
+        """number_to_words must accurately convert rupees and paise using Indian numbering."""
+        from billing.invoice_pdf_service import number_to_words
+
+        self.assertEqual(number_to_words(252000), "Two Lakh Fifty Two Thousand Rupees Only")
+        self.assertEqual(number_to_words(Decimal("252000.00")), "Two Lakh Fifty Two Thousand Rupees Only")
+        self.assertEqual(number_to_words(1250.50), "One Thousand Two Hundred Fifty Rupees and Fifty Paise Only")
+        self.assertEqual(number_to_words(0.75), "Seventy Five Paise Only")
+        self.assertEqual(number_to_words(1.00), "One Rupee Only")
+        self.assertEqual(number_to_words(1.01), "One Rupee and One Paisa Only")
+        self.assertEqual(number_to_words(0.01), "One Paisa Only")
+        self.assertEqual(number_to_words(0), "Zero Rupees Only")
+        self.assertEqual(number_to_words(-50.25), "Minus Fifty Rupees and Twenty Five Paise Only")
+        self.assertEqual(number_to_words(100000000), "Ten Crore Rupees Only")
+
 

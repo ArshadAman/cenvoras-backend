@@ -55,13 +55,13 @@ def render_html_to_vector_pdf(html_content, timeout_seconds=20):
     try:
         cmd = [
             chrome_path,
-            '--headless',
+            '--headless=new',
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
+            '--no-pdf-header-footer',
             '--run-all-compositor-stages-before-draw',
             f'--print-to-pdf={pdf_file}',
-            '--print-to-pdf-no-header',
             html_file,
         ]
 

@@ -155,6 +155,12 @@ def render_via_cdp(html_content, host=CDP_HOST, port=CDP_PORT, timeout=15):
             'params': {
                 'printBackground': True,
                 'preferCSSPageSize': True,
+                'paperWidth': 8.27,
+                'paperHeight': 11.69,
+                'marginTop': 0,
+                'marginBottom': 0,
+                'marginLeft': 0,
+                'marginRight': 0,
             }
         })
 

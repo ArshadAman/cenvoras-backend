@@ -588,6 +588,7 @@ def convert_challan_to_invoice(request, pk):
                     unit=c_item.unit or 'pcs',
                     discount=c_item.discount,
                     tax=c_item.tax,
+                    description=getattr(c_item, 'description', '') or '',
                 )
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
@@ -883,6 +884,7 @@ def quotation_convert_to_sales_order(request, pk):
             unit=item.unit or (item.product.unit if item.product else 'pcs') or 'pcs',
             discount=getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'),
             tax=getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00'),
+            description=getattr(item, 'description', '') or '',
         )
         item.converted_to_order = True
         item.save(update_fields=['converted_to_order'])

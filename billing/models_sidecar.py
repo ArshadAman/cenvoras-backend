@@ -157,6 +157,7 @@ class SalesOrderItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     @property
     def pending_quantity(self):
@@ -235,6 +236,7 @@ class DeliveryChallanItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     def __str__(self):
         return f"{self.product.name} x{self.quantity}"
@@ -310,6 +312,7 @@ class QuotationItem(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     approval_status = models.CharField(
         max_length=20,

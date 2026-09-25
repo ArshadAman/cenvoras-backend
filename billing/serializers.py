@@ -118,6 +118,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
     
     # Batch fields (Virtual fields, not mapped directly to model until to_internal_value)
     batch_number = serializers.CharField(required=False, write_only=True)
@@ -127,10 +128,15 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseBillItem
         fields = [
-            'product', 'product_detail', 'hsn_sac_code', 'unit',
+            'id', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit',
             'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
             'batch_number', 'expiry_date', 'mrp'
         ]
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
 
     def get_product_detail(self, obj):
         if not obj.product:
@@ -143,6 +149,13 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         }
 
     def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if 'product_description' in data and not data.get('description'):
+            data['description'] = data.get('product_description') or ''
+
         print("DEBUG product value:", data.get('product'), type(data.get('product')))
         product_value = data.get('product')
         if not product_value or not str(product_value).strip():
@@ -378,10 +391,16 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     tax = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'product', 'product_detail', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
+        fields = ['id', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
 
     def get_product_detail(self, obj):
         detail = {
@@ -397,6 +416,13 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         return detail
 
     def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if 'product_description' in data and not data.get('description'):
+            data['description'] = data.get('product_description') or ''
+
         print("DEBUG SalesInvoiceItemSerializer: Processing data:", data)
         product_value = data.get('product')
         print("DEBUG SalesInvoiceItemSerializer: Product value:", product_value, type(product_value))

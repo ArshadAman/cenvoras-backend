@@ -499,6 +499,14 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         if free_qty > 0:
             desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty)} Free (Promotional Offer)</b></font>"
 
+        item_desc = getattr(item, 'description', '') or ''
+        if not item_desc and hasattr(item, 'product') and getattr(item.product, 'description', ''):
+            item_desc = item.product.description
+        if item_desc:
+            from xml.sax.saxutils import escape
+            clean_desc = escape(str(item_desc).strip()).replace('\n', '<br/>')
+            desc_text += f"<br/><font color='#64748b' size=7>{clean_desc}</font>"
+
         qty_display = f"{int(qty) if qty % 1 == 0 else qty}"
         if getattr(item, 'unit', None):
             qty_display += f" {item.unit}"

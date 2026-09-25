@@ -152,6 +152,7 @@ class PurchaseOrderItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     def __str__(self):
         return f"{self.product.name} x{self.quantity}"
@@ -168,6 +169,7 @@ class PurchaseBillItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     # Scheme Support (Phase 6)
     free_quantity = models.PositiveIntegerField(default=0, help_text="Qty received free under scheme")
@@ -267,6 +269,7 @@ class SalesInvoiceItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
     
     # Scheme Support (Phase 6)
     free_quantity = models.PositiveIntegerField(default=0, help_text="Qty given free under scheme (Buy X Get Y)")

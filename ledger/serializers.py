@@ -22,55 +22,45 @@ class AccountSerializer(serializers.ModelSerializer):
 
 
 class GeneralLedgerEntrySerializer(serializers.ModelSerializer):
-    """Serializer for General Ledger entries"""
+    """Serializer for General Ledger entries with full partner and document context"""
     account_name = serializers.CharField(source='account.name', read_only=True)
     account_code = serializers.CharField(source='account.code', read_only=True)
     account_type = serializers.CharField(source='account.account_type', read_only=True)
     
-    # Related document information
-    sales_invoice_number = serializers.CharField(source='sales_invoice.invoice_number', read_only=True)
-    purchase_bill_number = serializers.CharField(source='purchase_bill.bill_number', read_only=True)
+    # Partner names
+    customer_name = serializers.CharField(source='customer.name', read_only=True, default=None)
+    vendor_name = serializers.CharField(source='vendor.name', read_only=True, default=None)
+    
+    # Related document numbers
+    sales_invoice_number = serializers.CharField(source='sales_invoice.invoice_number', read_only=True, default=None)
+    purchase_bill_number = serializers.CharField(source='purchase_bill.bill_number', read_only=True, default=None)
+    credit_note_number = serializers.CharField(source='credit_note.credit_note_number', read_only=True, default=None)
+    debit_note_number = serializers.CharField(source='debit_note.debit_note_number', read_only=True, default=None)
+    
+    # Computed fields (can be passed via context or annotated)
+    running_balance = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, read_only=True)
+    running_balance_type = serializers.CharField(required=False, read_only=True)
     
     class Meta:
         model = GeneralLedgerEntry
         fields = [
             'id', 'date', 'account', 'account_name', 'account_code', 'account_type',
             'debit', 'credit', 'description', 'reference',
-            'sales_invoice', 'sales_invoice_number', 'purchase_bill', 'purchase_bill_number',
+            'customer', 'customer_name', 'vendor', 'vendor_name', 'payment',
+            'sales_invoice', 'sales_invoice_number',
+            'purchase_bill', 'purchase_bill_number',
+            'credit_note', 'credit_note_number',
+            'debit_note', 'debit_note_number',
+            'running_balance', 'running_balance_type',
             'created_by', 'created_at'
         ]
         read_only_fields = [
             'id', 'account_name', 'account_code', 'account_type',
-            'sales_invoice_number', 'purchase_bill_number', 'created_by', 'created_at'
-        ]
-
-
-class AccountBalanceSerializer(serializers.Serializer):
-    """Serializer for account balance summary"""
-    account = AccountSerializer(read_only=True)
-    debit_total = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
-    credit_total = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
-    balance = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
-    
-    class Meta:
-        fields = ['account', 'debit_total', 'credit_total', 'balance']
-
-
-class GeneralLedgerEntrySerializer(serializers.ModelSerializer):
-    """Serializer for individual ledger entries"""
-    account_name = serializers.CharField(source='account.name', read_only=True)
-    account_code = serializers.CharField(source='account.code', read_only=True)
-    account_type = serializers.CharField(source='account.account_type', read_only=True)
-    
-    class Meta:
-        model = GeneralLedgerEntry
-        fields = [
-            'id', 'account', 'account_name', 'account_code', 'account_type',
-            'debit', 'credit', 'description', 'created_at'
-        ]
-        read_only_fields = [
-            'id', 'account_name', 'account_code', 'account_type',
-            'sales_invoice_number', 'purchase_bill_number', 'created_by', 'created_at'
+            'customer_name', 'vendor_name',
+            'sales_invoice_number', 'purchase_bill_number',
+            'credit_note_number', 'debit_note_number',
+            'running_balance', 'running_balance_type',
+            'created_by', 'created_at'
         ]
 
 

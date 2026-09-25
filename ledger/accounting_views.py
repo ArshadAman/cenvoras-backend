@@ -374,36 +374,31 @@ def general_ledger_entry_detail(request, entry_id):
         })
     
     elif request.method == 'DELETE':
-        # Never allow deleting debit entries to preserve accounting integrity.
-        if entry.debit and entry.debit > 0:
+        # Accounting Integrity: Individual ledger legs cannot be deleted independently.
+        # Deleting a single leg corrupts the double-entry accounting equation (Debits != Credits).
+        if entry.sales_invoice:
             return Response({
                 'success': False,
-                'error': 'Debit ledger entries cannot be deleted.'
+                'error': 'Cannot delete entries linked to a Sales Invoice. Void or delete the invoice to remove entries atomically.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Credit entries linked with bills are deletable only when bill is still pending.
-        if entry.sales_invoice:
-            if entry.sales_invoice.payment_status != 'pending':
-                return Response({
-                    'success': False,
-                    'error': 'Cannot delete credit ledger entry for non-pending sales bill.'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
         if entry.purchase_bill:
-            if entry.purchase_bill.payment_status != 'pending':
-                return Response({
-                    'success': False,
-                    'error': 'Cannot delete credit ledger entry for non-pending purchase bill.'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Store entry details for response
-        entry_info = f"{entry.account.name} - Dr: ${entry.debit} Cr: ${entry.credit}"
-        
-        entry.delete()
+            return Response({
+                'success': False,
+                'error': 'Cannot delete entries linked to a Purchase Bill. Void or delete the bill to remove entries atomically.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if entry.credit_note or entry.debit_note or entry.payment:
+            return Response({
+                'success': False,
+                'error': 'Cannot delete entries linked to a formal voucher. Cancel or reverse the source document.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # For manual entries, prohibit single-leg deletion to maintain balanced books
         return Response({
-            'success': True,
-            'message': f'General ledger entry deleted successfully: {entry_info}'
-        }, status=status.HTTP_204_NO_CONTENT)
+            'success': False,
+            'error': 'General ledger entries cannot be deleted individually. Create a reversing journal entry to adjust balances.'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 @swagger_auto_schema(
@@ -419,43 +414,402 @@ def general_ledger_entry_detail(request, entry_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def general_ledger_entries_list(request):
-    """List all general ledger entries with filtering options"""
+    """
+    List general ledger entries with opening balance, running balance,
+    partner/account filtering, and server-side pagination.
+    """
     tenant = getattr(request.user, 'active_tenant', request.user)
-    entries = GeneralLedgerEntry.objects.filter(created_by=tenant).select_related('account')
+    base_entries = GeneralLedgerEntry.objects.filter(created_by=tenant)
     
-    # Filter by date range
+    # 1. Filter parameters
+    account_id = request.query_params.get('account')
+    customer_id = request.query_params.get('customer')
+    vendor_id = request.query_params.get('vendor')
+    description = request.query_params.get('description')
     date_from = request.query_params.get('date_from')
     date_to = request.query_params.get('date_to')
-    if date_from:
-        entries = entries.filter(date__gte=date_from)
-    if date_to:
-        entries = entries.filter(date__lte=date_to)
-    
-    # Filter by account
-    account = request.query_params.get('account')
-    if account:
-        entries = entries.filter(account_id=account)
-    
-    # Filter by customer
-    customer = request.query_params.get('customer')
-    if customer:
-        entries = entries.filter(customer_id=customer)
-    
-    # Search by description
-    description = request.query_params.get('description')
+    ordering = request.query_params.get('ordering', '-date')
+
+    target_account = None
+    target_customer = None
+    target_vendor = None
+
+    if account_id:
+        base_entries = base_entries.filter(account_id=account_id)
+        target_account = Account.objects.filter(id=account_id, created_by=tenant).first()
+    if customer_id:
+        base_entries = base_entries.filter(customer_id=customer_id)
+        from billing.models import Customer
+        target_customer = Customer.objects.filter(id=customer_id, created_by=tenant).first()
+    if vendor_id:
+        base_entries = base_entries.filter(vendor_id=vendor_id)
+        from billing.models import Vendor
+        target_vendor = Vendor.objects.filter(id=vendor_id, created_by=tenant).first()
+
     if description:
-        entries = entries.filter(description__icontains=description)
+        base_entries = base_entries.filter(description__icontains=description)
+
+    # 2. Compute Opening Balance (prior to date_from)
+    from decimal import Decimal
+    opening_balance = Decimal('0.00')
+    opening_balance_type = 'Dr'
+
+    if date_from:
+        prior_entries = GeneralLedgerEntry.objects.filter(created_by=tenant, date__lt=date_from)
+        if account_id:
+            prior_entries = prior_entries.filter(account_id=account_id)
+        if customer_id:
+            prior_entries = prior_entries.filter(customer_id=customer_id)
+        if vendor_id:
+            prior_entries = prior_entries.filter(vendor_id=vendor_id)
+
+        prior_agg = prior_entries.aggregate(d_sum=Sum('debit'), c_sum=Sum('credit'))
+        p_debits = prior_agg['d_sum'] or Decimal('0.00')
+        p_credits = prior_agg['c_sum'] or Decimal('0.00')
+
+        if target_vendor:
+            # Vendor is Accounts Payable (Credit normal)
+            net_op = p_credits - p_debits
+            opening_balance = abs(net_op)
+            opening_balance_type = 'Cr' if net_op >= 0 else 'Dr'
+        elif target_account and target_account.account_type in [AccountType.LIABILITY, AccountType.EQUITY, AccountType.REVENUE]:
+            net_op = p_credits - p_debits
+            opening_balance = abs(net_op)
+            opening_balance_type = 'Cr' if net_op >= 0 else 'Dr'
+        else:
+            # Customer (Accounts Receivable) or Asset/Expense: Debit normal
+            net_op = p_debits - p_credits
+            opening_balance = abs(net_op)
+            opening_balance_type = 'Dr' if net_op >= 0 else 'Cr'
+
+    # 3. Filter period entries
+    period_entries = base_entries
+    if date_from:
+        period_entries = period_entries.filter(date__gte=date_from)
+    if date_to:
+        period_entries = period_entries.filter(date__lte=date_to)
+
+    # Aggregate period totals
+    period_agg = period_entries.aggregate(d_sum=Sum('debit'), c_sum=Sum('credit'))
+    period_debit_total = period_agg['d_sum'] or Decimal('0.00')
+    period_credit_total = period_agg['c_sum'] or Decimal('0.00')
+
+    # Compute closing balance
+    if target_vendor or (target_account and target_account.account_type in [AccountType.LIABILITY, AccountType.EQUITY, AccountType.REVENUE]):
+        signed_op = opening_balance if opening_balance_type == 'Cr' else -opening_balance
+        net_closing = signed_op + period_credit_total - period_debit_total
+        closing_balance = abs(net_closing)
+        closing_balance_type = 'Cr' if net_closing >= 0 else 'Dr'
+    else:
+        signed_op = opening_balance if opening_balance_type == 'Dr' else -opening_balance
+        net_closing = signed_op + period_debit_total - period_credit_total
+        closing_balance = abs(net_closing)
+        closing_balance_type = 'Dr' if net_closing >= 0 else 'Cr'
+
+    # 4. Compute Running Balances (Chronological pass)
+    chronological_entries = list(period_entries.select_related(
+        'account', 'customer', 'vendor', 'sales_invoice', 'purchase_bill', 'credit_note', 'debit_note'
+    ).order_by('date', 'created_at', 'id'))
+
+    is_credit_normal = target_vendor or (target_account and target_account.account_type in [AccountType.LIABILITY, AccountType.EQUITY, AccountType.REVENUE])
+    current_running = (opening_balance if opening_balance_type == 'Cr' else -opening_balance) if is_credit_normal else (opening_balance if opening_balance_type == 'Dr' else -opening_balance)
+
+    for entry in chronological_entries:
+        if is_credit_normal:
+            current_running += (entry.credit - entry.debit)
+            entry.running_balance = abs(current_running)
+            entry.running_balance_type = 'Cr' if current_running >= 0 else 'Dr'
+        else:
+            current_running += (entry.debit - entry.credit)
+            entry.running_balance = abs(current_running)
+            entry.running_balance_type = 'Dr' if current_running >= 0 else 'Cr'
+
+    # Order by user preference (default desc for ledger tables)
+    if ordering.startswith('-'):
+        entries_list = list(reversed(chronological_entries))
+    else:
+        entries_list = chronological_entries
+
+    total_count = len(entries_list)
+
+    # 5. Server-side Pagination
+    page_param = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
     
-    entries = entries.order_by('-date', '-created_at')
-    
+    if page_param or page_size_param:
+        try:
+            page = max(1, int(page_param or 1))
+            page_size = max(1, min(200, int(page_size_param or 20)))
+        except ValueError:
+            page = 1
+            page_size = 20
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_entries = entries_list[start_idx:end_idx]
+        total_pages = (total_count + page_size - 1) // page_size if page_size else 1
+    else:
+        page = 1
+        page_size = 20
+        start_idx = 0
+        end_idx = page_size
+        paginated_entries = entries_list[start_idx:end_idx]
+        total_pages = (total_count + page_size - 1) // page_size if page_size else 1
+
     from .serializers import GeneralLedgerEntrySerializer
-    serializer = GeneralLedgerEntrySerializer(entries, many=True)
-    
+    serializer = GeneralLedgerEntrySerializer(paginated_entries, many=True)
+
+    partner_payload = None
+    if target_customer:
+        partner_payload = {
+            'type': 'customer',
+            'id': str(target_customer.id),
+            'name': target_customer.name,
+            'email': target_customer.email or '',
+            'phone': target_customer.phone or '',
+            'gstin': getattr(target_customer, 'gstin', '') or '',
+            'state': getattr(target_customer, 'state', '') or '',
+        }
+    elif target_vendor:
+        partner_payload = {
+            'type': 'vendor',
+            'id': str(target_vendor.id),
+            'name': target_vendor.name,
+            'email': target_vendor.email or '',
+            'phone': target_vendor.phone or '',
+            'gstin': getattr(target_vendor, 'gstin', '') or '',
+            'state': getattr(target_vendor, 'state', '') or '',
+        }
+
     return Response({
         'success': True,
-        'count': len(entries),
+        'count': total_count,
+        'total_pages': total_pages,
+        'current_page': page,
+        'page_size': page_size,
+        'opening_balance': opening_balance,
+        'opening_balance_type': opening_balance_type,
+        'period_debit_total': period_debit_total,
+        'period_credit_total': period_credit_total,
+        'closing_balance': closing_balance,
+        'closing_balance_type': closing_balance_type,
+        'partner': partner_payload,
         'entries': serializer.data
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def partner_statement(request):
+    """
+    Dedicated endpoint for Customer or Vendor Statement of Account.
+    Query params:
+      partner_type: 'customer' | 'vendor'
+      partner_id: UUID
+      date_from, date_to, page, page_size
+    """
+    partner_type = request.query_params.get('partner_type', 'customer').lower()
+    partner_id = request.query_params.get('partner_id')
+    if not partner_id:
+        return Response({'success': False, 'error': 'partner_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Forward to general_ledger_entries_list by injecting query parameters
+    req_get = request.GET.copy()
+    if partner_type == 'vendor':
+        req_get['vendor'] = partner_id
+    else:
+        req_get['customer'] = partner_id
+    request._request.GET = req_get
+
+    return general_ledger_entries_list(request._request)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def partner_statement_pdf(request):
+    """
+    Generate and stream pixel-perfect Vector PDF Statement of Account via Warm Chromium CDP.
+    Query params:
+      partner_type: 'customer' | 'vendor'
+      partner_id: UUID
+      date_from, date_to
+    """
+    from django.http import HttpResponse
+    from billing.html_pdf_service import render_html_to_vector_pdf
+    from decimal import Decimal
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    partner_type = request.query_params.get('partner_type', 'customer').lower()
+    partner_id = request.query_params.get('partner_id')
+
+    if not partner_id:
+        return HttpResponse("partner_id is required", status=400)
+
+    # Fetch partner
+    partner_name = "Account"
+    partner_details = {}
+    if partner_type == 'vendor':
+        from billing.models import Vendor
+        vendor = Vendor.objects.filter(id=partner_id, created_by=tenant).first()
+        if not vendor:
+            return HttpResponse("Vendor not found", status=404)
+        partner_name = vendor.name
+        partner_details = {
+            'name': vendor.name,
+            'email': vendor.email or '',
+            'phone': vendor.phone or '',
+            'gstin': vendor.gstin or '',
+            'address': vendor.address or '',
+            'state': getattr(vendor, 'state', '') or '',
+            'type_label': 'Vendor / Creditor'
+        }
+    else:
+        from billing.models import Customer
+        customer = Customer.objects.filter(id=partner_id, created_by=tenant).first()
+        if not customer:
+            return HttpResponse("Customer not found", status=404)
+        partner_name = customer.name
+        partner_details = {
+            'name': customer.name,
+            'email': customer.email or '',
+            'phone': customer.phone or '',
+            'gstin': customer.gstin or '',
+            'address': customer.address or '',
+            'state': getattr(customer, 'state', '') or '',
+            'type_label': 'Client / Debtor'
+        }
+
+    # Query all entries in range (no pagination for full PDF statement)
+    req_get = request.GET.copy()
+    req_get['page_size'] = '1000'
+    req_get['page'] = '1'
+    if partner_type == 'vendor':
+        req_get['vendor'] = partner_id
+    else:
+        req_get['customer'] = partner_id
+    request._request.GET = req_get
+
+    resp = general_ledger_entries_list(request._request)
+    data = resp.data
+
+    date_from_str = request.query_params.get('date_from') or 'Beginning'
+    date_to_str = request.query_params.get('date_to') or timezone.now().strftime('%Y-%m-%d')
+    company_name = getattr(tenant, 'company_name', None) or getattr(tenant, 'name', None) or 'Business'
+    company_gstin = getattr(tenant, 'gstin', '') or ''
+    company_phone = getattr(tenant, 'phone', '') or ''
+    company_email = getattr(tenant, 'email', '') or ''
+
+    # Build HTML rows
+    table_rows = []
+    for entry in data.get('entries', []):
+        d_val = f"₹{Decimal(str(entry['debit'])):,.2f}" if Decimal(str(entry['debit'])) > 0 else "-"
+        c_val = f"₹{Decimal(str(entry['credit'])):,.2f}" if Decimal(str(entry['credit'])) > 0 else "-"
+        r_val = f"₹{Decimal(str(entry.get('running_balance', 0))):,.2f} {entry.get('running_balance_type', '')}"
+        table_rows.append(f"""
+            <tr style="border-bottom: 1px solid #e5e7eb; font-size: 11px;">
+                <td style="padding: 8px 10px; white-space: nowrap;">{entry['date']}</td>
+                <td style="padding: 8px 10px; font-weight: 600;">{entry.get('reference') or '-'}</td>
+                <td style="padding: 8px 10px; max-width: 250px;">{entry['description']}</td>
+                <td style="padding: 8px 10px; text-align: right; color: #b91c1c; font-family: monospace;">{d_val}</td>
+                <td style="padding: 8px 10px; text-align: right; color: #15803d; font-family: monospace;">{c_val}</td>
+                <td style="padding: 8px 10px; text-align: right; font-weight: 700; font-family: monospace;">{r_val}</td>
+            </tr>
+        """)
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Statement of Account - {partner_name}</title>
+<style>
+    @page {{ size: A4 portrait; margin: 15mm 15mm 15mm 15mm; }}
+    body {{ font-family: 'DejaVu Sans', 'Noto Sans', sans-serif; color: #111827; margin: 0; padding: 0; background: #fff; }}
+    .header {{ display: flex; justify-content: space-between; border-bottom: 2px solid #111827; padding-bottom: 14px; margin-bottom: 20px; }}
+    .title {{ font-size: 22px; font-weight: 900; letter-spacing: -0.5px; text-transform: uppercase; color: #111827; }}
+    .subtitle {{ font-size: 11px; color: #6b7280; margin-top: 4px; }}
+    .company-info {{ text-align: right; font-size: 11px; line-height: 1.5; color: #374151; }}
+    .kpi-grid {{ display: flex; gap: 12px; margin-bottom: 22px; }}
+    .kpi-card {{ flex: 1; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px; background: #f9fafb; }}
+    .kpi-label {{ font-size: 10px; font-weight: 700; text-transform: uppercase; color: #6b7280; }}
+    .kpi-val {{ font-size: 16px; font-weight: 800; margin-top: 4px; font-family: monospace; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+    th {{ background: #f3f4f6; text-align: left; padding: 8px 10px; font-size: 10px; font-weight: 800; text-transform: uppercase; color: #374151; border-bottom: 2px solid #d1d5db; }}
+</style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <div class="title">Statement of Account</div>
+            <div class="subtitle">Period: <strong>{date_from_str}</strong> to <strong>{date_to_str}</strong></div>
+            <div style="margin-top: 10px; font-size: 12px; line-height: 1.5;">
+                <span style="font-size: 9px; font-weight: 800; color: #6b7280; text-transform: uppercase;">Statement For</span><br/>
+                <strong style="font-size: 14px; color: #111827;">{partner_details.get('name')}</strong><br/>
+                {f"GSTIN: {partner_details['gstin']}<br/>" if partner_details.get('gstin') else ''}
+                {f"Phone: {partner_details['phone']}<br/>" if partner_details.get('phone') else ''}
+                {f"Address: {partner_details['address']}<br/>" if partner_details.get('address') else ''}
+            </div>
+        </div>
+        <div class="company-info">
+            <strong style="font-size: 16px; color: #111827;">{company_name}</strong><br/>
+            {f"GSTIN: {company_gstin}<br/>" if company_gstin else ''}
+            {f"Phone: {company_phone}<br/>" if company_phone else ''}
+            {f"Email: {company_email}<br/>" if company_email else ''}
+        </div>
+    </div>
+
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-label">Opening Balance</div>
+            <div class="kpi-val">₹{Decimal(str(data.get('opening_balance', 0))):,.2f} {data.get('opening_balance_type', '')}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Total Debits</div>
+            <div class="kpi-val" style="color: #b91c1c;">₹{Decimal(str(data.get('period_debit_total', 0))):,.2f}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Total Credits</div>
+            <div class="kpi-val" style="color: #15803d;">₹{Decimal(str(data.get('period_credit_total', 0))):,.2f}</div>
+        </div>
+        <div class="kpi-card" style="background: #111827; border-color: #111827; color: #fff;">
+            <div class="kpi-label" style="color: #9ca3af;">Closing Balance</div>
+            <div class="kpi-val" style="color: #fff;">₹{Decimal(str(data.get('closing_balance', 0))):,.2f} {data.get('closing_balance_type', '')}</div>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 80px;">Date</th>
+                <th style="width: 110px;">Reference</th>
+                <th>Description</th>
+                <th style="width: 100px; text-align: right;">Debit (Dr)</th>
+                <th style="width: 100px; text-align: right;">Credit (Cr)</th>
+                <th style="width: 120px; text-align: right;">Balance</th>
+            </tr>
+        </thead>
+        <tbody>
+            {"".join(table_rows) if table_rows else '<tr><td colspan="6" style="text-align: center; padding: 24px; color: #6b7280;">No transactions during this period</td></tr>'}
+        </tbody>
+    </table>
+
+    <div style="margin-top: 36px; padding-top: 14px; border-top: 1px solid #e5e7eb; display: flex; justify-content: space-between; font-size: 10px; color: #6b7280;">
+        <div>Generated by Cenvoras Accounting Engine &bull; {timezone.now().strftime('%d %b %Y, %I:%M %p')}</div>
+        <div style="text-align: right;">Authorized Signatory</div>
+    </div>
+</body>
+</html>
+"""
+
+    try:
+        pdf_bytes = render_html_to_vector_pdf(html_content, landscape=False, print_background=True)
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        safe_name = partner_name.replace(' ', '_')
+        response['Content-Disposition'] = f'attachment; filename="Statement_{safe_name}.pdf"'
+        return response
+    except Exception as e:
+        logger.error(f"Error rendering statement vector PDF: {e}")
+        return HttpResponse(f"Error generating PDF: {str(e)}", status=500)
+
 
 
 @swagger_auto_schema(

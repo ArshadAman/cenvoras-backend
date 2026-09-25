@@ -335,6 +335,8 @@ class AccountingService:
 
         total_tax = Decimal('0.00')
 
+        vendor_obj = getattr(purchase_bill, 'vendor', None)
+
         if line_items:
             for item in line_items:
                 taxable_amount, tax_amount = cls._calculate_item_tax_split(item)
@@ -364,6 +366,7 @@ class AccountingService:
                     description=item_description,
                     reference=f"{purchase_bill.bill_number}-{item.id}",
                     purchase_bill=purchase_bill,
+                    vendor=vendor_obj,
                     created_by=user
                 )
         else:
@@ -377,6 +380,7 @@ class AccountingService:
                 description=f"Purchase from {purchase_bill.vendor_name}",
                 reference=purchase_bill.bill_number,
                 purchase_bill=purchase_bill,
+                vendor=vendor_obj,
                 created_by=user
             )
 
@@ -391,6 +395,7 @@ class AccountingService:
                     description=f"Input IGST for Bill {purchase_bill.bill_number}",
                     reference=purchase_bill.bill_number,
                     purchase_bill=purchase_bill,
+                    vendor=vendor_obj,
                     created_by=user
                 )
             else:
@@ -405,6 +410,7 @@ class AccountingService:
                         description=f"Input CGST for Bill {purchase_bill.bill_number}",
                         reference=purchase_bill.bill_number,
                         purchase_bill=purchase_bill,
+                        vendor=vendor_obj,
                         created_by=user
                     )
                 if sgst > 0:
@@ -416,6 +422,7 @@ class AccountingService:
                         description=f"Input SGST for Bill {purchase_bill.bill_number}",
                         reference=purchase_bill.bill_number,
                         purchase_bill=purchase_bill,
+                        vendor=vendor_obj,
                         created_by=user
                     )
 
@@ -441,6 +448,7 @@ class AccountingService:
             description=detailed_payable_description,
             reference=purchase_bill.bill_number,
             purchase_bill=purchase_bill,
+            vendor=vendor_obj,
             created_by=user
         )
 
@@ -469,6 +477,7 @@ class AccountingService:
                 description=f"Rounding off adjustment for Bill {purchase_bill.bill_number}",
                 reference=purchase_bill.bill_number,
                 purchase_bill=purchase_bill,
+                vendor=vendor_obj,
                 created_by=user
             )
 
@@ -514,6 +523,13 @@ class AccountingService:
             mode_display = mode.replace('_', ' ').title() if mode else ''
             via = f" via {mode_display}" if mode_display else ""
         sales_invoice = invoice or kwargs.get('sales_invoice')
+        payment_obj = None
+        if payment_id:
+            from billing.models import Payment
+            if isinstance(payment_id, Payment):
+                payment_obj = payment_id
+            else:
+                payment_obj = Payment.objects.filter(id=payment_id).first()
 
         # Debit: Cash or Bank (increase asset)
         GeneralLedgerEntry.objects.create(
@@ -525,6 +541,7 @@ class AccountingService:
             reference=reference,
             customer=customer,
             sales_invoice=sales_invoice,
+            payment=payment_obj,
             created_by=user
         )
         
@@ -538,6 +555,7 @@ class AccountingService:
             reference=reference,
             customer=customer,
             sales_invoice=sales_invoice,
+            payment=payment_obj,
             created_by=user
         )
         
@@ -555,6 +573,8 @@ class AccountingService:
         payment_mode=None,
         payment_account=None,
         purchase_bill=None,
+        vendor=None,
+        payment=None,
         **kwargs
     ):
         """
@@ -577,6 +597,20 @@ class AccountingService:
 
         payment_description = description or f"Payment made to {vendor_name}"
 
+        # Resolve vendor
+        vendor_obj = vendor or kwargs.get('vendor')
+        if not vendor_obj and bill_obj and getattr(bill_obj, 'vendor', None):
+            vendor_obj = bill_obj.vendor
+        if not vendor_obj and vendor_name:
+            from billing.models import Vendor
+            vendor_obj = Vendor.objects.filter(name__iexact=vendor_name, created_by=user).first()
+
+        # Resolve payment
+        payment_obj = payment or kwargs.get('payment')
+        if payment_obj and not hasattr(payment_obj, 'pk'):
+            from billing.models import Payment
+            payment_obj = Payment.objects.filter(id=payment_obj).first()
+
         # Debit: Accounts Payable (reduce what we owe)
         GeneralLedgerEntry.objects.create(
             date=date,
@@ -586,6 +620,8 @@ class AccountingService:
             description=payment_description,
             reference="Payment Made",
             purchase_bill=bill_obj,
+            vendor=vendor_obj,
+            payment=payment_obj,
             created_by=user
         )
         
@@ -598,6 +634,8 @@ class AccountingService:
             description=payment_description,
             reference="Payment Made",
             purchase_bill=bill_obj,
+            vendor=vendor_obj,
+            payment=payment_obj,
             created_by=user
         )
         
@@ -822,6 +860,13 @@ class AccountingService:
         else:
             total_taxable = debit_note.total_amount
 
+        vendor_obj = getattr(debit_note, 'vendor', None)
+        if not vendor_obj and debit_note.original_bill and getattr(debit_note.original_bill, 'vendor', None):
+            vendor_obj = debit_note.original_bill.vendor
+        if not vendor_obj and getattr(debit_note, 'vendor_name', None):
+            from billing.models import Vendor
+            vendor_obj = Vendor.objects.filter(name__iexact=debit_note.vendor_name, created_by=user).first()
+
         # Debit: Accounts Payable (reduce amount owed to vendor)
         GeneralLedgerEntry.objects.create(
             date=debit_note.date,
@@ -831,6 +876,7 @@ class AccountingService:
             description=description,
             reference=debit_note.debit_note_number,
             debit_note=debit_note,
+            vendor=vendor_obj,
             created_by=user
         )
 
@@ -843,6 +889,7 @@ class AccountingService:
             description=description,
             reference=debit_note.debit_note_number,
             debit_note=debit_note,
+            vendor=vendor_obj,
             created_by=user
         )
 
@@ -857,6 +904,7 @@ class AccountingService:
                     description=f"Input IGST Reversal - DN {debit_note.debit_note_number}",
                     reference=debit_note.debit_note_number,
                     debit_note=debit_note,
+                    vendor=vendor_obj,
                     created_by=user
                 )
             else:
@@ -871,6 +919,7 @@ class AccountingService:
                         description=f"Input CGST Reversal - DN {debit_note.debit_note_number}",
                         reference=debit_note.debit_note_number,
                         debit_note=debit_note,
+                        vendor=vendor_obj,
                         created_by=user
                     )
                 if sgst > 0:
@@ -882,6 +931,7 @@ class AccountingService:
                         description=f"Input SGST Reversal - DN {debit_note.debit_note_number}",
                         reference=debit_note.debit_note_number,
                         debit_note=debit_note,
+                        vendor=vendor_obj,
                         created_by=user
                     )
 

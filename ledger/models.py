@@ -44,12 +44,19 @@ class GeneralLedgerEntry(models.Model):
     credit_note = models.ForeignKey('billing.CreditNote', on_delete=models.CASCADE, null=True, blank=True)
     debit_note = models.ForeignKey('billing.DebitNote', on_delete=models.CASCADE, null=True, blank=True)
     customer = models.ForeignKey('billing.Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
+    vendor = models.ForeignKey('billing.Vendor', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
+    payment = models.ForeignKey('billing.Payment', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         ordering = ['-date', '-created_at']
-    
+        indexes = [
+            models.Index(fields=['created_by', 'date']),
+            models.Index(fields=['created_by', 'account', 'date']),
+            models.Index(fields=['created_by', 'customer', 'date']),
+            models.Index(fields=['created_by', 'vendor', 'date']),
+        ]
     
     def __str__(self):
         return f"{self.account.name} - Dr:{self.debit} Cr:{self.credit}"

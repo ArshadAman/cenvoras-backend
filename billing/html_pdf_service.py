@@ -9,6 +9,7 @@ import base64
 import json
 import urllib.request
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -43,31 +44,39 @@ def _send_ws_frame(sock, payload_dict):
     sock.sendall(header + mask + masked)
 
 
-def _recv_ws_frame(sock):
-    header = sock.recv(2)
-    if len(header) < 2:
-        raise ConnectionResetError("Incomplete WebSocket frame header")
-    b1, b2 = struct.unpack('!BB', header)
-    length = b2 & 0x7F
-    if length == 126:
-        ext = sock.recv(2)
-        length = struct.unpack('!H', ext)[0]
-    elif length == 127:
-        ext = sock.recv(8)
-        length = struct.unpack('!Q', ext)[0]
-    payload = b''
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            break
-        payload += chunk
-    return json.loads(payload.decode('utf-8', errors='ignore'))
+def _recv_ws_msg(sock, target_id=None, timeout=10):
+    start = time.time()
+    sock.settimeout(timeout)
+    while True:
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Timed out waiting for WebSocket message with id={target_id}")
+
+        header = sock.recv(2)
+        if len(header) < 2:
+            raise ConnectionResetError("Incomplete WebSocket frame header")
+        b1, b2 = struct.unpack('!BB', header)
+        length = b2 & 0x7F
+        if length == 126:
+            ext = sock.recv(2)
+            length = struct.unpack('!H', ext)[0]
+        elif length == 127:
+            ext = sock.recv(8)
+            length = struct.unpack('!Q', ext)[0]
+        payload = b''
+        while len(payload) < length:
+            chunk = sock.recv(length - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        msg = json.loads(payload.decode('utf-8', errors='ignore'))
+        if target_id is None or msg.get('id') == target_id:
+            return msg
 
 
 def render_via_cdp(html_content, host=CDP_HOST, port=CDP_PORT, timeout=15):
     """
     Render HTML to vector PDF using a persistent warm Chromium daemon over CDP.
-    Typical render time: 80ms - 150ms (15x faster than cold binary spawn).
+    Waits for layout lifecycle to settle so rendered output is never blank.
     """
     target_id = None
     sock = None
@@ -102,26 +111,46 @@ def render_via_cdp(html_content, host=CDP_HOST, port=CDP_PORT, timeout=15):
         if '101' not in resp_hdr:
             raise ConnectionError(f"WebSocket handshake failed: {resp_hdr}")
 
-        # 3. Enable Page domain
+        # 3. Enable Page and Runtime domains
         _send_ws_frame(sock, {'id': 1, 'method': 'Page.enable'})
-        _recv_ws_frame(sock)
+        _recv_ws_msg(sock, target_id=1, timeout=5)
 
-        # 4. Get Frame ID
         _send_ws_frame(sock, {'id': 2, 'method': 'Page.getFrameTree'})
-        ft = _recv_ws_frame(sock)
+        ft = _recv_ws_msg(sock, target_id=2, timeout=5)
         frame_id = ft.get('result', {}).get('frameTree', {}).get('frame', {}).get('id', target_id)
 
-        # 5. Inject document HTML
+        # 4. Inject document HTML
         _send_ws_frame(sock, {
             'id': 3,
             'method': 'Page.setDocumentContent',
             'params': {'frameId': frame_id, 'html': html_content}
         })
-        _recv_ws_frame(sock)
+        _recv_ws_msg(sock, target_id=3, timeout=5)
+
+        # 5. Wait for layout, fonts, and DOM painting to complete
+        _send_ws_frame(sock, {
+            'id': 4,
+            'method': 'Runtime.evaluate',
+            'params': {
+                'expression': 'new Promise(resolve => {'
+                              '  const ready = () => {'
+                              '    if (document.readyState === "complete") {'
+                              '      requestAnimationFrame(() => setTimeout(resolve, 60));'
+                              '    } else {'
+                              '      window.addEventListener("load", () => requestAnimationFrame(() => setTimeout(resolve, 60)));'
+                              '    }'
+                              '  };'
+                              '  ready();'
+                              '})',
+                'awaitPromise': True,
+                'returnByValue': True
+            }
+        })
+        _recv_ws_msg(sock, target_id=4, timeout=5)
 
         # 6. Execute Print to PDF
         _send_ws_frame(sock, {
-            'id': 4,
+            'id': 5,
             'method': 'Page.printToPDF',
             'params': {
                 'printBackground': True,
@@ -129,14 +158,12 @@ def render_via_cdp(html_content, host=CDP_HOST, port=CDP_PORT, timeout=15):
             }
         })
 
-        # Wait for printToPDF response with id 4
-        while True:
-            msg = _recv_ws_frame(sock)
-            if msg.get('id') == 4:
-                if 'error' in msg:
-                    raise RuntimeError(f"CDP printToPDF error: {msg['error']}")
-                pdf_base64 = msg['result']['data']
-                return base64.b64decode(pdf_base64)
+        res = _recv_ws_msg(sock, target_id=5, timeout=timeout)
+        if 'error' in res:
+            raise RuntimeError(f"CDP printToPDF error: {res['error']}")
+
+        pdf_base64 = res['result']['data']
+        return base64.b64decode(pdf_base64)
 
     finally:
         if sock:
@@ -182,6 +209,7 @@ def find_chrome_binary():
 def render_via_cli_subprocess(html_content, timeout_seconds=20):
     """
     Fallback: Render HTML to vector PDF using cold CLI subprocess.
+    Uses file:// URL and --virtual-time-budget to guarantee complete rendering.
     """
     chrome_path = find_chrome_binary()
     if not chrome_path:
@@ -204,8 +232,9 @@ def render_via_cli_subprocess(html_content, timeout_seconds=20):
             '--disable-software-rasterizer',
             '--no-pdf-header-footer',
             '--run-all-compositor-stages-before-draw',
+            '--virtual-time-budget=1500',
             f'--print-to-pdf={pdf_file}',
-            html_file,
+            f'file://{html_file}',
         ]
 
         result = subprocess.run(

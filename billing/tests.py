@@ -1973,4 +1973,241 @@ class InvoicePDFGenerationTests(TestCase):
         self.assertEqual(number_to_words(-50.25), "Minus Fifty Rupees and Twenty Five Paise Only")
         self.assertEqual(number_to_words(100000000), "Ten Crore Rupees Only")
 
+    def test_sales_invoice_edit_credit_limit_not_double_counted(self):
+        """Editing an invoice must not double count its existing amount against the customer's credit limit."""
+        from billing.models import SalesInvoiceItem
+        from rest_framework.test import APIRequestFactory
+        from billing.serializers import SalesInvoiceSerializer
+        customer = Customer.objects.create(
+            name='Credit Strict Customer',
+            created_by=self.tenant,
+            allow_credit=False,
+            credit_limit=Decimal('500.00'),
+            current_balance=Decimal('500.00')
+        )
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            customer_name=customer.name,
+            invoice_number='INV-CREDIT-EDIT',
+            invoice_date=date.today(),
+            status='final',
+            total_amount=Decimal('500.00'),
+            created_by=self.tenant
+        )
+        SalesInvoiceItem.objects.create(
+            sales_invoice=invoice,
+            product=self.product,
+            quantity=2,
+            price=Decimal('250.00'),
+            amount=Decimal('500.00'),
+        )
+
+        factory = APIRequestFactory()
+        request = factory.put(f'/api/billing/sales-invoices/{invoice.id}/edit/')
+        request.user = self.tenant
+
+        payload = {
+            'customer_name': customer.name,
+            'invoice_number': 'INV-CREDIT-EDIT',
+            'invoice_date': str(date.today()),
+            'status': 'final',
+            'total_amount': '500.00',
+            'items': [{
+                'product': str(self.product.id),
+                'quantity': 2,
+                'price': 250,
+                'amount': 500,
+            }]
+        }
+
+        serializer = SalesInvoiceSerializer(invoice, data=payload, context={'request': request})
+        self.assertTrue(serializer.is_valid(), f"Serializer errors: {serializer.errors}")
+        updated_invoice = serializer.save()
+        self.assertEqual(updated_invoice.total_amount, Decimal('500.00'))
+
+    def test_sales_invoice_edit_partial_paid_no_false_positive_immutable_errors(self):
+        """Editing a partial_paid invoice must allow updating permitted fields without false positive immutable errors."""
+        from billing.models import SalesInvoiceItem
+        from rest_framework.test import APIRequestFactory
+        from billing.serializers import SalesInvoiceSerializer
+        customer = Customer.objects.create(
+            name='Partial Paid Customer',
+            created_by=self.tenant,
+            allow_credit=True
+        )
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            customer_name='',
+            invoice_number='INV-PART-EDIT',
+            invoice_date=date.today(),
+            status='final',
+            total_amount=Decimal('500.00'),
+            amount_paid=Decimal('200.00'),
+            payment_status='partial_paid',
+            created_by=self.tenant
+        )
+        SalesInvoiceItem.objects.create(
+            sales_invoice=invoice,
+            product=self.product,
+            quantity=2,
+            price=Decimal('250.00'),
+            amount=Decimal('500.00'),
+        )
+
+        factory = APIRequestFactory()
+        request = factory.put(f'/api/billing/sales-invoices/{invoice.id}/edit/')
+        request.user = self.tenant
+
+        payload = {
+            'customer_name': 'Partial Paid Customer',
+            'invoice_number': 'INV-PART-EDIT',
+            'invoice_date': str(date.today()),
+            'status': 'final',
+            'delivery_address': 'New Delivery Address',
+            'total_amount': '500.00',
+            'items': [{
+                'product': str(self.product.id),
+                'quantity': 2,
+                'price': 250,
+                'amount': 500,
+            }]
+        }
+
+        serializer = SalesInvoiceSerializer(invoice, data=payload, context={'request': request})
+        self.assertTrue(serializer.is_valid(), f"Serializer errors: {serializer.errors}")
+        updated_invoice = serializer.save()
+        self.assertEqual(updated_invoice.delivery_address, 'New Delivery Address')
+
+
+class DraftSequenceAndQuotationLifecycleTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from inventory.models import Product
+        User = get_user_model()
+        self.tenant = User.objects.create_user(
+            username="seq_lifecycle_user",
+            email="seq_lifecycle@test.com",
+            password="testpassword123",
+            business_name="Seq Tenant",
+        )
+        self.customer = Customer.objects.create(
+            name="Seq Customer",
+            email="seqcust@test.com",
+            created_by=self.tenant
+        )
+        self.product = Product.objects.create(
+            name="Lifecycle Widget",
+            price=Decimal('100.00'),
+            created_by=self.tenant
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.tenant)
+
+    def test_clean_sequence_no_uuid(self):
+        from billing.sequence_service import allocate_next_number, display_document_number
+        num1 = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(num1, 'INV-001')
+        num2 = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(num2, 'INV-002')
+        # Test display_document_number helper
+        self.assertEqual(display_document_number('INV-ABBA-002'), 'INV-002')
+        self.assertEqual(display_document_number('INV-002'), 'INV-002')
+
+    def test_draft_does_not_consume_final_sequence(self):
+        # 1. Create first final bill
+        res1 = self.client.post("/api/billing/sales-invoices/", {
+            "customer_name": "Seq Customer",
+            "invoice_date": str(date.today()),
+            "status": "final",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+        }, format='json')
+        self.assertEqual(res1.status_code, 201)
+        self.assertEqual(res1.data['invoice_number'], 'INV-001')
+
+        # 2. Create second final bill
+        res2 = self.client.post("/api/billing/sales-invoices/", {
+            "customer_name": "Seq Customer",
+            "invoice_date": str(date.today()),
+            "status": "final",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+        }, format='json')
+        self.assertEqual(res2.status_code, 201)
+        self.assertEqual(res2.data['invoice_number'], 'INV-002')
+
+        # 3. Create a draft bill
+        res_draft = self.client.post("/api/billing/sales-invoices/", {
+            "customer_name": "Seq Customer",
+            "invoice_date": str(date.today()),
+            "status": "draft",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+        }, format='json')
+        self.assertEqual(res_draft.status_code, 201)
+        self.assertEqual(res_draft.data['invoice_number'], 'DFT-001')
+
+        # 4. Create another final bill -> MUST BE INV-003, NOT INV-004
+        res3 = self.client.post("/api/billing/sales-invoices/", {
+            "customer_name": "Seq Customer",
+            "invoice_date": str(date.today()),
+            "status": "final",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+        }, format='json')
+        self.assertEqual(res3.status_code, 201)
+        self.assertEqual(res3.data['invoice_number'], 'INV-003')
+
+        # 5. Promote draft to final -> MUST BE INV-004
+        draft_id = res_draft.data['id']
+        res_promote = self.client.put(f"/api/billing/sales-invoices/{draft_id}/edit/", {
+            "customer_name": "Seq Customer",
+            "invoice_number": "DFT-001",
+            "invoice_date": str(date.today()),
+            "status": "final",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+        }, format='json')
+        self.assertEqual(res_promote.status_code, 200)
+        self.assertEqual(res_promote.data['invoice_number'], 'INV-004')
+
+    def test_sales_order_deletion_reverts_quotation_to_pending(self):
+        from billing.models_sidecar import Quotation, QuotationItem, SalesOrder
+        quotation = Quotation.objects.create(
+            quotation_number="QT-001",
+            quotation_date=date.today(),
+            customer=self.customer,
+            customer_name=self.customer.name,
+            total_amount=Decimal('100.00'),
+            status='approved',
+            created_by=self.tenant
+        )
+        q_item = QuotationItem.objects.create(
+            quotation=quotation,
+            product=self.product,
+            quantity=1,
+            price=Decimal('100.00'),
+            amount=Decimal('100.00'),
+            approval_status='approved'
+        )
+
+        # Convert quotation to sales order
+        res_conv = self.client.post(f"/api/billing/quotations/{quotation.id}/convert-to-sales-order/", {
+            "approved_item_ids": [str(q_item.id)]
+        }, format='json')
+        self.assertEqual(res_conv.status_code, 200)
+
+        order_id = res_conv.data['sales_order_id']
+        quotation.refresh_from_db()
+        q_item.refresh_from_db()
+        self.assertEqual(quotation.status, 'converted')
+        self.assertTrue(q_item.converted_to_order)
+
+        # Delete the sales order
+        res_del = self.client.delete(f"/api/billing/sales-orders/{order_id}/")
+        self.assertEqual(res_del.status_code, 204)
+
+        # Verify quotation and item reverted to pending
+        quotation.refresh_from_db()
+        q_item.refresh_from_db()
+        self.assertEqual(quotation.status, 'pending')
+        self.assertFalse(q_item.converted_to_order)
+
+
+
 

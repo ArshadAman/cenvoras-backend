@@ -561,6 +561,8 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             result = super().to_internal_value(data)
             print("DEBUG SalesInvoiceItemSerializer: Super call successful")
             return result
+        except serializers.ValidationError:
+            raise
         except Exception as e:
             error_msg = f'Error in parent serializer validation: {str(e)}'
             print("DEBUG SalesInvoiceItemSerializer: Super call error -", error_msg)
@@ -624,7 +626,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
         data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))
         data['customer_gstin'] = getattr(customer, 'gstin', None) if customer else data.get('customer_gstin')
+        from billing.sequence_service import display_document_number
+        data['display_number'] = display_document_number(instance.invoice_number)
         return data
+
 
     @staticmethod
     def _calculate_line_amount(item_data):
@@ -672,23 +677,30 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             immutable_fields = ['invoice_number', 'invoice_date', 'customer_name', 'place_of_supply']
             immutable_errors = {}
             for field in immutable_fields:
-                if field in data and data[field] != getattr(self.instance, field):
+                if field not in data:
+                    continue
+                new_val = data[field]
+                old_val = getattr(self.instance, field)
+                if field == 'customer_name' and (not old_val or not str(old_val).strip()) and self.instance.customer:
+                    old_val = self.instance.customer.name
+                new_str = str(new_val).strip() if new_val is not None else ""
+                old_str = str(old_val).strip() if old_val is not None else ""
+                if new_str != old_str:
                     immutable_errors[field] = f'{field} cannot be changed after payment has been recorded.'
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
         if customer:
             if not customer.allow_credit:
-                # Strict Check: If allow_credit is False, STRICTLY enforce the limit
-                # We interpret allow_credit=False as "Credit Limit is Enforced"
-                # If allow_credit=True, we might allow overriding (blocking warning vs error)
-                # For now, simplistic login:
-                
-                # Check current balance (Owes us positive) + New Bill
-                new_balance = customer.current_balance + total_amount
+                # Check current balance (Owes us positive) + New Bill delta
+                old_amount = Decimal('0.00')
+                if self.instance and self.instance.status == 'final' and self.instance.customer_id == customer.id:
+                    old_amount = Decimal(str(self.instance.total_amount or 0))
+
+                new_balance = customer.current_balance - old_amount + total_amount
                 
                 # Debug print
-                print(f"DEBUG Credit Check: Customer={customer.name}, Bal={customer.current_balance}, Limit={customer.credit_limit}, New={new_balance}")
+                print(f"DEBUG Credit Check: Customer={customer.name}, Bal={customer.current_balance}, OldInvTotal={old_amount}, Limit={customer.credit_limit}, New={new_balance}")
                 
                 if new_balance > customer.credit_limit:
                     raise serializers.ValidationError(
@@ -740,9 +752,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Create/find Customer object by email when available, else by name.
         if customer_email and customer_email.strip():
             print("DEBUG SalesInvoiceSerializer: Email provided, will create/find Customer object")
-            try:
-                # Try to find customer by email
-                customer_obj = Customer.objects.get(email=customer_email, created_by=user)
+            customer_obj = Customer.objects.filter(email=customer_email, created_by=user).first()
+            if customer_obj:
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
                 # Update details if different
                 updated = False
@@ -761,7 +772,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 if updated:
                     customer_obj.save()
                     print("DEBUG SalesInvoiceSerializer: Updated customer details")
-            except Customer.DoesNotExist:
+            else:
                 # Create new customer with email
                 print("DEBUG SalesInvoiceSerializer: Creating new customer with email:", customer_name)
                 try:
@@ -828,6 +839,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             result = super().to_internal_value(temp_data)
             print("DEBUG SalesInvoiceSerializer: Super call successful")
             return result
+        except serializers.ValidationError:
+            raise
         except Exception as e:
             error_msg = f'Error in parent serializer validation: {str(e)}'
             print("DEBUG SalesInvoiceSerializer: Super call error -", error_msg)
@@ -949,12 +962,21 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         old_total_amount = Decimal(str(instance.total_amount or 0))
         resolved_customer = getattr(self, '_customer_obj', None)
         
+        # Check draft-to-final promotion
+        new_status = validated_data.get('status', old_status)
+        is_draft_to_final = (old_status == 'draft' or (instance.invoice_number and instance.invoice_number.startswith('DFT-'))) and new_status == 'final'
+        if is_draft_to_final:
+            from billing.sequence_service import allocate_next_number
+            instance.invoice_number = allocate_next_number(instance.created_by, document_type='sales_invoice', is_draft=False)
+            validated_data.pop('invoice_number', None)
+
         # Update the sales invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if resolved_customer is not None:
             instance.customer = resolved_customer
         instance.save()
+
 
         # Keep linked payments in sync when invoice customer changes.
         if old_customer_id != instance.customer_id and instance.customer_id:
@@ -997,6 +1019,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 item_data.pop('applied_scheme', None)
                 item_data.pop('product_detail', None)
                 item_data.pop('is_scheme_bonus', None)
+                item_data.pop('id', None)
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
 

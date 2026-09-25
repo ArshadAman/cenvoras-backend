@@ -139,9 +139,25 @@ class SalesOrder(models.Model):
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     notes = models.TextField(blank=True)
+    source_quotation = models.ForeignKey(
+        'billing.Quotation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_orders',
+        help_text="Original quotation this order was converted from"
+    )
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def delete(self, *args, **kwargs):
+        if self.source_quotation:
+            q = self.source_quotation
+            q.status = 'pending'
+            q.save(update_fields=['status'])
+            q.items.update(converted_to_order=False)
+        return super().delete(*args, **kwargs)
 
     def __str__(self):
         return f"SO: {self.order_number} ({self.customer.name})"
@@ -196,6 +212,7 @@ class DeliveryChallan(models.Model):
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     STATUS_CHOICES = [
+        ('draft', 'Draft'),
         ('open', 'Open'),
         ('billed', 'Billed'),
         ('cancelled', 'Cancelled'),
@@ -376,3 +393,19 @@ class EInvoice(models.Model):
     
     def __str__(self):
         return f"E-Invoice IRN: {self.irn or 'Pending'} for {self.invoice.invoice_number}"
+
+
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
+
+@receiver(pre_delete, sender=SalesOrder)
+def revert_quotation_on_sales_order_delete(sender, instance, **kwargs):
+    if getattr(instance, 'source_quotation', None):
+        try:
+            q = instance.source_quotation
+            q.status = 'pending'
+            q.save(update_fields=['status'])
+            q.items.update(converted_to_order=False)
+        except Exception:
+            pass
+

@@ -138,8 +138,17 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'items', 'created_by', 'created_at']
+        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'source_quotation', 'items', 'created_by', 'created_at']
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        from billing.sequence_service import display_document_number
+        ret['display_number'] = display_document_number(instance.order_number)
+        ret['customer_name'] = instance.customer.name if instance.customer else ''
+        ret['invoice_number'] = instance.order_number
+        ret['invoice_date'] = str(instance.date) if instance.date else ''
+        return ret
 
     def _resolve_customer(self, validated_data):
         """Find or create a Customer from the customer_name field."""
@@ -167,14 +176,20 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items')
         customer = self._resolve_customer(validated_data)
         validated_data['customer'] = customer
-        validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        validated_data['created_by'] = tenant
         
+        if not validated_data.get('order_number'):
+            from billing.sequence_service import allocate_next_number
+            validated_data['order_number'] = allocate_next_number(tenant, document_type='sales_order')
+
         order = SalesOrder.objects.create(**validated_data)
         
         for item_data in items_data:
             SalesOrderItem.objects.create(order=order, **item_data)
             
         return order
+
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
@@ -373,6 +388,14 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             }
         return None
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        from billing.sequence_service import display_document_number
+        ret['display_number'] = display_document_number(instance.challan_number)
+        ret['invoice_number'] = instance.challan_number
+        ret['invoice_date'] = str(instance.date) if instance.date else ''
+        return ret
+
     @staticmethod
     def _calculate_line_amount(item_data):
         quantity = Decimal(str(item_data.get('quantity', 0) or 0))
@@ -391,15 +414,19 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = user
 
-        # Auto-allocate challan number if empty
-        if not validated_data.get('challan_number'):
+        is_draft = validated_data.get('status') == 'draft'
+        ch_num = validated_data.get('challan_number')
+        # Auto-allocate challan number if empty or wrong prefix
+        if not ch_num or (is_draft and not ch_num.startswith('D-DC-')) or (not is_draft and ch_num.startswith('D-DC-')):
             from billing.sequence_service import allocate_next_number
             raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
             validated_data['challan_number'] = allocate_next_number(
                 tenant=user,
                 document_type='delivery_challan',
-                prefix=raw_prefix
+                prefix=raw_prefix,
+                is_draft=is_draft
             )
+
 
         # Smart customer resolution
         cust_name = validated_data.get('customer_name')
@@ -452,8 +479,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         items_data = validated_data.pop('items', None)
 
+        old_status = instance.status
+        new_status = validated_data.get('status', old_status)
+        is_draft_promotion = (old_status == 'draft' or (instance.challan_number and instance.challan_number.startswith('D-DC-'))) and new_status not in ['draft', 'cancelled']
+        if is_draft_promotion:
+            from billing.sequence_service import allocate_next_number
+            instance.challan_number = allocate_next_number(instance.created_by, document_type='delivery_challan', is_draft=False)
+            validated_data.pop('challan_number', None)
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+
 
         if items_data is not None:
             # Restore stock for existing items
@@ -548,8 +584,19 @@ class QuotationItemSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        ret['product_name'] = instance.product.name if instance.product else ''
         ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        if instance.product:
+            ret['product_detail'] = {
+                'id': str(instance.product.id),
+                'name': instance.product.name,
+                'price': str(instance.product.price),
+                'tax': str(instance.product.tax),
+                'hsn_sac_code': instance.product.hsn_sac_code,
+                'unit': instance.product.unit,
+            }
         return ret
+
 
     def _get_tenant(self):
         request = self.context.get('request')
@@ -686,6 +733,17 @@ class QuotationSerializer(serializers.ModelSerializer):
             'state': obj.customer.state,
         }
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        from billing.sequence_service import display_document_number
+        ret['quotation_number'] = instance.quotation_number
+        ret['invoice_number'] = instance.quotation_number
+        ret['quotation_date'] = str(instance.quotation_date) if instance.quotation_date else None
+        ret['invoice_date'] = str(instance.quotation_date) if instance.quotation_date else None
+        ret['display_number'] = display_document_number(instance.quotation_number)
+        return ret
+
+
     def validate(self, attrs):
         # Map invoice aliases to quotation fields for compatibility.
         if attrs.get('invoice_number') and not attrs.get('quotation_number'):
@@ -755,7 +813,20 @@ class QuotationSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         customer = self._resolve_customer(validated_data)
         validated_data['customer'] = customer
-        validated_data['created_by'] = self.context['request'].user.active_tenant
+        tenant = self.context['request'].user.active_tenant
+        validated_data['created_by'] = tenant
+
+        is_draft = validated_data.get('status') == 'draft'
+        q_num = validated_data.get('quotation_number')
+        if not q_num or (is_draft and not q_num.startswith('D-QT-')) or (not is_draft and q_num.startswith('D-QT-')) or 'AUTO' in str(q_num):
+            from billing.sequence_service import allocate_next_number
+            raw_prefix = self.context['request'].data.get('prefix', 'QT-') if 'request' in self.context else 'QT-'
+            validated_data['quotation_number'] = allocate_next_number(
+                tenant=tenant,
+                document_type='quotation',
+                prefix=raw_prefix,
+                is_draft=is_draft
+            )
 
         quotation = Quotation.objects.create(**validated_data)
         for item_data in items_data:
@@ -774,9 +845,19 @@ class QuotationSerializer(serializers.ModelSerializer):
         if customer:
             instance.customer = customer
 
+        old_status = instance.status
+        new_status = validated_data.get('status', old_status)
+        is_draft_promotion = (old_status == 'draft' or (instance.quotation_number and instance.quotation_number.startswith('D-QT-'))) and new_status not in ['draft', 'cancelled', 'rejected']
+        if is_draft_promotion:
+            from billing.sequence_service import allocate_next_number
+            instance.quotation_number = allocate_next_number(instance.created_by, document_type='quotation', is_draft=False)
+            validated_data.pop('quotation_number', None)
+            validated_data.pop('invoice_number', None)
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
 
         if items_data is not None:
             instance.items.all().delete()

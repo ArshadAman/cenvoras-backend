@@ -68,8 +68,14 @@ def sales_order_detail(request, pk):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
     elif request.method == 'DELETE':
+        source_quotation = getattr(order, 'source_quotation', None)
+        if source_quotation:
+            source_quotation.status = 'pending'
+            source_quotation.save(update_fields=['status'])
+            source_quotation.items.update(converted_to_order=False)
         order.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -258,6 +264,12 @@ def convert_order_to_invoice(request, pk):
         from .serializers import _rebuild_sales_invoice_ledger
         _rebuild_sales_invoice_ledger(invoice.id)
 
+
+        from billing.sequence_service import sync_sequence_after_creation, get_tenant_full_prefix
+        full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
+        sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice.invoice_number)
+
+
         # Update Order Stage based on fulfillment of all items
         all_order_items = list(SalesOrderItem.objects.filter(order=order))
         all_fulfilled = all(item.is_fulfilled for item in all_order_items)
@@ -366,20 +378,21 @@ def delivery_challan_next_number(request):
 
     tenant = request.user.active_tenant
     prefix = request.GET.get('prefix', 'DC-')
-    tenant_code = str(tenant.id)[:4].upper()
+    is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
 
     next_number, suffix = preview_next_number(
         tenant=tenant,
         document_type='delivery_challan',
         prefix=prefix,
+        is_draft=is_draft,
     )
 
     return Response({
         'success': True,
-        'uuid_prefix': tenant_code,
         'next_number': next_number,
         'suffix': suffix,
     })
+
 
 
 @api_view(['POST'])
@@ -618,11 +631,17 @@ def convert_challan_to_invoice(request, pk):
             from .serializers import _rebuild_sales_invoice_ledger
             _rebuild_sales_invoice_ledger(invoice.id)
 
+
+            from billing.sequence_service import sync_sequence_after_creation, get_tenant_full_prefix
+            full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
+            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice.invoice_number)
+
             # Update Challan status
             challan.is_billed = True
             challan.status = 'billed'
             challan.converted_invoice = invoice
             challan.save(update_fields=['is_billed', 'status', 'converted_invoice'])
+
 
             # If linked to sales order, update sales order stage
             if challan.sales_order_id:
@@ -803,17 +822,17 @@ def quotation_next_number(request):
 
     tenant = request.user.active_tenant
     prefix = request.GET.get('prefix', 'QT-')
-    tenant_code = str(tenant.id)[:4].upper()
+    is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
 
     next_number, suffix = preview_next_number(
         tenant=tenant,
         document_type='quotation',
         prefix=prefix,
+        is_draft=is_draft,
     )
 
     return Response({
         'success': True,
-        'uuid_prefix': tenant_code,
         'next_number': next_number,
         'suffix': suffix,
     })
@@ -847,8 +866,8 @@ def quotation_convert_to_sales_order(request, pk):
         )
 
     order_total = sum(Decimal(str(item.amount)) for item in selected_items)
-    next_index = SalesOrder.objects.filter(created_by=tenant).count() + 1
-    order_number = f'SO-{tenant.id.hex[:4].upper()}-{next_index:03d}'
+    from billing.sequence_service import allocate_next_number
+    order_number = allocate_next_number(tenant, document_type='sales_order')
 
     order_customer = quotation.customer
     if not order_customer:
@@ -870,8 +889,10 @@ def quotation_convert_to_sales_order(request, pk):
         customer=order_customer,
         total_amount=order_total,
         notes=f'Converted from quotation {quotation.quotation_number}',
+        source_quotation=quotation,
         created_by=tenant,
     )
+
 
     for item in selected_items:
         SalesOrderItem.objects.create(
@@ -962,4 +983,69 @@ def quotation_pdf_download(request, pk):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     response['Content-Length'] = len(pdf_bytes)
     return response
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def sales_order_pdf_download(request, pk):
+    from django.http import HttpResponse
+    from django.db.models import Q
+    from billing.models_sidecar import SalesOrder
+
+    tenant = request.user.active_tenant
+    try:
+        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(
+            Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
+        )
+    except SalesOrder.DoesNotExist:
+        return Response({'error': 'Sales order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    # If client passed rendered HTML of the exact template preview, generate pixel-perfect vector PDF
+    if request.method == 'POST' and isinstance(request.data, dict) and request.data.get('html'):
+        try:
+            from billing.html_pdf_service import render_html_to_vector_pdf
+            pdf_bytes = render_html_to_vector_pdf(request.data['html'])
+            filename = f"proforma-invoice-{order.order_number or order.id}.pdf"
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Content-Length'] = len(pdf_bytes)
+            return response
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"HTML vector PDF rendering failed: {e}")
+            return Response(
+                {'error': f'Server vector PDF rendering unavailable: {str(e)}', 'fallback_client': True},
+                status=status.HTTP_501_NOT_IMPLEMENTED
+            )
+
+    template_data = None
+    if request.method == 'POST':
+        template_data = request.data.get('template') if (isinstance(request.data, dict) and 'template' in request.data) else request.data
+    elif request.GET.get('primary_color'):
+        template_data = {
+            'colors': {
+                'primary': request.GET.get('primary_color'),
+                'secondary': request.GET.get('secondary_color'),
+                'tableHeader': request.GET.get('table_header'),
+                'tableBorder': request.GET.get('table_border'),
+                'totalRow': request.GET.get('total_row'),
+                'totalText': request.GET.get('total_text'),
+            },
+            'layoutType': request.GET.get('layout_type', 'classic'),
+        }
+
+    from billing.invoice_pdf_service import generate_invoice_pdf
+    pdf_bytes = generate_invoice_pdf(
+        invoice_obj=order,
+        tenant=tenant,
+        document_type='sales_order',
+        template_data=template_data,
+    )
+
+    filename = f"proforma-invoice-{order.order_number or order.id}.pdf"
+    response = HttpResponse(pdf_bytes, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Content-Length'] = len(pdf_bytes)
+    return response
+
 

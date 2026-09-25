@@ -27,7 +27,7 @@ WORKDIR /app
 RUN adduser --disabled-password --gecos '' appuser
 
 # Install runtime deps only (if REALLY needed)
-RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y postgresql-client chromium fonts-liberation && rm -rf /var/lib/apt/lists/*
 
 # Copy wheels and install
 COPY --from=builder /install /install

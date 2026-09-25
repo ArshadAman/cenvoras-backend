@@ -63,6 +63,15 @@ class GeneralLedgerEntrySerializer(serializers.ModelSerializer):
             'created_by', 'created_at'
         ]
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ref = ret.get('reference') or ''
+        import re
+        if ref and re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', ref, re.I):
+            cleaned = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', ref, flags=re.I).strip()
+            ret['reference'] = cleaned or 'Payment Received'
+        return ret
+
 
 class AccountBalanceSerializer(serializers.Serializer):
     """Serializer for account balance summary"""

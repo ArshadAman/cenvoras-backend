@@ -58,6 +58,7 @@ def render_html_to_vector_pdf(html_content, timeout_seconds=20):
             '--headless=new',
             '--disable-gpu',
             '--no-sandbox',
+            '--single-process',
             '--disable-dev-shm-usage',
             '--no-pdf-header-footer',
             '--run-all-compositor-stages-before-draw',

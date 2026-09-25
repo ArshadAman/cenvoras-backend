@@ -3,9 +3,10 @@ from .accounting_views import (
     chart_of_accounts, account_detail, general_ledger, general_ledger_entries_list, 
     general_ledger_entry_detail, trial_balance, setup_default_accounts,
     create_sales_invoice_ledger_entries, create_purchase_bill_ledger_entries,
-    get_ledger_stats, create_manual_journal_entry, repair_round_off_entries
+    get_ledger_stats, create_manual_journal_entry, repair_round_off_entries,
+    partner_statement, partner_statement_pdf
 )
-from . import financial_views, bank_views, bank_views
+from . import financial_views, bank_views
 
 urlpatterns = [
     # General Ledger Accounting APIs
@@ -15,6 +16,8 @@ urlpatterns = [
     path('accounts/setup-defaults/', setup_default_accounts, name='setup_default_accounts'),
     path('general-ledger/<uuid:account_id>/', general_ledger, name='general_ledger'),
     path('general-ledger-entries/', general_ledger_entries_list, name='general_ledger_entries_list'),
+    path('partner-statement/', partner_statement, name='partner_statement'),
+    path('partner-statement/pdf/', partner_statement_pdf, name='partner_statement_pdf'),
     path('general-ledger-entry/<uuid:entry_id>/', general_ledger_entry_detail, name='general_ledger_entry_detail'),
     path('trial-balance/', trial_balance, name='trial_balance'),
     

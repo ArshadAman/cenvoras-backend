@@ -7,54 +7,62 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None):
+def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, is_draft=False):
     """
     Standardize the document sequence prefix per tenant.
-    Ensures upper-case formatting and incorporates tenant code where applicable.
+    Clean canonical prefixes — no embedded tenant UUID code.
+    When is_draft=True, returns isolated draft-namespace prefixes.
     """
-    tenant_code = str(tenant.id)[:4].upper()
+    DRAFT_PREFIX_MAP = {
+        'sales_invoice': 'DFT-',
+        'quotation': 'D-QT-',
+        'delivery_challan': 'D-DC-',
+        'sales_order': 'D-SO-',
+        'purchase_bill': 'D-BILL-',
+        'credit_note': 'D-CN-',
+        'debit_note': 'D-DN-',
+    }
+
+    if is_draft:
+        return DRAFT_PREFIX_MAP.get(document_type, 'DFT-')
 
     if document_type == 'sales_invoice':
         base = (prefix or getattr(tenant, 'invoice_prefix', 'INV-') or 'INV-').strip().upper()
-        if not base.endswith('-'):
-            base = f"{base}-"
-        if tenant_code in base:
-            return base
-        return f"{base}{tenant_code}-"
-
     elif document_type == 'quotation':
         base = (prefix or 'QT-').strip().upper()
-        if not base.endswith('-'):
-            base = f"{base}-"
-        if tenant_code in base:
-            return base
-        return f"{base}{tenant_code}-"
-
     elif document_type == 'credit_note':
         base = (prefix or 'CN-').strip().upper()
-        if not base.endswith('-'):
-            base = f"{base}-"
-        return base
-
     elif document_type == 'debit_note':
         base = (prefix or 'DN-').strip().upper()
-        if not base.endswith('-'):
-            base = f"{base}-"
-        return base
-
     elif document_type == 'delivery_challan':
         base = (prefix or 'DC-').strip().upper()
-        if not base.endswith('-'):
-            base = f"{base}-"
-        if tenant_code in base:
-            return base
-        return f"{base}{tenant_code}-"
+    elif document_type == 'sales_order':
+        base = (prefix or 'SO-').strip().upper()
+    elif document_type == 'purchase_bill':
+        base = (prefix or 'BILL-').strip().upper()
+    else:
+        base = (prefix or 'DOC-').strip().upper()
 
-    # Fallback
-    base = (prefix or 'DOC-').strip().upper()
     if not base.endswith('-'):
         base = f"{base}-"
     return base
+
+
+def display_document_number(number_str):
+    """
+    Strip legacy 4-character tenant UUID middle code from document numbers
+    for clean customer-facing display.
+    Example: 'INV-7E4A-002' → 'INV-002', 'QT-ABBA-001' → 'QT-001'
+    Idempotent: 'INV-002' → 'INV-002' (no change if already clean).
+    """
+    if not number_str or not isinstance(number_str, str):
+        return number_str or ''
+    # Pattern: PREFIX-XXXX-NNN where XXXX is exactly 4 hex chars
+    pattern = r'^([A-Za-z]+-)[0-9A-Fa-f]{4}-(\d+)$'
+    match = re.match(pattern, number_str.strip())
+    if match:
+        return f"{match.group(1)}{match.group(2)}"
+    return number_str
 
 
 def is_auto_sequence_number(full_prefix, number_str):
@@ -71,7 +79,7 @@ def is_auto_sequence_number(full_prefix, number_str):
 
 
 def _get_model_and_field(document_type):
-    from billing.models import SalesInvoice
+    from billing.models import SalesInvoice, PurchaseBill
     from billing.models_returns import CreditNote, DebitNote
     from billing.models_sidecar import Quotation, SalesOrder, DeliveryChallan
 
@@ -82,6 +90,7 @@ def _get_model_and_field(document_type):
         'debit_note': (DebitNote, 'debit_note_number'),
         'sales_order': (SalesOrder, 'order_number'),
         'delivery_challan': (DeliveryChallan, 'challan_number'),
+        'purchase_bill': (PurchaseBill, 'bill_number'),
     }
     return mapping.get(document_type, (SalesInvoice, 'invoice_number'))
 
@@ -99,6 +108,7 @@ def _get_existing_max_number(tenant, document_type, full_prefix):
     """
     Efficiently scan only the string column for existing records matching prefix
     without loading Django model instances into Python memory.
+    Handles both clean (INV-001) and legacy (INV-ABBA-001) number formats.
     """
     model, field_name = _get_model_and_field(document_type)
     filter_kwargs = {
@@ -115,11 +125,18 @@ def _get_existing_max_number(tenant, document_type, full_prefix):
             if val > max_num:
                 max_num = val
         except (ValueError, TypeError):
-            continue
+            match = re.search(r'(\d+)$', str(num_str))
+            if match:
+                try:
+                    val = int(match.group(1))
+                    if val > max_num:
+                        max_num = val
+                except (ValueError, TypeError):
+                    continue
     return max_num
 
 
-def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3, max_retries=5):
+def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3, max_retries=5, is_draft=False):
     """
     Atomically allocate the next guaranteed unique document number.
     Uses SELECT FOR UPDATE on InvoiceSequence to eliminate multi-user race conditions.
@@ -129,7 +146,7 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
     from django.db import OperationalError
     from billing.models import InvoiceSequence
 
-    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix)
+    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=is_draft)
 
     for attempt in range(max_retries):
         try:
@@ -161,13 +178,13 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
             time.sleep(0.05 * (2 ** attempt))
 
 
-def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3):
+def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3, is_draft=False):
     """
     Preview the next anticipated document number for UI forms without locking the database table.
     """
     from billing.models import InvoiceSequence
 
-    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix)
+    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=is_draft)
 
     seq = InvoiceSequence.objects.filter(
         tenant=tenant,
@@ -191,18 +208,27 @@ def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_
 def sync_sequence_after_creation(tenant, document_type, prefix, actual_number):
     """
     Ensure the sequence table tracks manual entries so subsequent allocations don't collide.
+    Never advances canonical sequence for draft numbers.
     """
     from billing.models import InvoiceSequence
 
     if not actual_number or not isinstance(actual_number, str):
         return
 
-    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix)
+    # Skip draft numbers from advancing official sequence
+    if actual_number.startswith(('DFT-', 'D-QT-', 'D-DC-', 'D-SO-', 'D-BILL-', 'D-CN-', 'D-DN-')):
+        return
+
+    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=False)
     if not is_auto_sequence_number(full_prefix, actual_number):
         return
 
+    match = re.search(r'(\d+)$', actual_number)
+    if not match:
+        return
+
     try:
-        suffix_int = int(actual_number[len(full_prefix):])
+        suffix_int = int(match.group(1))
     except (ValueError, TypeError):
         return
 
@@ -216,3 +242,4 @@ def sync_sequence_after_creation(tenant, document_type, prefix, actual_number):
         if suffix_int > seq.last_number:
             seq.last_number = suffix_int
             seq.save(update_fields=['last_number', 'updated_at'])
+

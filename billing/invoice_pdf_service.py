@@ -282,12 +282,16 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     # 1. Header Section
     is_quotation = (document_type == 'quotation')
     is_challan = (document_type == 'delivery_challan')
+    is_sales_order = (document_type in ('sales_order', 'proforma'))
     if is_challan:
         doc_heading = "DELIVERY CHALLAN"
         doc_no_label = "Challan No"
     elif is_quotation:
-        doc_heading = "PERFORMA INVOICE"
+        doc_heading = "QUOTATION"
         doc_no_label = "Quotation No"
+    elif is_sales_order:
+        doc_heading = "PROFORMA INVOICE"
+        doc_no_label = "Order No"
     else:
         doc_heading = "TAX INVOICE"
         doc_no_label = "Invoice No"
@@ -300,10 +304,12 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
 
     inv_num = (
         getattr(invoice_obj, 'invoice_number', None)
+        or getattr(invoice_obj, 'order_number', None)
         or getattr(invoice_obj, 'challan_number', None)
         or getattr(invoice_obj, 'quotation_number', None)
         or 'DRAFT'
     )
+
     inv_date = str(getattr(invoice_obj, 'invoice_date', None) or getattr(invoice_obj, 'quotation_date', None) or getattr(invoice_obj, 'date', ''))
     due_date = str(getattr(invoice_obj, 'due_date', '') or '')
     pos = getattr(invoice_obj, 'place_of_supply', '') or ''

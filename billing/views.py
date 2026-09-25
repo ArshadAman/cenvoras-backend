@@ -301,31 +301,41 @@ def sales_invoice_list_create(request):
     from django.db import transaction
 
     data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+    is_draft = data.get('status') == 'draft'
     invoice_number = (data.get('invoice_number') or '').strip()
-    full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
+    full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=is_draft)
 
     with transaction.atomic():
-        if not invoice_number:
-            invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
-            data['invoice_number'] = invoice_number
-        elif SalesInvoice.objects.filter(invoice_number=invoice_number, created_by=tenant).exists():
-            if is_auto_sequence_number(full_prefix, invoice_number):
-                # Concurrent cashier collision on auto-sequence number: auto-advance atomically
-                invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+        canonical_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=False)
+        if is_draft:
+            if not invoice_number or is_auto_sequence_number(canonical_prefix, invoice_number):
+                invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=True)
                 data['invoice_number'] = invoice_number
-            else:
-                return Response(
-                    {'error': 'Invoice number already exists', 'details': f'Invoice with number {invoice_number} already exists.'},
-                    status=status.HTTP_409_CONFLICT,
-                )
+
+        else:
+            if not invoice_number or invoice_number.startswith('DFT-'):
+                invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=False)
+                data['invoice_number'] = invoice_number
+            elif SalesInvoice.objects.filter(invoice_number=invoice_number, created_by=tenant).exists():
+                if is_auto_sequence_number(full_prefix, invoice_number):
+                    # Concurrent cashier collision on auto-sequence number: auto-advance atomically
+                    invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=False)
+                    data['invoice_number'] = invoice_number
+                else:
+                    return Response(
+                        {'error': 'Invoice number already exists', 'details': f'Invoice with number {invoice_number} already exists.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
         serializer = SalesInvoiceSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             serializer.save(created_by=tenant)
-            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
+            if not is_draft:
+                sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response({'error': 'Validation failed', 'details': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 @api_view(['GET'])
@@ -442,22 +452,23 @@ def get_next_invoice_number(request):
 
     prefix = request.GET.get('prefix', 'INV-')
     tenant = request.user.active_tenant
-    tenant_id = str(tenant.id)[:4].upper()
+    is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
 
     next_number, suffix = preview_next_number(
         tenant=tenant,
         document_type='sales_invoice',
         prefix=prefix,
+        is_draft=is_draft,
     )
 
     return Response(
         {
             'success': True,
-            'uuid_prefix': tenant_id,
             'next_number': next_number,
             'suffix': suffix,
         }
     )
+
 
 
 @api_view(['GET'])

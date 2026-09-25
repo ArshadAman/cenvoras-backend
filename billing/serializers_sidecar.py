@@ -60,14 +60,20 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     dispatched_quantity = serializers.IntegerField(read_only=True)
     pending_quantity = serializers.IntegerField(read_only=True)
     fulfillment_status = serializers.SerializerMethodField(read_only=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
     
     class Meta:
         model = SalesOrderItem
         fields = [
-            'id', 'product', 'product_name', 'quantity', 'dispatched_quantity', 
+            'id', 'product', 'product_name', 'description', 'quantity', 'dispatched_quantity', 
             'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit', 
             'price', 'discount', 'tax', 'amount'
         ]
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
 
     def get_fulfillment_status(self, obj):
         dispatched = obj.dispatched_quantity or 0
@@ -80,6 +86,12 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         # Allow passing product name instead of UUID
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if 'product_description' in data and not data.get('description'):
+            data['description'] = data.get('product_description') or ''
         product_value = data.get('product')
         if not product_value:
             raise serializers.ValidationError({'product': 'Product is required.'})
@@ -192,6 +204,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_detail = serializers.SerializerMethodField(read_only=True)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = DeliveryChallanItem
@@ -200,6 +213,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             'product',
             'product_name',
             'product_detail',
+            'description',
             'quantity',
             'free_quantity',
             'unit',
@@ -210,6 +224,11 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             'hsn_sac_code',
             'batch',
         ]
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
 
     def get_product_detail(self, obj):
         if not obj.product:
@@ -230,6 +249,8 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         mutable = dict(data)
+        if 'product_description' in mutable and not mutable.get('description'):
+            mutable['description'] = mutable.get('product_description') or ''
         product_value = mutable.get('product')
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})
@@ -502,6 +523,7 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
 
 class QuotationItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = QuotationItem
@@ -509,6 +531,7 @@ class QuotationItemSerializer(serializers.ModelSerializer):
             'id',
             'product',
             'product_name',
+            'description',
             'quantity',
             'free_quantity',
             'unit',
@@ -523,6 +546,11 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['converted_to_order']
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
+
     def _get_tenant(self):
         request = self.context.get('request')
         if not request or not hasattr(request, 'user'):
@@ -531,6 +559,8 @@ class QuotationItemSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         mutable = dict(data)
+        if 'product_description' in mutable and not mutable.get('description'):
+            mutable['description'] = mutable.get('product_description') or ''
         product_value = mutable.get('product')
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})

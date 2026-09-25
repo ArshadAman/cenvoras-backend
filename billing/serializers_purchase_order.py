@@ -13,10 +13,16 @@ class VendorSimpleSerializer(serializers.ModelSerializer):
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     product_display_name = serializers.CharField(source='product.name', read_only=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = PurchaseOrderItem
-        fields = ['id', 'product', 'product_name', 'product_display_name', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
+        fields = ['id', 'product', 'product_name', 'product_display_name', 'description', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        return ret
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -26,6 +32,8 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         mutable = dict(data)
+        if 'product_description' in mutable and not mutable.get('description'):
+            mutable['description'] = mutable.get('product_description') or ''
         product_value = mutable.get('product')
         product_name = mutable.get('product_name')
         

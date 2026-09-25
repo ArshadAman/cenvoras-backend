@@ -65,6 +65,7 @@ class CreditNoteItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
 
 class DebitNote(models.Model):
@@ -124,3 +125,4 @@ class DebitNoteItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.TextField(blank=True, default='', help_text="Custom item description / note")

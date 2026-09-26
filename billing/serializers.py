@@ -711,6 +711,20 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         print("DEBUG SalesInvoiceSerializer: Processing data:", data)
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        
+        # Prevent floating-point overflow for max_digits=12
+        if 'total_amount' in data and data['total_amount'] is not None and str(data['total_amount']).strip():
+            try:
+                data['total_amount'] = f"{Decimal(str(data['total_amount'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
+        if 'round_off' in data and data['round_off'] is not None and str(data['round_off']).strip():
+            try:
+                data['round_off'] = f"{Decimal(str(data['round_off'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
         
         # Handle legacy 'customer' field for backward compatibility
         if 'customer' in data and 'customer_name' not in data:

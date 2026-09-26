@@ -86,20 +86,26 @@ def convert_order_to_invoice(request, pk):
     except SalesOrder.DoesNotExist:
         return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    if order.stage == 'completed':
-        return Response({"message": "Order has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
+    # Check if an invoice was already generated for this sales order
+    existing_invoice = SalesInvoice.objects.filter(created_by=tenant, po_number=order.order_number).first()
+    if existing_invoice:
+        return Response({"message": f"Order has already been converted to an invoice (#{existing_invoice.invoice_number})."}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
         # Lock order row for update
         order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
-        if order.stage == 'completed':
-            return Response({"message": "Order has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
+        existing_invoice = SalesInvoice.objects.filter(created_by=tenant, po_number=order.order_number).first()
+        if existing_invoice:
+            return Response({"message": f"Order has already been converted to an invoice (#{existing_invoice.invoice_number})."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Parse requested conversion items & quantities
         items_payload = request.data.get('items')
         order_items_map = {item.id: item for item in order.items.all()}
         
         items_to_invoice = []
+        is_post_delivery_invoicing = False
+        all_dispatched = all((item.dispatched_quantity or 0) >= item.quantity for item in order.items.all())
+
         if items_payload and isinstance(items_payload, list) and len(items_payload) > 0:
             for entry in items_payload:
                 raw_id = entry.get('id') or entry.get('item_id')
@@ -123,20 +129,29 @@ def convert_order_to_invoice(request, pk):
                     continue
                 
                 pending_qty = order_item.pending_quantity
-                if qty > pending_qty:
-                    return Response(
-                        {"message": f"Cannot invoice {qty} for {order_item.product.name}. Only {pending_qty} pending in order."},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                items_to_invoice.append((order_item, qty))
+                if pending_qty <= 0 and all_dispatched:
+                    # Items were already dispatched via Delivery Challan; invoicing delivered quantity
+                    is_post_delivery_invoicing = True
+                    items_to_invoice.append((order_item, min(qty, order_item.quantity)))
+                else:
+                    if qty > pending_qty:
+                        return Response(
+                            {"message": f"Cannot invoice {qty} for {order_item.product.name}. Only {pending_qty} pending in order."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    items_to_invoice.append((order_item, qty))
         else:
-            # Fallback: invoice all items with pending quantities
+            # Fallback: invoice all items
             for item in order.items.all():
                 if item.pending_quantity > 0:
                     items_to_invoice.append((item, item.pending_quantity))
+                elif all_dispatched:
+                    # All items were delivered via Challan; invoice full order
+                    is_post_delivery_invoicing = True
+                    items_to_invoice.append((item, item.quantity))
 
         if not items_to_invoice:
-            return Response({"message": "No valid pending items selected for invoice."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"message": "No valid items selected for invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Calculate estimated total for credit check
         est_total = Decimal('0.00')
@@ -159,7 +174,7 @@ def convert_order_to_invoice(request, pk):
         from billing.sequence_service import allocate_next_number
         next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
 
-        invoice = SalesInvoice.objects.create(
+        invoice = SalesInvoice(
             customer=order.customer,
             customer_name=order.customer.name if order.customer else '',
             customer_address=order.customer.address if order.customer else '',
@@ -171,6 +186,22 @@ def convert_order_to_invoice(request, pk):
             total_amount=Decimal('0.00'),
             status='final',
         )
+        if is_post_delivery_invoicing:
+            invoice._skip_stock_deduction = True
+
+        linked_challans = list(DeliveryChallan.objects.filter(sales_order=order, created_by=tenant))
+        if linked_challans:
+            invoice.challan_number = ", ".join(c.challan_number for c in linked_challans)
+            invoice.challan_date = max(c.date for c in linked_challans)
+
+        invoice.save()
+
+        if linked_challans:
+            for c in linked_challans:
+                c.is_billed = True
+                c.status = 'billed'
+                c.converted_invoice = invoice
+                c.save(update_fields=['is_billed', 'status', 'converted_invoice'])
 
         raw_items = []
         for order_item, inv_qty in items_to_invoice:
@@ -207,7 +238,7 @@ def convert_order_to_invoice(request, pk):
             pass
 
         for r_item in raw_items:
-            SalesInvoiceItem.objects.create(
+            inv_item = SalesInvoiceItem(
                 sales_invoice=invoice,
                 product=r_item['product'],
                 quantity=r_item['quantity'],
@@ -218,9 +249,13 @@ def convert_order_to_invoice(request, pk):
                 tax=r_item['tax'],
                 discount=r_item['discount'],
             )
-            # Update order_item dispatched_quantity
+            if is_post_delivery_invoicing:
+                inv_item._skip_stock_deduction = True
+            inv_item.save()
+
+            # Update order_item dispatched_quantity if not already dispatched
             o_item = r_item.get('order_item')
-            if o_item:
+            if o_item and not is_post_delivery_invoicing:
                 o_item.dispatched_quantity = (o_item.dispatched_quantity or 0) + r_item['quantity']
                 o_item.save(update_fields=['dispatched_quantity'])
 
@@ -588,25 +623,39 @@ def convert_challan_to_invoice(request, pk):
             invoice._skip_stock_deduction = True
             invoice.save()
 
+            total_items_amount = Decimal('0.00')
             for c_item in challan.items.all():
+                price = Decimal(str(c_item.price or c_item.product.sale_price or c_item.product.price or 0))
+                qty = int(c_item.quantity or 1)
+                discount = Decimal(str(c_item.discount or 0))
+                tax = Decimal(str(c_item.tax or 0))
+                base_amount = qty * price
+                discount_amount = (base_amount * discount) / Decimal('100')
+                taxable_amount = base_amount - discount_amount
+                tax_amount = (taxable_amount * tax) / Decimal('100')
+                line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+                total_items_amount += line_amount
+
                 inv_item = SalesInvoiceItem(
                     sales_invoice=invoice,
                     product=c_item.product,
                     batch=c_item.batch,
-                    hsn_sac_code=c_item.hsn_sac_code,
-                    quantity=c_item.quantity,
-                    free_quantity=c_item.free_quantity,
-                    price=c_item.price,
-                    amount=c_item.amount,
-                    unit=c_item.unit or 'pcs',
-                    discount=c_item.discount,
-                    tax=c_item.tax,
+                    hsn_sac_code=c_item.hsn_sac_code or c_item.product.hsn_sac_code or '',
+                    quantity=qty,
+                    free_quantity=c_item.free_quantity or 0,
+                    price=price,
+                    amount=line_amount,
+                    unit=c_item.unit or c_item.product.unit or 'pcs',
+                    discount=discount,
+                    tax=tax,
                     description=getattr(c_item, 'description', '') or '',
                 )
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
 
-            invoice.refresh_from_db()
+            final_total = (total_items_amount + (challan.round_off or Decimal('0.00'))).quantize(Decimal('0.01'))
+            invoice.total_amount = final_total
+            invoice.save(update_fields=['total_amount'])
 
             # Ensure TransactionMeta exists
             TransactionMeta.objects.get_or_create(invoice=invoice)
@@ -661,6 +710,162 @@ def convert_challan_to_invoice(request, pk):
         })
     except Exception as e:
         logger.error(f"Error converting delivery challan {pk} to invoice: {e}", exc_info=True)
+        return Response({"message": f"Failed to convert: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def bulk_convert_challans_to_invoice(request):
+    """
+    Odoo-style consolidation:
+    Converts multiple selected Delivery Challans into a single consolidated Sales Invoice.
+    Aggregates all line items, joins delivery challan references, and ensures no double stock deduction.
+    """
+    tenant = request.user.active_tenant
+    challan_ids = request.data.get('challan_ids', [])
+    if not challan_ids or not isinstance(challan_ids, list):
+        return Response({"message": "Please select at least one delivery challan to convert."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        with transaction.atomic():
+            challans = list(
+                DeliveryChallan.objects.select_for_update()
+                .select_related('customer', 'warehouse', 'sales_order')
+                .prefetch_related('items__product', 'items__batch')
+                .filter(pk__in=challan_ids, created_by=tenant)
+            )
+
+            if len(challans) != len(challan_ids):
+                return Response({"message": "One or more delivery challans could not be found."}, status=status.HTTP_404_NOT_FOUND)
+
+            already_billed = [c.challan_number for c in challans if c.is_billed]
+            if already_billed:
+                return Response(
+                    {"message": f"Challan(s) {', '.join(already_billed)} have already been converted to an invoice."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Ensure all challans belong to the same customer
+            customers = set(c.customer_id for c in challans)
+            if len(customers) > 1:
+                return Response(
+                    {"message": "Cannot convert challans from different customers into a single invoice. Please select challans for the same customer."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            primary_challan = challans[0]
+            customer = primary_challan.customer
+
+            # Check credit limit
+            est_total = sum((c.total_amount for c in challans), Decimal('0.00'))
+            if customer and not customer.allow_credit:
+                new_balance = customer.current_balance + est_total
+                if new_balance > customer.credit_limit:
+                    return Response(
+                        {"message": f"Credit limit exceeded. Current: {customer.current_balance}, Limit: {customer.credit_limit}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            from billing.sequence_service import allocate_next_number
+            next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
+
+            all_challan_numbers = ", ".join(c.challan_number for c in challans)
+            latest_challan_date = max(c.date for c in challans)
+            combined_round_off = sum((c.round_off or Decimal('0.00') for c in challans), Decimal('0.00'))
+
+            invoice = SalesInvoice(
+                customer=customer,
+                customer_name=customer.name if customer else (primary_challan.customer_name or ''),
+                customer_address=primary_challan.customer_address or (customer.address if customer else ''),
+                place_of_supply=customer.state if customer and customer.state else None,
+                invoice_number=next_invoice_number,
+                invoice_date=date.today(),
+                challan_number=all_challan_numbers,
+                challan_date=latest_challan_date,
+                delivery_address=primary_challan.delivery_address,
+                po_number=primary_challan.po_number or (primary_challan.sales_order.order_number if primary_challan.sales_order else ''),
+                po_date=primary_challan.po_date,
+                warehouse=primary_challan.warehouse,
+                round_off=combined_round_off.quantize(Decimal('0.01')),
+                total_amount=Decimal('0.00'),
+                status='final',
+                created_by=tenant,
+            )
+            invoice._skip_stock_deduction = True
+            invoice.save()
+
+            total_items_amount = Decimal('0.00')
+            for challan in challans:
+                for c_item in challan.items.all():
+                    price = Decimal(str(c_item.price or c_item.product.sale_price or c_item.product.price or 0))
+                    qty = int(c_item.quantity or 1)
+                    discount = Decimal(str(c_item.discount or 0))
+                    tax = Decimal(str(c_item.tax or 0))
+                    base_amount = qty * price
+                    discount_amount = (base_amount * discount) / Decimal('100')
+                    taxable_amount = base_amount - discount_amount
+                    tax_amount = (taxable_amount * tax) / Decimal('100')
+                    line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+                    total_items_amount += line_amount
+
+                    inv_item = SalesInvoiceItem(
+                        sales_invoice=invoice,
+                        product=c_item.product,
+                        batch=c_item.batch,
+                        hsn_sac_code=c_item.hsn_sac_code or c_item.product.hsn_sac_code or '',
+                        quantity=qty,
+                        free_quantity=c_item.free_quantity or 0,
+                        price=price,
+                        amount=line_amount,
+                        unit=c_item.unit or c_item.product.unit or 'pcs',
+                        discount=discount,
+                        tax=tax,
+                        description=getattr(c_item, 'description', '') or '',
+                    )
+                    inv_item._skip_stock_deduction = True
+                    inv_item.save()
+
+            final_total = (total_items_amount + combined_round_off).quantize(Decimal('0.01'))
+            invoice.total_amount = final_total
+            invoice.save(update_fields=['total_amount'])
+
+            TransactionMeta.objects.get_or_create(invoice=invoice)
+
+            if customer:
+                Customer.objects.filter(pk=customer.pk).update(
+                    current_balance=F('current_balance') + final_total
+                )
+
+            from .serializers import _rebuild_sales_invoice_ledger
+            _rebuild_sales_invoice_ledger(invoice.id)
+
+            from billing.sequence_service import sync_sequence_after_creation, get_tenant_full_prefix
+            full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
+            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice.invoice_number)
+
+            for challan in challans:
+                challan.is_billed = True
+                challan.status = 'billed'
+                challan.converted_invoice = invoice
+                challan.save(update_fields=['is_billed', 'status', 'converted_invoice'])
+
+                if challan.sales_order_id:
+                    so = SalesOrder.objects.filter(pk=challan.sales_order_id).first()
+                    if so:
+                        all_so_items = list(SalesOrderItem.objects.filter(order=so))
+                        if all(i.is_fulfilled for i in all_so_items):
+                            so.stage = 'completed'
+                        else:
+                            so.stage = 'shipped'
+                        so.save(update_fields=['stage'])
+
+        return Response({
+            "message": f"Successfully converted {len(challans)} Delivery Challans to Invoice #{invoice.invoice_number}",
+            "invoice_id": str(invoice.id),
+            "invoice_number": invoice.invoice_number,
+        })
+    except Exception as e:
+        logger.error(f"Error bulk converting challans to invoice: {e}", exc_info=True)
         return Response({"message": f"Failed to convert: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
 

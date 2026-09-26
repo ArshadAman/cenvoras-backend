@@ -310,3 +310,102 @@ class DeliveryChallanFlowTests(TestCase):
         )
         res = self.client.delete(f"/api/billing/delivery-challans/{challan.id}/")
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_convert_multiple_challans_to_single_invoice(self):
+        """Converting multiple delivery challans consolidates them into a single SalesInvoice."""
+        challan1 = DeliveryChallan.objects.create(
+            challan_number="DC-BULK-001",
+            date=date.today(),
+            customer=self.customer,
+            total_amount=Decimal("1180.00"),
+            created_by=self.tenant
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan1,
+            product=self.product,
+            quantity=2,
+            price=Decimal("500.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00"),
+            unit="pcs"
+        )
+
+        challan2 = DeliveryChallan.objects.create(
+            challan_number="DC-BULK-002",
+            date=date.today(),
+            customer=self.customer,
+            total_amount=Decimal("1770.00"),
+            created_by=self.tenant
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan2,
+            product=self.product,
+            quantity=3,
+            price=Decimal("500.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1770.00"),
+            unit="pcs"
+        )
+
+        res = self.client.post("/api/billing/delivery-challans/bulk-convert-to-invoice/", {
+            "challan_ids": [str(challan1.id), str(challan2.id)]
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.assertIn("invoice_id", res.data)
+
+        invoice_id = res.data["invoice_id"]
+        from billing.models import SalesInvoice
+        invoice = SalesInvoice.objects.get(id=invoice_id)
+
+        # Verify challans are mentioned in challan_number
+        self.assertIn("DC-BULK-001", invoice.challan_number)
+        self.assertIn("DC-BULK-002", invoice.challan_number)
+        self.assertEqual(invoice.items.count(), 2)
+
+        # Verify challans are marked billed
+        challan1.refresh_from_db()
+        challan2.refresh_from_db()
+        self.assertTrue(challan1.is_billed)
+        self.assertTrue(challan2.is_billed)
+        self.assertEqual(challan1.converted_invoice_id, invoice.id)
+        self.assertEqual(challan2.converted_invoice_id, invoice.id)
+
+    def test_convert_order_to_invoice_after_challan_dispatched(self):
+        """Converting a fully dispatched sales order to sales invoice must succeed and link challans."""
+        order = SalesOrder.objects.create(
+            order_number="SO-POST-01",
+            date=date.today(),
+            customer=self.customer,
+            stage="new",
+            total_amount=Decimal("2360.00"),
+            created_by=self.tenant
+        )
+        order_item = SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=4,
+            dispatched_quantity=0,
+            price=Decimal("500.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("2360.00"),
+            unit="pcs"
+        )
+
+        # Convert full quantity to challan
+        res_dc = self.client.post(f"/api/billing/sales-orders/{order.id}/convert_to_challan/", {
+            "items": [{"id": order_item.id, "quantity": 4}]
+        }, format="json")
+        self.assertEqual(res_dc.status_code, status.HTTP_201_CREATED)
+
+        order.refresh_from_db()
+        self.assertEqual(order.stage, "completed")
+
+        # Now convert the sales order to sales invoice post-delivery
+        res_inv = self.client.post(f"/api/billing/sales-orders/{order.id}/convert_to_invoice/")
+        self.assertEqual(res_inv.status_code, status.HTTP_200_OK, res_inv.data)
+
+        from billing.models import SalesInvoice
+        inv = SalesInvoice.objects.get(id=res_inv.data["invoice_id"])
+        self.assertIn("DC-", inv.challan_number)
+        self.assertEqual(inv.items.count(), 1)
+        self.assertEqual(inv.items.first().quantity, 4)

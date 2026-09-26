@@ -733,6 +733,21 @@ class QuotationSerializer(serializers.ModelSerializer):
             'state': obj.customer.state,
         }
 
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        if 'total_amount' in data and data['total_amount'] is not None and str(data['total_amount']).strip():
+            try:
+                data['total_amount'] = f"{Decimal(str(data['total_amount'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
+        if 'round_off' in data and data['round_off'] is not None and str(data['round_off']).strip():
+            try:
+                data['round_off'] = f"{Decimal(str(data['round_off'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
+        return super().to_internal_value(data)
+
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         from billing.sequence_service import display_document_number

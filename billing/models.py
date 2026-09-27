@@ -265,7 +265,7 @@ class SalesInvoiceItem(models.Model):
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     quantity = models.PositiveIntegerField()
     unit = models.CharField(max_length=20, blank=True, null=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=14, decimal_places=4)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)

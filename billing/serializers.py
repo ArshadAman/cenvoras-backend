@@ -386,7 +386,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         if qty <= 0 and free_qty <= 0:
             raise serializers.ValidationError({'quantity': 'Quantity or Free Quantity must be greater than 0.'})
         return data
-    price = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
+    price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2)

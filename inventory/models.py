@@ -31,8 +31,8 @@ class Product(models.Model):
     secondary_unit = models.CharField(max_length=20, blank=True, null=True, help_text="e.g., Box")
     conversion_factor = models.PositiveIntegerField(default=1, help_text="1 Secondary Unit = X Primary Units")
     
-    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, default=None)
+    price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    sale_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True, default=None)
     tax = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # GST %
     warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
     stock = models.IntegerField(default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
@@ -78,9 +78,9 @@ class ProductBatch(models.Model):
     manufacturing_date = models.DateField(null=True, blank=True)
     
     # Batch-specific pricing (Marg parity)
-    mrp = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Maximum Retail Price for this batch")
-    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Purchase cost for this batch")
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Selling price for this batch")
+    mrp = models.DecimalField(max_digits=14, decimal_places=4, default=0, help_text="Maximum Retail Price for this batch")
+    cost_price = models.DecimalField(max_digits=14, decimal_places=4, default=0, help_text="Purchase cost for this batch")
+    sale_price = models.DecimalField(max_digits=14, decimal_places=4, default=0, help_text="Selling price for this batch")
     notes = models.TextField(blank=True, null=True, help_text="Custom remarks for this batch")
     
     is_active = models.BooleanField(default=True)

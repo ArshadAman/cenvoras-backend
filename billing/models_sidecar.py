@@ -164,15 +164,16 @@ class SalesOrder(models.Model):
 
 class SalesOrderItem(models.Model):
     order = models.ForeignKey(SalesOrder, related_name='items', on_delete=models.CASCADE)
-    product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    quantity = models.PositiveIntegerField()
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
+    row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
+    quantity = models.PositiveIntegerField(default=1)
     dispatched_quantity = models.PositiveIntegerField(default=0, help_text="Quantity dispatched / fulfilled")
     free_quantity = models.PositiveIntegerField(default=0)
     unit = models.CharField(max_length=20, blank=True, null=True)
-    price = models.DecimalField(max_digits=14, decimal_places=4)
+    price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     @property
@@ -243,7 +244,8 @@ class DeliveryChallan(models.Model):
 
 class DeliveryChallanItem(models.Model):
     challan = models.ForeignKey(DeliveryChallan, related_name='items', on_delete=models.CASCADE)
-    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
+    row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being dispatched")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     quantity = models.PositiveIntegerField(default=1)
@@ -256,7 +258,8 @@ class DeliveryChallanItem(models.Model):
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     def __str__(self):
-        return f"{self.product.name} x{self.quantity}"
+        prod_name = self.product.name if self.product else (self.description or 'Note')
+        return f"{prod_name} x{self.quantity}"
 
 class PurchaseIndent(models.Model):
     """
@@ -319,14 +322,15 @@ class Quotation(models.Model):
 
 class QuotationItem(models.Model):
     quotation = models.ForeignKey(Quotation, related_name='items', on_delete=models.CASCADE)
-    product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    quantity = models.PositiveIntegerField()
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
+    row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
+    quantity = models.PositiveIntegerField(default=1)
     free_quantity = models.PositiveIntegerField(default=0)
     unit = models.CharField(max_length=20, blank=True, null=True)
-    price = models.DecimalField(max_digits=14, decimal_places=4)
+    price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")

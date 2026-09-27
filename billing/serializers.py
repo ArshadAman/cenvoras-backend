@@ -96,12 +96,14 @@ def _rebuild_purchase_bill_ledger(bill_id):
 
 class ProductField(serializers.Field):
     def to_internal_value(self, value):
+        if value is None:
+            return None
         if not value or not str(value).strip():
-            raise serializers.ValidationError('Product is required.')
+            return None
         return value
 
     def to_representation(self, value):
-        return str(value)
+        return str(value) if value is not None else None
 
 class CustomerField(serializers.Field):
     def to_internal_value(self, value):
@@ -373,7 +375,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         return instance
 
 class SalesInvoiceItemSerializer(serializers.ModelSerializer):
-    product = ProductField()
+    product = ProductField(required=False, allow_null=True)
+    row_type = serializers.CharField(required=False, default='item')
     product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -381,28 +384,33 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
 
     def validate(self, data):
+        if data.get('row_type') == 'note':
+            return data
         qty = data.get('quantity', 0) or 0
         free_qty = data.get('free_quantity', 0) or 0
         if qty <= 0 and free_qty <= 0:
             raise serializers.ValidationError({'quantity': 'Quantity or Free Quantity must be greater than 0.'})
         return data
-    price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4)
+    price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4, default=0)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
-    amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2)
+    amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2, default=0)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
+        fields = ['id', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
+        ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
         return ret
 
     def get_product_detail(self, obj):
+        if not getattr(obj, 'product', None):
+            return None
         detail = {
             "id": str(obj.product.id),
             "name": obj.product.name,
@@ -423,8 +431,24 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         if 'product_description' in data and not data.get('description'):
             data['description'] = data.get('product_description') or ''
 
-        print("DEBUG SalesInvoiceItemSerializer: Processing data:", data)
+        row_type = data.get('row_type', 'item')
         product_value = data.get('product')
+
+        if row_type == 'note' or (not product_value and data.get('description')):
+            data['row_type'] = 'note'
+            data['product'] = None
+            data['quantity'] = 0
+            data['free_quantity'] = 0
+            data['price'] = 0
+            data['amount'] = 0
+            data['tax'] = 0
+            data['discount'] = 0
+            data['batch'] = None
+            data['unit'] = ''
+            data['hsn_sac_code'] = ''
+            return super().to_internal_value(data)
+
+        print("DEBUG SalesInvoiceItemSerializer: Processing data:", data)
         print("DEBUG SalesInvoiceItemSerializer: Product value:", product_value, type(product_value))
         
         if not product_value or not str(product_value).strip():
@@ -637,6 +661,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _calculate_line_amount(item_data):
+        if item_data.get('row_type') == 'note':
+            return Decimal('0.00')
         quantity = Decimal(str(item_data.get('quantity', 0) or 0))
         price = Decimal(str(item_data.get('price', 0) or 0))
         discount = Decimal(str(item_data.get('discount', 0) or 0))

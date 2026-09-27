@@ -29,14 +29,38 @@ def _csv_job_status(task_id):
 @permission_classes([IsAuthenticated])
 def export_sales_invoices_csv(request):
     filters = {key: request.query_params.get(key, '') for key in request.query_params.keys()}
-    task = generate_sales_invoice_csv.delay(str(request.user.id), filters)
-    return Response({
-        'success': True,
-        'message': 'Sales CSV export queued in the background.',
-        'task_id': task.id,
-        'status_url': f'/api/billing/sales-invoices/csv-jobs/{task.id}/',
-        'download_url': f'/api/billing/sales-invoices/csv-jobs/{task.id}/download/',
-    }, status=status.HTTP_202_ACCEPTED)
+    direct = request.query_params.get('direct', '').lower() in ['1', 'true', 'yes']
+
+    if direct:
+        try:
+            result = generate_sales_invoice_csv(str(request.user.id), filters)
+            file_path = result.get('file_path')
+            filename = result.get('filename', f'sales-invoices-{request.user.id}.csv')
+            if file_path and os.path.exists(file_path):
+                return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
+        except Exception as e:
+            return Response({'error': f'Direct CSV export failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    try:
+        task = generate_sales_invoice_csv.delay(str(request.user.id), filters)
+        return Response({
+            'success': True,
+            'message': 'Sales CSV export queued in the background.',
+            'task_id': task.id,
+            'status_url': f'/api/billing/sales-invoices/csv-jobs/{task.id}/',
+            'download_url': f'/api/billing/sales-invoices/csv-jobs/{task.id}/download/',
+        }, status=status.HTTP_202_ACCEPTED)
+    except Exception:
+        # Fallback to direct synchronous export if Celery worker/broker is not responding
+        try:
+            result = generate_sales_invoice_csv(str(request.user.id), filters)
+            file_path = result.get('file_path')
+            filename = result.get('filename', f'sales-invoices-{request.user.id}.csv')
+            if file_path and os.path.exists(file_path):
+                return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
+        except Exception as e:
+            return Response({'error': f'CSV export failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': 'Failed to generate CSV export.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

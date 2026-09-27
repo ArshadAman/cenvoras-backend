@@ -52,6 +52,8 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
         ]
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
+    row_type = serializers.CharField(required=False, default='item')
     product_name = serializers.CharField(source='product.name', read_only=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
@@ -65,14 +67,16 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalesOrderItem
         fields = [
-            'id', 'product', 'product_name', 'description', 'quantity', 'dispatched_quantity', 
+            'id', 'row_type', 'product', 'product_name', 'description', 'quantity', 'dispatched_quantity', 
             'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit', 
             'price', 'discount', 'tax', 'amount'
         ]
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
+        ret['product_name'] = instance.product.name if instance.product else (instance.description or 'Note')
+        ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
         return ret
 
     def get_fulfillment_status(self, obj):
@@ -92,7 +96,21 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             data = dict(data)
         if 'product_description' in data and not data.get('description'):
             data['description'] = data.get('product_description') or ''
+
+        row_type = data.get('row_type', 'item')
         product_value = data.get('product')
+        if row_type == 'note' or (not product_value and data.get('description')):
+            data['row_type'] = 'note'
+            data['product'] = None
+            data['quantity'] = 0
+            data['free_quantity'] = 0
+            data['price'] = 0
+            data['discount'] = 0
+            data['tax'] = 0
+            data['amount'] = 0
+            data['unit'] = ''
+            return super().to_internal_value(data)
+
         if not product_value:
             raise serializers.ValidationError({'product': 'Product is required.'})
 
@@ -221,6 +239,8 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         return instance
 
 class DeliveryChallanItemSerializer(serializers.ModelSerializer):
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
+    row_type = serializers.CharField(required=False, default='item')
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_detail = serializers.SerializerMethodField(read_only=True)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
@@ -230,6 +250,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
         model = DeliveryChallanItem
         fields = [
             'id',
+            'row_type',
             'product',
             'product_name',
             'product_detail',
@@ -247,7 +268,9 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
+        ret['product_name'] = instance.product.name if instance.product else (instance.description or 'Note')
+        ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
         return ret
 
     def get_product_detail(self, obj):
@@ -271,7 +294,23 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
         mutable = dict(data)
         if 'product_description' in mutable and not mutable.get('description'):
             mutable['description'] = mutable.get('product_description') or ''
+
+        row_type = mutable.get('row_type', 'item')
         product_value = mutable.get('product')
+        if row_type == 'note' or (not product_value and mutable.get('description')):
+            mutable['row_type'] = 'note'
+            mutable['product'] = None
+            mutable['quantity'] = 0
+            mutable['free_quantity'] = 0
+            mutable['price'] = 0
+            mutable['discount'] = 0
+            mutable['tax'] = 0
+            mutable['amount'] = 0
+            mutable['unit'] = ''
+            mutable['hsn_sac_code'] = ''
+            mutable['batch'] = None
+            return super().to_internal_value(mutable)
+
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})
 
@@ -407,6 +446,8 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _calculate_line_amount(item_data):
+        if item_data.get('row_type') == 'note':
+            return Decimal('0.00')
         quantity = Decimal(str(item_data.get('quantity', 0) or 0))
         price = Decimal(str(item_data.get('price', 0) or 0))
         discount = Decimal(str(item_data.get('discount', 0) or 0))
@@ -472,7 +513,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         target_warehouse = challan.warehouse
         for item in challan.items.all():
             eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
-            if eff_qty > 0:
+            if item.product_id and eff_qty > 0:
                 Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
                 if item.batch and target_warehouse:
                     sp, _ = StockPoint.objects.get_or_create(
@@ -505,7 +546,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             old_warehouse = instance.warehouse
             for old_item in instance.items.all():
                 old_qty = (old_item.quantity or 0) + (old_item.free_quantity or 0)
-                if old_qty > 0:
+                if old_item.product_id and old_qty > 0:
                     Product.objects.filter(pk=old_item.product_id).update(stock=F('stock') + old_qty)
                     if old_item.batch and old_warehouse:
                         StockPoint.objects.filter(batch=old_item.batch, warehouse=old_warehouse).update(
@@ -527,7 +568,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             new_warehouse = instance.warehouse
             for new_item in instance.items.all():
                 eff_qty = (new_item.quantity or 0) + (new_item.free_quantity or 0)
-                if eff_qty > 0:
+                if new_item.product_id and eff_qty > 0:
                     Product.objects.filter(pk=new_item.product_id).update(stock=F('stock') - eff_qty)
                     if new_item.batch and new_warehouse:
                         sp, _ = StockPoint.objects.get_or_create(
@@ -567,6 +608,8 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
 
 
 class QuotationItemSerializer(serializers.ModelSerializer):
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
+    row_type = serializers.CharField(required=False, default='item')
     product_name = serializers.CharField(source='product.name', read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
 
@@ -574,6 +617,7 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         model = QuotationItem
         fields = [
             'id',
+            'row_type',
             'product',
             'product_name',
             'description',
@@ -593,8 +637,9 @@ class QuotationItemSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        ret['product_name'] = instance.product.name if instance.product else ''
-        ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
+        ret['product_name'] = instance.product.name if instance.product else (instance.description or 'Note')
+        ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
         if instance.product:
             ret['product_detail'] = {
                 'id': str(instance.product.id),
@@ -617,7 +662,23 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         mutable = dict(data)
         if 'product_description' in mutable and not mutable.get('description'):
             mutable['description'] = mutable.get('product_description') or ''
+
+        row_type = mutable.get('row_type', 'item')
         product_value = mutable.get('product')
+        if row_type == 'note' or (not product_value and mutable.get('description')):
+            mutable['row_type'] = 'note'
+            mutable['product'] = None
+            mutable['quantity'] = 0
+            mutable['free_quantity'] = 0
+            mutable['price'] = 0
+            mutable['discount'] = 0
+            mutable['tax'] = 0
+            mutable['amount'] = 0
+            mutable['unit'] = ''
+            mutable['hsn_sac_code'] = ''
+            mutable['batch'] = None
+            return super().to_internal_value(mutable)
+
         if not product_value or not str(product_value).strip():
             raise serializers.ValidationError({'product': 'Product is required.'})
 

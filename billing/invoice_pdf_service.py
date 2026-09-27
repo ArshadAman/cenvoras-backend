@@ -485,8 +485,25 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     total_tax = Decimal('0.00')
 
     for idx, item in enumerate(raw_items, start=1):
-        p_name = getattr(item.product, 'name', '') or str(item.product)
-        hsn = getattr(item, 'hsn_sac_code', '') or getattr(item.product, 'hsn_sac_code', '') or '—'
+        if getattr(item, 'row_type', 'item') == 'note':
+            item_desc = getattr(item, 'description', '') or ''
+            from xml.sax.saxutils import escape
+            clean_desc = escape(str(item_desc).strip()).replace('\n', '<br/>')
+            row = [
+                Paragraph("", td_style),
+                Paragraph(f"<font color='#334155' size=7.5><b>Note:</b> {clean_desc}</font>", td_style),
+                Paragraph("", td_style),
+                Paragraph("", td_style),
+                Paragraph("", td_style),
+                Paragraph("", td_style),
+                Paragraph("", td_style),
+                Paragraph("", td_style),
+            ]
+            items_data.append(row)
+            continue
+
+        p_name = getattr(item.product, 'name', '') or getattr(item, 'description', '') or 'Item'
+        hsn = getattr(item, 'hsn_sac_code', '') or (getattr(item.product, 'hsn_sac_code', '') if item.product else '') or '—'
         qty = Decimal(str(getattr(item, 'quantity', 0) or 0))
         free_qty = Decimal(str(getattr(item, 'free_quantity', 0) or 0))
         price = Decimal(str(getattr(item, 'price', 0) or 0))
@@ -506,9 +523,9 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty)} Free (Promotional Offer)</b></font>"
 
         item_desc = getattr(item, 'description', '') or ''
-        if not item_desc and hasattr(item, 'product') and getattr(item.product, 'description', ''):
+        if not item_desc and hasattr(item, 'product') and item.product and getattr(item.product, 'description', ''):
             item_desc = item.product.description
-        if item_desc:
+        if item_desc and p_name != item_desc:
             from xml.sax.saxutils import escape
             clean_desc = escape(str(item_desc).strip()).replace('\n', '<br/>')
             desc_text += f"<br/><font color='#64748b' size=7>{clean_desc}</font>"

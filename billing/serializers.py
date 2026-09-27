@@ -461,6 +461,10 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 if 'price' in data and data['price'] is not None:
                     product.sale_price = data['price']
                     updated = True
+                product_name_input = data.get('product_name') or data.get('name')
+                if product_name_input and str(product_name_input).strip() and product.name != str(product_name_input).strip():
+                    product.name = str(product_name_input).strip()
+                    updated = True
                 if updated:
                     print("DEBUG SalesInvoiceItemSerializer: Updating product fields")
                     product.save()

@@ -103,6 +103,11 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             # Try UUID first
             product_uuid = UUID(str(product_value))
             product_obj = Product.objects.filter(id=product_uuid, created_by=user).first()
+            if product_obj:
+                product_name_input = data.get('product_name') or data.get('name')
+                if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
+                    product_obj.name = str(product_name_input).strip()
+                    product_obj.save(update_fields=['name'])
         except (ValueError, TypeError):
             # Try name
             product_obj = Product.objects.filter(name__iexact=str(product_value).strip(), created_by=user).first()
@@ -282,6 +287,10 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
             if not product_obj:
                 raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
+            product_name_input = mutable.get('product_name') or mutable.get('name')
+            if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
+                product_obj.name = str(product_name_input).strip()
+                product_obj.save(update_fields=['name'])
         except (ValueError, TypeError):
             product_name = str(product_value).strip()
             product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
@@ -624,6 +633,10 @@ class QuotationItemSerializer(serializers.ModelSerializer):
             product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
             if not product_obj:
                 raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
+            product_name_input = mutable.get('product_name') or mutable.get('name')
+            if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
+                product_obj.name = str(product_name_input).strip()
+                product_obj.save(update_fields=['name'])
         except (ValueError, TypeError):
             product_name = str(product_value).strip()
             product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()

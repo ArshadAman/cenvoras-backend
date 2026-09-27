@@ -5,8 +5,8 @@ from .serializers_sidecar import ProductMetaSerializer, BillOfMaterialSerializer
 
 class ProductSerializer(serializers.ModelSerializer):
     unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, required=False)
-    cost_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, required=False, allow_null=True)
-    sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
+    cost_price = serializers.DecimalField(source='price', max_digits=14, decimal_places=4, required=False, allow_null=True)
+    sale_price = serializers.DecimalField(max_digits=14, decimal_places=4, required=False)
     current_stock = serializers.IntegerField(source='stock', read_only=True)
     meta = ProductMetaSerializer(required=False)
     

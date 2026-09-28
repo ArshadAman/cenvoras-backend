@@ -17,6 +17,7 @@ from . import views_sidecar
 from . import gst_views
 from . import returns_views
 from . import views
+from . import views_gst_shield
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -85,6 +86,14 @@ urlpatterns = [
     path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
     path('gst/e-invoice/', gst_views.generate_einvoice, name='generate_einvoice'),
     path('gst/e-way-bill/', gst_views.generate_eway_bill, name='generate_eway_bill'),
+    
+    # GST Shield & GSTR-2B Reconciliation Engine
+    path('gst/reconcile-2b/', views_gst_shield.upload_and_reconcile_gstr2b, name='upload_and_reconcile_gstr2b'),
+    path('gst/reconciliation-summary/', views_gst_shield.get_reconciliation_summary, name='get_reconciliation_summary'),
+    path('gst/manual-match/', views_gst_shield.manual_match_record, name='manual_match_record'),
+    path('gst/toggle-withholding/', views_gst_shield.toggle_bill_withholding, name='toggle_bill_withholding'),
+    path('gst/generate-legal-notice/', views_gst_shield.generate_legal_notice, name='generate_legal_notice'),
+    path('gst/ca-audit-pack/', views_gst_shield.download_ca_audit_pack, name='download_ca_audit_pack'),
     
     # Returns (Credit Notes / Debit Notes)
     path('credit-notes/', returns_views.credit_note_list_create, name='credit_note_list_create'),

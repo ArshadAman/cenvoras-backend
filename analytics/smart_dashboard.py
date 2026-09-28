@@ -499,7 +499,8 @@ class SmartDashboard:
     # ═══════════════════════════════════════════════════════════════
     
     def get_gst_shield(self):
-        """Get GST compliance information"""
+        """Get GST compliance and smart ITC protection information"""
+        itc_metrics = self._get_itc_protection_metrics()
         return {
             'total_turnover': self._get_gst_turnover(),
             'turnover_limit': 4000000,  # ₹40 Lakh for goods
@@ -509,6 +510,54 @@ class SmartDashboard:
             'gst_collected': self._get_gst_collected(),
             'gst_paid': self._get_gst_paid(),
             'gst_payable': self._get_gst_payable(),
+            # Next-Gen GST Shield metrics
+            'safe_itc': itc_metrics['safe_itc'],
+            'at_risk_itc': itc_metrics['at_risk_itc'],
+            'withheld_pool': itc_metrics['withheld_pool'],
+            'defaulters_count': itc_metrics['defaulters_count'],
+            'reconciled_bills_count': itc_metrics['reconciled_bills_count'],
+            'unmatched_bills_count': itc_metrics['unmatched_bills_count'],
+        }
+
+    def _get_itc_protection_metrics(self):
+        """Calculates safe vs at-risk ITC and payment-withholding pool"""
+        from billing.models import PurchaseBill, Vendor
+        from billing.services_gstr2b import calculate_purchase_bill_tax
+
+        bills = PurchaseBill.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner)
+        ).prefetch_related('items')
+
+        safe_itc = Decimal('0.00')
+        at_risk_itc = Decimal('0.00')
+        withheld_pool = Decimal('0.00')
+        reconciled_count = 0
+        unmatched_count = 0
+
+        for b in bills:
+            _, tax_amt, _, _, _ = calculate_purchase_bill_tax(b)
+            if b.gstr2b_status == 'matched':
+                safe_itc += tax_amt
+                reconciled_count += 1
+            else:
+                at_risk_itc += tax_amt
+                unmatched_count += 1
+
+            if b.is_gst_withheld:
+                withheld_pool += b.gst_withheld_amount
+
+        defaulters = Vendor.objects.filter(
+            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+            total_at_risk_itc__gt=0
+        ).count()
+
+        return {
+            'safe_itc': float(safe_itc),
+            'at_risk_itc': float(at_risk_itc),
+            'withheld_pool': float(withheld_pool),
+            'defaulters_count': defaulters,
+            'reconciled_bills_count': reconciled_count,
+            'unmatched_bills_count': unmatched_count
         }
     
     def _get_gst_turnover(self):

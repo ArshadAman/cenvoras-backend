@@ -2209,5 +2209,171 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertFalse(q_item.converted_to_order)
 
 
+class GSTShieldReconciliationTests(APITestCase):
+    def setUp(self):
+        from users.models import User
+        from billing.models import Vendor, PurchaseBill, PurchaseBillItem
+        from inventory.models import Product
+
+        self.user = User.objects.create_user(
+            username="gstshield_tester",
+            email="gstshield@example.com",
+            password="Password123!",
+            business_name="Shield Corp",
+            gstin="27ABCDE1234F1Z5"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.vendor = Vendor.objects.create(
+            name="Reliable Steel Ltd",
+            gstin="27RELIA1111A1Z1",
+            created_by=self.user
+        )
+
+        self.product = Product.objects.create(
+            name="Steel Rod 12mm",
+            price=Decimal("1000.00"),
+            stock=100,
+            created_by=self.user
+        )
+
+        # Purchase Bill 1: Will match in GSTR-2B
+        self.bill_matched = PurchaseBill.objects.create(
+            bill_number="INV/2026/001",
+            bill_date=date(2026, 8, 10),
+            vendor=self.vendor,
+            vendor_name=self.vendor.name,
+            vendor_gstin=self.vendor.gstin,
+            total_amount=Decimal("1180.00"),
+            created_by=self.user
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=self.bill_matched,
+            product=self.product,
+            quantity=1,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00")
+        )
+
+        # Purchase Bill 2: Unfiled by vendor (Will be missing in 2B, triggering withholding)
+        self.bill_unfiled = PurchaseBill.objects.create(
+            bill_number="INV-2026-999",
+            bill_date=date(2026, 8, 15),
+            vendor=self.vendor,
+            vendor_name=self.vendor.name,
+            vendor_gstin=self.vendor.gstin,
+            total_amount=Decimal("2360.00"),
+            created_by=self.user
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=self.bill_unfiled,
+            product=self.product,
+            quantity=2,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("2360.00")
+        )
+
+    def test_invoice_normalization(self):
+        from billing.services_gstr2b import normalize_invoice_number
+        self.assertEqual(normalize_invoice_number("INV/2026/001"), "INV20261")
+        self.assertEqual(normalize_invoice_number("inv-2026-00042"), "INV202642")
+        self.assertEqual(normalize_invoice_number("000123"), "123")
+
+    def test_gstr2b_reconciliation_and_withholding_lock(self):
+        import io
+        import json
+
+        # Mock official GSTR-2B JSON payload with only bill_matched (bill_unfiled is missing)
+        gstr2b_payload = {
+            "data": {
+                "rtn_prd": "082026",
+                "fy": "2026-2027",
+                "docdata": {
+                    "b2b": [
+                        {
+                            "ctin": "27RELIA1111A1Z1",
+                            "trdnm": "Reliable Steel Ltd",
+                            "inv": [
+                                {
+                                    "inum": "INV-2026-001",
+                                    "idt": "10-08-2026",
+                                    "val": 1180.00,
+                                    "itcavl": "Y",
+                                    "items": [
+                                        {
+                                            "num": 1,
+                                            "txval": 1000.00,
+                                            "igst": 0.0,
+                                            "cgst": 90.0,
+                                            "sgst": 90.0,
+                                            "cess": 0.0
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+        json_bytes = json.dumps(gstr2b_payload).encode('utf-8')
+        mock_file = io.BytesIO(json_bytes)
+        mock_file.name = "gstr2b_082026.json"
+
+        res = self.client.post("/api/billing/gst/reconcile-2b/", {
+            "file": mock_file
+        }, format='multipart')
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["matched_count"], 1)
+
+        # Verify bill 1 is matched and unlocked
+        self.bill_matched.refresh_from_db()
+        self.assertEqual(self.bill_matched.gstr2b_status, 'matched')
+        self.assertFalse(self.bill_matched.is_gst_withheld)
+        self.assertEqual(self.bill_matched.gst_withheld_amount, Decimal('0.00'))
+
+        # Verify bill 2 is missing in 2B and payment withholding is LOCKED
+        self.bill_unfiled.refresh_from_db()
+        self.assertEqual(self.bill_unfiled.gstr2b_status, 'missing_in_2b')
+        self.assertTrue(self.bill_unfiled.is_gst_withheld)
+        self.assertEqual(self.bill_unfiled.gst_withheld_amount, Decimal('360.00'))
+
+        # Verify summary endpoint
+        res_sum = self.client.get("/api/billing/gst/reconciliation-summary/")
+        self.assertEqual(res_sum.status_code, 200)
+        self.assertEqual(res_sum.data["safe_itc"], 180.00)
+        self.assertEqual(res_sum.data["at_risk_itc"], 360.00)
+        self.assertEqual(res_sum.data["withheld_pool"], 360.00)
+
+        # Generate statutory legal notice
+        res_notice = self.client.post("/api/billing/gst/generate-legal-notice/", {
+            "vendor_id": str(self.vendor.id),
+            "deadline_days": 7
+        }, format='json')
+        self.assertEqual(res_notice.status_code, 200)
+        self.assertIn("SECTION 16(2)", res_notice.data["notice_text"])
+        self.assertEqual(res_notice.data["total_tax_at_risk"], 360.00)
+        self.assertTrue(res_notice.data["whatsapp_link"].startswith("https://api.whatsapp.com"))
+
+        # Test multi-format CA pack downloads
+        res_xlsx = self.client.get("/api/billing/gst/ca-audit-pack/?export=xlsx")
+        self.assertEqual(res_xlsx.status_code, 200)
+        self.assertIn("application/vnd.openxmlformats", res_xlsx["Content-Type"])
+
+        res_csv = self.client.get("/api/billing/gst/ca-audit-pack/?export=csv")
+        self.assertEqual(res_csv.status_code, 200)
+        self.assertEqual(res_csv["Content-Type"], "text/csv")
+
+        res_json = self.client.get("/api/billing/gst/ca-audit-pack/?export=json")
+        self.assertEqual(res_json.status_code, 200)
+        self.assertEqual(res_json["Content-Type"], "application/json")
+
+
+
 
 

@@ -78,6 +78,23 @@ class Vendor(models.Model):
         null=True,
         help_text="Vendor's State/Region (Determines Tax Treatment)"
     )
+
+    # Compliance & GST Shield fields
+    compliance_score = models.IntegerField(default=100, help_text="Vendor GST Compliance Score (0-100)")
+    risk_tier = models.CharField(
+        max_length=20, 
+        choices=[
+            ('safe', 'Safe / Trusted'), 
+            ('moderate_risk', 'Moderate Risk'), 
+            ('defaulter', 'High Risk / Defaulter')
+        ],
+        default='safe'
+    )
+    total_billed_itc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_reconciled_itc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_at_risk_itc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    last_reconciliation_date = models.DateTimeField(null=True, blank=True)
+    default_withholding_enabled = models.BooleanField(default=True, help_text="Automatically hold GST on unmatched bills")
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -100,6 +117,25 @@ class PurchaseBill(models.Model):
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
+
+    # GST Shield & GSTR-2B Reconciliation
+    gstr2b_status = models.CharField(
+        max_length=30,
+        choices=[
+            ('pending', 'Pending Verification'),
+            ('matched', '100% Matched in GSTR-2B'),
+            ('probable_match', 'Probable Match (Fuzzy)'),
+            ('missing_in_2b', 'Missing in GSTR-2B (At-Risk ITC)'),
+            ('disputed_tax', 'Tax Discrepancy'),
+            ('manual_override', 'Manually Approved')
+        ],
+        default='pending'
+    )
+    gst_withheld_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Amount of GST withheld from vendor")
+    is_gst_withheld = models.BooleanField(default=False, help_text="True if GST amount is currently locked/withheld")
+    gst_withholding_override = models.BooleanField(default=False, help_text="True if user manually bypassed withholding")
+    gst_withholding_notes = models.TextField(blank=True, default='')
+
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -278,3 +314,4 @@ class SalesInvoiceItem(models.Model):
 # Import Sidecar Models to ensure they are registered
 from .models_sidecar import TransactionMeta, InvoiceSettings, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
+from .models_gst_shield import GSTR2BImport, GSTR2BRecord, VendorLegalNotice

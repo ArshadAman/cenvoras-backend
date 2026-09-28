@@ -2,7 +2,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
-from billing.models import SalesInvoice, PurchaseBill, Payment, Customer
+from billing.models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Payment, Customer, Vendor
 from billing.models_sidecar import Quotation
 from inventory.models import Product
 from decimal import Decimal
@@ -2274,6 +2274,31 @@ class GSTShieldReconciliationTests(APITestCase):
             price=Decimal("1000.00"),
             tax=Decimal("18.00"),
             amount=Decimal("2360.00")
+        )
+
+        # Sales Invoice (to test outward supply computation & customer gstin handling)
+        self.customer = Customer.objects.create(
+            name="Apex Enterprises",
+            gstin="27AAPCA0000A1Z5",
+            state="Maharashtra",
+            created_by=self.user
+        )
+        self.sales_inv = SalesInvoice.objects.create(
+            invoice_number="INV-2026-SALES-01",
+            invoice_date=date(2026, 8, 10),
+            customer=self.customer,
+            customer_name=self.customer.name,
+            total_amount=Decimal("1180.00"),
+            created_by=self.user,
+            status="final"
+        )
+        SalesInvoiceItem.objects.create(
+            sales_invoice=self.sales_inv,
+            product=self.product,
+            quantity=1,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00")
         )
 
     def test_invoice_normalization(self):

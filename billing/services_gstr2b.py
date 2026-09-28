@@ -46,7 +46,7 @@ def calculate_purchase_bill_tax(bill):
     items = bill.items.all()
     if not items.exists():
         # Fallback if no line items
-        taxable_value = bill.total_amount
+        taxable_value = Decimal(str(bill.total_amount or 0))
         total_tax = Decimal('0.00')
         return taxable_value, total_tax, Decimal('0.00'), Decimal('0.00'), Decimal('0.00')
 

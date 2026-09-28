@@ -75,14 +75,21 @@ class CAAuditPackGenerator:
             inv_sgst = Decimal('0.00')
             inv_igst = Decimal('0.00')
 
-            pos = (inv.customer_gstin or '')[:2] or getattr(inv.customer, 'state', '') or 'Same State'
+            c_gstin = ''
+            if inv.customer and inv.customer.gstin:
+                c_gstin = inv.customer.gstin
+            elif getattr(inv, 'customer_gstin', None):
+                c_gstin = inv.customer_gstin
+
+            c_name = inv.customer_name or (inv.customer.name if inv.customer and inv.customer.name else 'Retail Customer')
+            pos = getattr(inv, 'place_of_supply', '') or c_gstin[:2] or (inv.customer.state if inv.customer and inv.customer.state else '') or 'Same State'
             is_interstate = (inv.gst_treatment or '').lower() in ['interstate', 'igst', 'overseas', 'sez']
 
             for itm in inv.items.all():
-                q = Decimal(itm.quantity or 0)
-                p = Decimal(itm.price or 0)
-                d = Decimal(itm.discount or 0)
-                t = Decimal(itm.tax or 0)
+                q = Decimal(str(itm.quantity or 0))
+                p = Decimal(str(itm.price or 0))
+                d = Decimal(str(itm.discount or 0))
+                t = Decimal(str(itm.tax or 0))
 
                 base = (q * p) - ((q * p * d) / Decimal('100'))
                 tax = (base * t) / Decimal('100')
@@ -98,19 +105,20 @@ class CAAuditPackGenerator:
             sales_cgst += inv_cgst
             sales_sgst += inv_sgst
             sales_igst += inv_igst
-            sales_total += inv.total_amount
+            inv_total = Decimal(str(inv.total_amount or 0))
+            sales_total += inv_total
 
             sales_rows.append({
                 'invoice_number': inv.invoice_number,
                 'invoice_date': inv.invoice_date.strftime('%d-%m-%Y') if inv.invoice_date else '',
-                'customer_name': inv.customer_name or (inv.customer.name if inv.customer else 'Retail Customer'),
-                'customer_gstin': inv.customer_gstin or 'URP (Unregistered)',
+                'customer_name': c_name,
+                'customer_gstin': c_gstin or 'URP (Unregistered)',
                 'pos': pos,
                 'taxable_value': float(inv_taxable),
                 'cgst': float(inv_cgst),
                 'sgst': float(inv_sgst),
                 'igst': float(inv_igst),
-                'total_amount': float(inv.total_amount)
+                'total_amount': float(inv_total)
             })
 
         # 2. Purchase Bills & GSTR-2B Data
@@ -140,8 +148,8 @@ class CAAuditPackGenerator:
             cgst = cgst or Decimal('0.00')
             sgst = sgst or Decimal('0.00')
             igst = igst or Decimal('0.00')
-            bill_total = Decimal(bill.total_amount or 0)
-            withheld_amt = Decimal(bill.gst_withheld_amount or 0)
+            bill_total = Decimal(str(bill.total_amount or 0))
+            withheld_amt = Decimal(str(bill.gst_withheld_amount or 0))
 
             purchases_taxable += taxable
             purchases_cgst += cgst
@@ -158,14 +166,22 @@ class CAAuditPackGenerator:
             if bill.is_gst_withheld:
                 withheld_pool += withheld_amt
 
-            v_risk_tier = (bill.vendor.risk_tier.title() if (bill.vendor and bill.vendor.risk_tier) else 'Defaulter')
-            v_compliance = (bill.vendor.compliance_score if (bill.vendor and bill.vendor.compliance_score is not None) else 50)
+            v_risk_tier = 'Defaulter'
+            v_compliance = 50
+            if bill.vendor:
+                if getattr(bill.vendor, 'risk_tier', None):
+                    v_risk_tier = bill.vendor.risk_tier.title()
+                if getattr(bill.vendor, 'compliance_score', None) is not None:
+                    v_compliance = bill.vendor.compliance_score
+
+            v_gstin = bill.vendor_gstin or (bill.vendor.gstin if bill.vendor and bill.vendor.gstin else 'URP')
+            v_name = bill.vendor_name or (bill.vendor.name if bill.vendor and bill.vendor.name else 'Direct Vendor')
 
             p_entry = {
                 'bill_number': bill.bill_number or '',
                 'bill_date': bill.bill_date.strftime('%d-%m-%Y') if bill.bill_date else '',
-                'vendor_name': bill.vendor_name or (bill.vendor.name if bill.vendor else 'Direct Vendor'),
-                'vendor_gstin': bill.vendor_gstin or (bill.vendor.gstin if bill.vendor else 'URP'),
+                'vendor_name': v_name,
+                'vendor_gstin': v_gstin,
                 'taxable_value': float(taxable),
                 'cgst': float(cgst),
                 'sgst': float(sgst),
@@ -194,9 +210,11 @@ class CAAuditPackGenerator:
         net_tax_payable = max(Decimal('0.00'), (sales_cgst + sales_sgst + sales_igst) - safe_itc)
         net_itc_credit = max(Decimal('0.00'), safe_itc - (sales_cgst + sales_sgst + sales_igst))
 
+        b_name = (getattr(user, 'business_name', '') or '').strip() or user.get_full_name() or user.username or 'BUSINESS'
+
         return {
-            'business_name': getattr(user, 'business_name', '') or user.get_full_name() or user.username,
-            'gstin': getattr(user, 'gstin', '') or 'UNREGISTERED',
+            'business_name': b_name,
+            'gstin': (getattr(user, 'gstin', '') or '').strip() or 'UNREGISTERED',
             'period': f"{from_date.strftime('%d-%b-%Y')} to {to_date.strftime('%d-%b-%Y')}",
             'summary': {
                 'sales_taxable': float(sales_taxable),

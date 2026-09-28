@@ -68,19 +68,27 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'first_name', 'last_name', 'business_name', 'business_address', 
-            'gstin', 'gem_id', 'dl_number', 'phone', 'state', 'city',
-            'country', 'trn'
+            'gstin', 'pan_number', 'gem_id', 'dl_number', 'phone', 'state', 'city',
+            'country', 'trn', 'bank_name', 'bank_account_number', 'bank_ifsc_code',
+            'bank_branch', 'bank_upi_id', 'bank_qr_code'
         )
         extra_kwargs = {
             'business_name': {'required': True},
             'business_address': {'required': False},
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'pan_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
             'country': {'required': False},
             'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_name': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_account_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_ifsc_code': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_branch': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_upi_id': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def update(self, instance, validated_data):
@@ -135,13 +143,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
+            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
-            'country', 'currency', 'trn', 'is_vat_registered'
+            'country', 'currency', 'trn', 'is_vat_registered',
+            'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
+            'bank_upi_id', 'bank_qr_code'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -151,7 +161,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     """Comprehensive profile update serializer"""
-    current_password = serializers.CharField(write_only=True, required=False, help_text="Required only when changing email or password")
+    current_password = serializers.CharField(write_only=True, required=False, help_text="Required when changing email, password, or bank details")
     new_password = serializers.CharField(write_only=True, required=False, min_length=8)
     confirm_new_password = serializers.CharField(write_only=True, required=False)
     
@@ -159,10 +169,12 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'business_address', 'gstin', 'gem_id', 'dl_number', 
+            'invoice_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
             'new_password', 'confirm_new_password',
-            'country', 'currency', 'trn', 'is_vat_registered'
+            'country', 'currency', 'trn', 'is_vat_registered',
+            'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
+            'bank_upi_id', 'bank_qr_code'
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -170,11 +182,18 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'invoice_prefix': {'required': False},
             'email': {'required': False},
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'pan_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'gem_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'dl_number': {'required': False, 'allow_blank': True, 'allow_null': True},
             'state': {'required': False, 'allow_blank': True, 'allow_null': True},
             'city': {'required': False, 'allow_blank': True, 'allow_null': True},
             'trn': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_name': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_account_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_ifsc_code': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_branch': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_upi_id': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_invoice_prefix(self, value):
@@ -221,6 +240,25 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             if User.objects.filter(email=email).exclude(id=user.id).exists():
                 raise serializers.ValidationError({
                     'email': 'A user with this email already exists.'
+                })
+
+        # Bank details validation (Requires current password to update)
+        bank_fields = [
+            'bank_name', 'bank_account_number', 'bank_ifsc_code',
+            'bank_branch', 'bank_upi_id', 'bank_qr_code'
+        ]
+        bank_fields_changed = any(
+            field in attrs and (attrs[field] or '') != (getattr(user, field, '') or '')
+            for field in bank_fields
+        )
+        if bank_fields_changed:
+            if not current_password:
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is required to update bank details.'
+                })
+            if not user.check_password(current_password):
+                raise serializers.ValidationError({
+                    'current_password': 'Current password is incorrect.'
                 })
         
         # Phone validation

@@ -1,4 +1,5 @@
 import io
+import os
 import csv
 import json
 from decimal import Decimal
@@ -16,10 +17,61 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, HRFlowable
 )
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 from .models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Vendor
 from .models_returns import CreditNote
 from .services_gstr2b import calculate_purchase_bill_tax
+
+_FONTS_REGISTERED = False
+_PDF_FONT_REGULAR = 'Helvetica'
+_PDF_FONT_BOLD = 'Helvetica-Bold'
+_PDF_CURRENCY_SYMBOL = 'Rs. '
+
+
+def setup_pdf_fonts():
+    """
+    Registers a TrueType font with verified Unicode support for the Indian Rupee symbol (₹).
+    Searches system font directories on Linux (Docker) and macOS.
+    Gracefully falls back to Helvetica and 'Rs. ' if no font with the Rupee glyph is available.
+    """
+    global _FONTS_REGISTERED, _PDF_FONT_REGULAR, _PDF_FONT_BOLD, _PDF_CURRENCY_SYMBOL
+    if _FONTS_REGISTERED:
+        return _PDF_FONT_REGULAR, _PDF_FONT_BOLD, _PDF_CURRENCY_SYMBOL
+
+    font_candidates = [
+        # Linux / Docker (Debian/Ubuntu fonts-dejavu-core)
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+        ('/usr/share/fonts/truetype/freefont/FreeSans.ttf', '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf'),
+        # macOS
+        ('/System/Library/Fonts/Geneva.ttf', '/System/Library/Fonts/Geneva.ttf'),
+        ('/System/Library/Fonts/Supplemental/Arial Unicode.ttf', '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'),
+    ]
+
+    for reg_path, bold_path in font_candidates:
+        if os.path.exists(reg_path) and os.path.exists(bold_path):
+            try:
+                reg_font = TTFont('CenvoraFont', reg_path)
+                bold_font = TTFont('CenvoraFont-Bold', bold_path)
+                # Ensure font contains the Indian Rupee symbol U+20B9
+                if 0x20b9 in reg_font.face.charWidths:
+                    pdfmetrics.registerFont(reg_font)
+                    pdfmetrics.registerFont(bold_font)
+                    _PDF_FONT_REGULAR = 'CenvoraFont'
+                    _PDF_FONT_BOLD = 'CenvoraFont-Bold'
+                    _PDF_CURRENCY_SYMBOL = '₹'
+                    _FONTS_REGISTERED = True
+                    return _PDF_FONT_REGULAR, _PDF_FONT_BOLD, _PDF_CURRENCY_SYMBOL
+            except Exception:
+                continue
+
+    # Fallback to standard Helvetica if no font with the Rupee symbol is present
+    _PDF_FONT_REGULAR = 'Helvetica'
+    _PDF_FONT_BOLD = 'Helvetica-Bold'
+    _PDF_CURRENCY_SYMBOL = 'Rs. '
+    _FONTS_REGISTERED = True
+    return _PDF_FONT_REGULAR, _PDF_FONT_BOLD, _PDF_CURRENCY_SYMBOL
 
 
 def parse_date_safely(val, default_date):
@@ -443,11 +495,13 @@ class CAAuditPackGenerator:
             bottomMargin=12 * mm
         )
 
+        font_reg, font_bold, curr_sym = setup_pdf_fonts()
+
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle(
             'DocTitle',
             parent=styles['Normal'],
-            fontName='Helvetica-Bold',
+            fontName=font_bold,
             fontSize=15,
             leading=18,
             textColor=colors.HexColor('#0F172A')
@@ -455,7 +509,7 @@ class CAAuditPackGenerator:
         subtitle_style = ParagraphStyle(
             'DocSubtitle',
             parent=styles['Normal'],
-            fontName='Helvetica',
+            fontName=font_reg,
             fontSize=8,
             leading=11,
             textColor=colors.HexColor('#64748B')
@@ -463,7 +517,7 @@ class CAAuditPackGenerator:
         h2_style = ParagraphStyle(
             'SectionH2',
             parent=styles['Normal'],
-            fontName='Helvetica-Bold',
+            fontName=font_bold,
             fontSize=10,
             leading=13,
             textColor=colors.HexColor('#1E293B'),
@@ -473,7 +527,7 @@ class CAAuditPackGenerator:
         th_style = ParagraphStyle(
             'TH',
             parent=styles['Normal'],
-            fontName='Helvetica-Bold',
+            fontName=font_bold,
             fontSize=8,
             leading=10,
             textColor=colors.white
@@ -481,7 +535,7 @@ class CAAuditPackGenerator:
         td_style = ParagraphStyle(
             'TD',
             parent=styles['Normal'],
-            fontName='Helvetica',
+            fontName=font_reg,
             fontSize=8,
             leading=10,
             textColor=colors.HexColor('#1E293B')
@@ -489,7 +543,7 @@ class CAAuditPackGenerator:
         td_bold = ParagraphStyle(
             'TDBold',
             parent=styles['Normal'],
-            fontName='Helvetica-Bold',
+            fontName=font_bold,
             fontSize=8,
             leading=10,
             textColor=colors.HexColor('#1E293B')
@@ -500,7 +554,7 @@ class CAAuditPackGenerator:
         # 1. Header Banner
         header_data = [
             [
-                Paragraph(f"<b>{audit_data.get('business_name', 'BUSINESS').upper()}</b><br/><font color='#64748B' size='8'>GSTIN: {audit_data.get('gstin', 'UNREGISTERED')}</font>", title_style),
+                Paragraph(f"<b>{(audit_data.get('business_name') or 'BUSINESS').upper()}</b><br/><font color='#64748B' size='8'>GSTIN: {audit_data.get('gstin', 'UNREGISTERED')}</font>", title_style),
                 Paragraph(f"<font color='#059669'><b>EXECUTIVE CA AUDIT REPORT</b></font><br/><font color='#64748B' size='8'>Period: {audit_data.get('period', '')}<br/>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M')}</font>", subtitle_style)
             ]
         ]
@@ -517,10 +571,10 @@ class CAAuditPackGenerator:
         summary = audit_data.get('summary', {})
         kpi_data = [
             [
-                Paragraph(f"<b>TOTAL SALES (GSTR-1)</b><br/><font size='10'><b>₹{summary.get('sales_total', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Tax: ₹{summary.get('sales_tax', 0):,.2f}</font>", td_style),
-                Paragraph(f"<b>VERIFIED ITC (2B)</b><br/><font size='10' color='#059669'><b>₹{summary.get('safe_itc', 0):,.2f}</b></font><br/><font size='7' color='#059669'>100% Eligible</font>", td_style),
-                Paragraph(f"<b>AT-RISK / WITHHELD</b><br/><font size='10' color='#DC2626'><b>₹{summary.get('at_risk_itc', 0):,.2f}</b></font><br/><font size='7' color='#D97706'>Protected: ₹{summary.get('withheld_pool', 0):,.2f}</font>", td_style),
-                Paragraph(f"<b>NET TAX PAYABLE</b><br/><font size='10' color='#D97706'><b>₹{summary.get('net_tax_payable', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Credit: ₹{summary.get('net_itc_credit', 0):,.2f}</font>", td_style),
+                Paragraph(f"<b>TOTAL SALES (GSTR-1)</b><br/><font size='10'><b>{curr_sym}{summary.get('sales_total', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Tax: {curr_sym}{summary.get('sales_tax', 0):,.2f}</font>", td_style),
+                Paragraph(f"<b>VERIFIED ITC (2B)</b><br/><font size='10' color='#059669'><b>{curr_sym}{summary.get('safe_itc', 0):,.2f}</b></font><br/><font size='7' color='#059669'>100% Eligible</font>", td_style),
+                Paragraph(f"<b>AT-RISK / WITHHELD</b><br/><font size='10' color='#DC2626'><b>{curr_sym}{summary.get('at_risk_itc', 0):,.2f}</b></font><br/><font size='7' color='#D97706'>Protected: {curr_sym}{summary.get('withheld_pool', 0):,.2f}</font>", td_style),
+                Paragraph(f"<b>NET TAX PAYABLE</b><br/><font size='10' color='#D97706'><b>{curr_sym}{summary.get('net_tax_payable', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Credit: {curr_sym}{summary.get('net_itc_credit', 0):,.2f}</font>", td_style),
             ]
         ]
         kpi_table = Table(kpi_data, colWidths=[46.5 * mm, 46.5 * mm, 46.5 * mm, 46.5 * mm])
@@ -540,10 +594,10 @@ class CAAuditPackGenerator:
         elements.append(Paragraph("1. GSTR-3B Tax Computation & Filing Schedule", h2_style))
         comp_data = [
             [Paragraph("Section", th_style), Paragraph("Description", th_style), Paragraph("Taxable Base", th_style), Paragraph("Tax Amount", th_style), Paragraph("Audit Verification Status", th_style)],
-            [Paragraph("Table 3.1(a)", td_bold), Paragraph("Outward Taxable Supplies (Sales)", td_style), Paragraph(f"₹{summary.get('sales_taxable', 0):,.2f}", td_style), Paragraph(f"₹{summary.get('sales_tax', 0):,.2f}", td_style), Paragraph("Verified (Sales Register)", td_style)],
-            [Paragraph("Table 4(A)(5)", td_bold), Paragraph("Eligible Input Tax Credit (GSTR-2B Inward)", td_style), Paragraph(f"₹{summary.get('purchases_taxable', 0):,.2f}", td_style), Paragraph(f"₹{summary.get('safe_itc', 0):,.2f}", td_style), Paragraph("Verified in GSTR-2B", td_style)],
-            [Paragraph("Table 4(B)(2)", td_bold), Paragraph("Ineligible / Unfiled Vendor ITC (Withheld)", td_style), Paragraph("-", td_style), Paragraph(f"₹{summary.get('at_risk_itc', 0):,.2f}", td_style), Paragraph("Withheld from Vendor Payments", td_style)],
-            [Paragraph("Net Due", td_bold), Paragraph("<b>Net Cash GST Payable to Govt</b>", td_bold), Paragraph("-", td_bold), Paragraph(f"<b>₹{summary.get('net_tax_payable', 0):,.2f}</b>", td_bold), Paragraph("Payable by 20th", td_bold)],
+            [Paragraph("Table 3.1(a)", td_bold), Paragraph("Outward Taxable Supplies (Sales)", td_style), Paragraph(f"{curr_sym}{summary.get('sales_taxable', 0):,.2f}", td_style), Paragraph(f"{curr_sym}{summary.get('sales_tax', 0):,.2f}", td_style), Paragraph("Verified (Sales Register)", td_style)],
+            [Paragraph("Table 4(A)(5)", td_bold), Paragraph("Eligible Input Tax Credit (GSTR-2B Inward)", td_style), Paragraph(f"{curr_sym}{summary.get('purchases_taxable', 0):,.2f}", td_style), Paragraph(f"{curr_sym}{summary.get('safe_itc', 0):,.2f}", td_style), Paragraph("Verified in GSTR-2B", td_style)],
+            [Paragraph("Table 4(B)(2)", td_bold), Paragraph("Ineligible / Unfiled Vendor ITC (Withheld)", td_style), Paragraph("-", td_style), Paragraph(f"{curr_sym}{summary.get('at_risk_itc', 0):,.2f}", td_style), Paragraph("Withheld from Vendor Payments", td_style)],
+            [Paragraph("Net Due", td_bold), Paragraph("<b>Net Cash GST Payable to Govt</b>", td_bold), Paragraph("-", td_bold), Paragraph(f"<b>{curr_sym}{summary.get('net_tax_payable', 0):,.2f}</b>", td_bold), Paragraph("Payable by 20th", td_bold)],
         ]
         comp_table = Table(comp_data, colWidths=[24 * mm, 66 * mm, 32 * mm, 32 * mm, 32 * mm])
         comp_table.setStyle(TableStyle([
@@ -568,8 +622,8 @@ class CAAuditPackGenerator:
                     Paragraph(str(d.get('vendor_name', ''))[:22], td_style),
                     Paragraph(str(d.get('vendor_gstin', '')), td_style),
                     Paragraph(str(d.get('bill_number', '')), td_style),
-                    Paragraph(f"₹{d.get('at_risk_tax', 0):,.2f}", td_style),
-                    Paragraph(f"₹{d.get('withheld_amount', 0):,.2f}", td_style),
+                    Paragraph(f"{curr_sym}{d.get('at_risk_tax', 0):,.2f}", td_style),
+                    Paragraph(f"{curr_sym}{d.get('withheld_amount', 0):,.2f}", td_style),
                     Paragraph(f"{d.get('compliance_score', 50)}/100 ({d.get('risk_tier', 'Defaulter')})", td_style),
                 ])
             def_table = Table(def_data, colWidths=[48 * mm, 34 * mm, 26 * mm, 26 * mm, 26 * mm, 26 * mm])

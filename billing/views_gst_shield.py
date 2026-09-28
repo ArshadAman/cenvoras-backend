@@ -322,34 +322,47 @@ def download_ca_audit_pack(request):
     """
     Multi-format CA Audit Pack download:
     - export=xlsx (Multi-tab Excel workbook)
+    - export=pdf (Executive printable PDF report)
     - export=csv (Flat CSV registers)
     - export=json (Government Portal payload)
     """
-    from_date = request.query_params.get('from')
-    to_date = request.query_params.get('to')
-    export_format = (request.query_params.get('export') or 'xlsx').lower()
+    try:
+        from_date = request.query_params.get('from')
+        to_date = request.query_params.get('to')
+        export_format = (request.query_params.get('export') or 'xlsx').lower().strip()
 
-    audit_data = CAAuditPackGenerator.get_audit_data(request.user, from_date, to_date)
-    period_slug = f"{from_date or 'start'}_to_{to_date or 'today'}"
+        audit_data = CAAuditPackGenerator.get_audit_data(request.user, from_date, to_date)
+        period_slug = f"{from_date or 'start'}_to_{to_date or 'today'}".replace('/', '-')
 
-    if export_format == 'csv':
-        csv_content = CAAuditPackGenerator.generate_csv(audit_data, report_type=request.query_params.get('type', 'sales'))
-        response = HttpResponse(csv_content, content_type='text/csv')
-        response['Content-Disposition'] = f'attachment; filename="CA_Report_{period_slug}.csv"'
-        return response
+        if export_format == 'csv':
+            csv_content = CAAuditPackGenerator.generate_csv(audit_data, report_type=request.query_params.get('type', 'sales'))
+            response = HttpResponse(csv_content, content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename="CA_Report_{period_slug}.csv"'
+            return response
 
-    elif export_format == 'json':
-        json_content = CAAuditPackGenerator.generate_json(audit_data)
-        response = HttpResponse(json_content, content_type='application/json')
-        response['Content-Disposition'] = f'attachment; filename="GSTR_Portal_Payload_{period_slug}.json"'
-        return response
+        elif export_format == 'json':
+            json_content = CAAuditPackGenerator.generate_json(audit_data)
+            response = HttpResponse(json_content, content_type='application/json')
+            response['Content-Disposition'] = f'attachment; filename="GSTR_Portal_Payload_{period_slug}.json"'
+            return response
 
-    else:
-        # Default: .xlsx multi-tab Excel
-        excel_bytes = CAAuditPackGenerator.generate_excel(audit_data)
-        response = HttpResponse(
-            excel_bytes,
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        response['Content-Disposition'] = f'attachment; filename="CA_Audit_Pack_{period_slug}.xlsx"'
-        return response
+        elif export_format == 'pdf':
+            pdf_bytes = CAAuditPackGenerator.generate_pdf(audit_data)
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="CA_Executive_Report_{period_slug}.pdf"'
+            return response
+
+        else:
+            # Default: .xlsx multi-tab Excel
+            excel_bytes = CAAuditPackGenerator.generate_excel(audit_data)
+            response = HttpResponse(
+                excel_bytes,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="CA_Audit_Pack_{period_slug}.xlsx"'
+            return response
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({'error': f'Failed to generate CA pack: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

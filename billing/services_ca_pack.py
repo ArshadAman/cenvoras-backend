@@ -9,9 +9,32 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, HRFlowable
+)
+
 from .models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Vendor
 from .models_returns import CreditNote
 from .services_gstr2b import calculate_purchase_bill_tax
+
+
+def parse_date_safely(val, default_date):
+    """Safely parse date from multiple string formats (YYYY-MM-DD, DD/MM/YYYY, etc.)"""
+    if not val:
+        return default_date
+    if isinstance(val, (date, datetime)):
+        return val if isinstance(val, date) else val.date()
+    val_str = str(val).strip()
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d'):
+        try:
+            return datetime.strptime(val_str, fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return default_date
 
 
 class CAAuditPackGenerator:
@@ -20,7 +43,7 @@ class CAAuditPackGenerator:
     - .xlsx (Multi-tab formatted Excel workbook)
     - .csv (Flat CSV registers)
     - .json (Official portal JSON)
-    - .pdf (Executive Summary report)
+    - .pdf (Executive Summary report via ReportLab)
     """
 
     @classmethod
@@ -29,15 +52,8 @@ class CAAuditPackGenerator:
         tenant = getattr(user, 'active_tenant', user)
         today = date.today()
 
-        if not from_date:
-            from_date = date(today.year, today.month, 1)
-        elif isinstance(from_date, str):
-            from_date = datetime.strptime(from_date, '%Y-%m-%d').date()
-
-        if not to_date:
-            to_date = today
-        elif isinstance(to_date, str):
-            to_date = datetime.strptime(to_date, '%Y-%m-%d').date()
+        from_date = parse_date_safely(from_date, date(today.year, today.month, 1))
+        to_date = parse_date_safely(to_date, today)
 
         # 1. Sales Data
         sales_qs = SalesInvoice.objects.filter(
@@ -119,23 +135,34 @@ class CAAuditPackGenerator:
 
         for bill in purchase_qs:
             taxable, tax_amt, cgst, sgst, igst = calculate_purchase_bill_tax(bill)
+            taxable = taxable or Decimal('0.00')
+            tax_amt = tax_amt or Decimal('0.00')
+            cgst = cgst or Decimal('0.00')
+            sgst = sgst or Decimal('0.00')
+            igst = igst or Decimal('0.00')
+            bill_total = Decimal(bill.total_amount or 0)
+            withheld_amt = Decimal(bill.gst_withheld_amount or 0)
+
             purchases_taxable += taxable
             purchases_cgst += cgst
             purchases_sgst += sgst
             purchases_igst += igst
-            purchases_total += bill.total_amount
+            purchases_total += bill_total
 
-            is_matched = bill.gstr2b_status == 'matched'
+            is_matched = (bill.gstr2b_status == 'matched')
             if is_matched:
                 safe_itc += tax_amt
             else:
                 at_risk_itc += tax_amt
 
             if bill.is_gst_withheld:
-                withheld_pool += bill.gst_withheld_amount
+                withheld_pool += withheld_amt
+
+            v_risk_tier = (bill.vendor.risk_tier.title() if (bill.vendor and bill.vendor.risk_tier) else 'Defaulter')
+            v_compliance = (bill.vendor.compliance_score if (bill.vendor and bill.vendor.compliance_score is not None) else 50)
 
             p_entry = {
-                'bill_number': bill.bill_number,
+                'bill_number': bill.bill_number or '',
                 'bill_date': bill.bill_date.strftime('%d-%m-%Y') if bill.bill_date else '',
                 'vendor_name': bill.vendor_name or (bill.vendor.name if bill.vendor else 'Direct Vendor'),
                 'vendor_gstin': bill.vendor_gstin or (bill.vendor.gstin if bill.vendor else 'URP'),
@@ -144,10 +171,10 @@ class CAAuditPackGenerator:
                 'sgst': float(sgst),
                 'igst': float(igst),
                 'total_tax': float(tax_amt),
-                'total_amount': float(bill.total_amount),
-                'match_status': bill.get_gstr2b_status_display() if hasattr(bill, 'get_gstr2b_status_display') else bill.gstr2b_status,
+                'total_amount': float(bill_total),
+                'match_status': bill.get_gstr2b_status_display() if hasattr(bill, 'get_gstr2b_status_display') else (bill.gstr2b_status or 'Pending'),
                 'is_withheld': 'YES' if bill.is_gst_withheld else 'NO',
-                'withheld_amount': float(bill.gst_withheld_amount)
+                'withheld_amount': float(withheld_amt)
             }
             purchase_rows.append(p_entry)
 
@@ -158,9 +185,9 @@ class CAAuditPackGenerator:
                     'bill_number': p_entry['bill_number'],
                     'bill_date': p_entry['bill_date'],
                     'at_risk_tax': float(tax_amt),
-                    'withheld_amount': float(bill.gst_withheld_amount),
-                    'risk_tier': (bill.vendor.risk_tier.title() if bill.vendor else 'Defaulter'),
-                    'compliance_score': (bill.vendor.compliance_score if bill.vendor else 50)
+                    'withheld_amount': float(withheld_amt),
+                    'risk_tier': v_risk_tier,
+                    'compliance_score': v_compliance
                 })
 
         # Net Tax Calculation
@@ -381,3 +408,180 @@ class CAAuditPackGenerator:
             'gstr3b_summary': audit_data['summary']
         }
         return json.dumps(payload, indent=2)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 4. EXECUTIVE SUMMARY REPORT PDF (.pdf) via ReportLab
+    # ═══════════════════════════════════════════════════════════════
+    @classmethod
+    def generate_pdf(cls, audit_data):
+        """Builds an executive-ready printable CA Audit Report PDF"""
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=12 * mm,
+            rightMargin=12 * mm,
+            topMargin=12 * mm,
+            bottomMargin=12 * mm
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'DocTitle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=15,
+            leading=18,
+            textColor=colors.HexColor('#0F172A')
+        )
+        subtitle_style = ParagraphStyle(
+            'DocSubtitle',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=8,
+            leading=11,
+            textColor=colors.HexColor('#64748B')
+        )
+        h2_style = ParagraphStyle(
+            'SectionH2',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=10,
+            leading=13,
+            textColor=colors.HexColor('#1E293B'),
+            spaceBefore=6,
+            spaceAfter=3
+        )
+        th_style = ParagraphStyle(
+            'TH',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=8,
+            leading=10,
+            textColor=colors.white
+        )
+        td_style = ParagraphStyle(
+            'TD',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor('#1E293B')
+        )
+        td_bold = ParagraphStyle(
+            'TDBold',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor('#1E293B')
+        )
+
+        elements = []
+
+        # 1. Header Banner
+        header_data = [
+            [
+                Paragraph(f"<b>{audit_data.get('business_name', 'BUSINESS').upper()}</b><br/><font color='#64748B' size='8'>GSTIN: {audit_data.get('gstin', 'UNREGISTERED')}</font>", title_style),
+                Paragraph(f"<font color='#059669'><b>EXECUTIVE CA AUDIT REPORT</b></font><br/><font color='#64748B' size='8'>Period: {audit_data.get('period', '')}<br/>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M')}</font>", subtitle_style)
+            ]
+        ]
+        header_table = Table(header_data, colWidths=[110 * mm, 76 * mm])
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(header_table)
+        elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#059669'), spaceBefore=2, spaceAfter=6))
+
+        # 2. Key Metrics Strip
+        summary = audit_data.get('summary', {})
+        kpi_data = [
+            [
+                Paragraph(f"<b>TOTAL SALES (GSTR-1)</b><br/><font size='10'><b>₹{summary.get('sales_total', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Tax: ₹{summary.get('sales_tax', 0):,.2f}</font>", td_style),
+                Paragraph(f"<b>VERIFIED ITC (2B)</b><br/><font size='10' color='#059669'><b>₹{summary.get('safe_itc', 0):,.2f}</b></font><br/><font size='7' color='#059669'>100% Eligible</font>", td_style),
+                Paragraph(f"<b>AT-RISK / WITHHELD</b><br/><font size='10' color='#DC2626'><b>₹{summary.get('at_risk_itc', 0):,.2f}</b></font><br/><font size='7' color='#D97706'>Protected: ₹{summary.get('withheld_pool', 0):,.2f}</font>", td_style),
+                Paragraph(f"<b>NET TAX PAYABLE</b><br/><font size='10' color='#D97706'><b>₹{summary.get('net_tax_payable', 0):,.2f}</b></font><br/><font size='7' color='#64748B'>Credit: ₹{summary.get('net_itc_credit', 0):,.2f}</font>", td_style),
+            ]
+        ]
+        kpi_table = Table(kpi_data, colWidths=[46.5 * mm, 46.5 * mm, 46.5 * mm, 46.5 * mm])
+        kpi_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F8FAFC')),
+            ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        elements.append(kpi_table)
+        elements.append(Spacer(1, 3 * mm))
+
+        # 3. GSTR-3B Computation Schedule
+        elements.append(Paragraph("1. GSTR-3B Tax Computation & Filing Schedule", h2_style))
+        comp_data = [
+            [Paragraph("Section", th_style), Paragraph("Description", th_style), Paragraph("Taxable Base", th_style), Paragraph("Tax Amount", th_style), Paragraph("Audit Verification Status", th_style)],
+            [Paragraph("Table 3.1(a)", td_bold), Paragraph("Outward Taxable Supplies (Sales)", td_style), Paragraph(f"₹{summary.get('sales_taxable', 0):,.2f}", td_style), Paragraph(f"₹{summary.get('sales_tax', 0):,.2f}", td_style), Paragraph("Verified (Sales Register)", td_style)],
+            [Paragraph("Table 4(A)(5)", td_bold), Paragraph("Eligible Input Tax Credit (GSTR-2B Inward)", td_style), Paragraph(f"₹{summary.get('purchases_taxable', 0):,.2f}", td_style), Paragraph(f"₹{summary.get('safe_itc', 0):,.2f}", td_style), Paragraph("Verified in GSTR-2B", td_style)],
+            [Paragraph("Table 4(B)(2)", td_bold), Paragraph("Ineligible / Unfiled Vendor ITC (Withheld)", td_style), Paragraph("-", td_style), Paragraph(f"₹{summary.get('at_risk_itc', 0):,.2f}", td_style), Paragraph("Withheld from Vendor Payments", td_style)],
+            [Paragraph("Net Due", td_bold), Paragraph("<b>Net Cash GST Payable to Govt</b>", td_bold), Paragraph("-", td_bold), Paragraph(f"<b>₹{summary.get('net_tax_payable', 0):,.2f}</b>", td_bold), Paragraph("Payable by 20th", td_bold)],
+        ]
+        comp_table = Table(comp_data, colWidths=[24 * mm, 66 * mm, 32 * mm, 32 * mm, 32 * mm])
+        comp_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1E293B')),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+            ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#FEF3C7')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(comp_table)
+        elements.append(Spacer(1, 3 * mm))
+
+        # 4. Defaulters / Withholding Schedule (if any)
+        defaulters = audit_data.get('defaulter_rows', [])
+        if defaulters:
+            elements.append(Paragraph("2. Delinquent Vendors & Statutory Payment Withholding (Sec 16(2))", h2_style))
+            def_data = [
+                [Paragraph("Vendor Name", th_style), Paragraph("GSTIN", th_style), Paragraph("Bill No", th_style), Paragraph("At-Risk Tax", th_style), Paragraph("Withheld Amt", th_style), Paragraph("Compliance", th_style)]
+            ]
+            for d in defaulters[:10]:
+                def_data.append([
+                    Paragraph(str(d.get('vendor_name', ''))[:22], td_style),
+                    Paragraph(str(d.get('vendor_gstin', '')), td_style),
+                    Paragraph(str(d.get('bill_number', '')), td_style),
+                    Paragraph(f"₹{d.get('at_risk_tax', 0):,.2f}", td_style),
+                    Paragraph(f"₹{d.get('withheld_amount', 0):,.2f}", td_style),
+                    Paragraph(f"{d.get('compliance_score', 50)}/100 ({d.get('risk_tier', 'Defaulter')})", td_style),
+                ])
+            def_table = Table(def_data, colWidths=[48 * mm, 34 * mm, 26 * mm, 26 * mm, 26 * mm, 26 * mm])
+            def_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#991B1B')),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(def_table)
+            elements.append(Spacer(1, 3 * mm))
+
+        # 5. Auditor Verification & Attestation Box
+        sign_data = [
+            [
+                Paragraph("<b>ACCOUNTANT / AUDITOR VERIFICATION</b><br/><br/>I have verified the outward supplies and ITC claims against the GSTR-2B portal data for the period.<br/><br/>Signature: __________________________<br/>Membership No: ____________________<br/>Date: _______________________________", td_style),
+                Paragraph("<b>TAXPAYER DECLARATION</b><br/><br/>We confirm the books of accounts and payment withholding records reflect true financial transactions.<br/><br/>Authorized Signatory: ________________<br/>Designation: ________________________<br/>Company Seal: ______________________", td_style)
+            ]
+        ]
+        sign_table = Table(sign_data, colWidths=[93 * mm, 93 * mm])
+        sign_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F8FAFC')),
+            ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#94A3B8')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 5),
+        ]))
+        elements.append(Spacer(1, 2 * mm))
+        elements.append(sign_table)
+
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer.getvalue()
+

@@ -1,5 +1,5 @@
 from django.test import TestCase
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from billing.models import SalesInvoice, PurchaseBill, Payment, Customer
@@ -2278,8 +2278,8 @@ class GSTShieldReconciliationTests(APITestCase):
 
     def test_invoice_normalization(self):
         from billing.services_gstr2b import normalize_invoice_number
-        self.assertEqual(normalize_invoice_number("INV/2026/001"), "INV20261")
-        self.assertEqual(normalize_invoice_number("inv-2026-00042"), "INV202642")
+        self.assertEqual(normalize_invoice_number("INV/2026/001"), "INV2026001")
+        self.assertEqual(normalize_invoice_number("inv-2026-00042"), "INV202600042")
         self.assertEqual(normalize_invoice_number("000123"), "123")
 
     def test_gstr2b_reconciliation_and_withholding_lock(self):
@@ -2372,6 +2372,11 @@ class GSTShieldReconciliationTests(APITestCase):
         res_json = self.client.get("/api/billing/gst/ca-audit-pack/?export=json")
         self.assertEqual(res_json.status_code, 200)
         self.assertEqual(res_json["Content-Type"], "application/json")
+
+        res_pdf = self.client.get("/api/billing/gst/ca-audit-pack/?export=pdf")
+        self.assertEqual(res_pdf.status_code, 200)
+        self.assertEqual(res_pdf["Content-Type"], "application/pdf")
+        self.assertGreater(len(res_pdf.content), 500)
 
 
 

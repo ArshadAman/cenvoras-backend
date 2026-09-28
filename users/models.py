@@ -30,6 +30,7 @@ class User(AbstractUser):
     
     # Tax fields
     gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional, for India)")
+    pan_number = models.CharField(max_length=20, blank=True, null=True, help_text="PAN Number (optional, for India)")
     trn = models.CharField(max_length=15, blank=True, null=True, help_text="Tax Registration Number (15-digit for UAE)")
     is_vat_registered = models.BooleanField(default=False, help_text="Is the business VAT registered? (for UAE)")
     
@@ -37,6 +38,14 @@ class User(AbstractUser):
     gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")
     dl_number = models.CharField(max_length=50, blank=True, null=True, help_text="DL number (optional)")
     business_address = models.TextField(blank=True, null=True, help_text="Complete business address for invoices")
+
+    # Bank & Payment fields
+    bank_name = models.CharField(max_length=100, blank=True, null=True, help_text="Bank name for invoice payments")
+    bank_account_number = models.CharField(max_length=50, blank=True, null=True, help_text="Bank account number")
+    bank_ifsc_code = models.CharField(max_length=20, blank=True, null=True, help_text="Bank IFSC code")
+    bank_branch = models.CharField(max_length=100, blank=True, null=True, help_text="Bank branch name")
+    bank_upi_id = models.CharField(max_length=50, blank=True, null=True, help_text="UPI ID / VPA for payments")
+    bank_qr_code = models.TextField(blank=True, null=True, help_text="Base64 encoded or URL of payment QR code")
     
     state = models.CharField(
         max_length=50, 

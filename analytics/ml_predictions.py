@@ -171,10 +171,11 @@ class MLPredictions:
             if avg_daily_sales <= 0:
                 continue  # Skip products with no sales
             
-            # Calculate days until stockout
+            # Calculate days until stockout (safely clamped to avoid date OverflowError)
             current_stock = float(product.stock)
-            days_until_stockout = current_stock / avg_daily_sales
-            stockout_date = self.today + timedelta(days=int(days_until_stockout))
+            raw_days = current_stock / avg_daily_sales if avg_daily_sales > 0 else 365
+            days_until_stockout = max(0, min(int(raw_days), 365 * 3))
+            stockout_date = self.today + timedelta(days=days_until_stockout)
             
             # Calculate reorder date (stockout - lead time - safety buffer)
             lead_time_days = 3  # Assume 3 days for supplier delivery

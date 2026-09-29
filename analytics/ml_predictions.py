@@ -155,6 +155,12 @@ class MLPredictions:
         thirty_days_ago = self.today - timedelta(days=30)
         
         for product in products:
+            current_stock = float(product.stock)
+            
+            # Products with massive stock (e.g., subscriptions or virtual plans with 10,000+ units) never need restocking
+            if current_stock >= 10000:
+                continue
+
             # Calculate average daily sales velocity
             sales_data = SalesInvoiceItem.objects.filter(
                 sales_invoice__created_by=self.tenant,
@@ -168,11 +174,12 @@ class MLPredictions:
             total_sold = float(sales_data['total_qty'] or 0)
             avg_daily_sales = total_sold / 30
             
-            if avg_daily_sales <= 0:
-                continue  # Skip products with no sales
+            # If sales velocity is negligible and current stock is well above any low stock alert, skip
+            is_low_stock = product.low_stock_alert > 0 and current_stock <= product.low_stock_alert
+            if avg_daily_sales < 0.05 and not is_low_stock:
+                continue  # Skip items with zero or negligible sales that are not low on stock
             
             # Calculate days until stockout (safely clamped to avoid date OverflowError)
-            current_stock = float(product.stock)
             raw_days = current_stock / avg_daily_sales if avg_daily_sales > 0 else 365
             days_until_stockout = max(0, min(int(raw_days), 365 * 3))
             stockout_date = self.today + timedelta(days=days_until_stockout)
@@ -182,17 +189,23 @@ class MLPredictions:
             reorder_date = stockout_date - timedelta(days=lead_time_days + safety_buffer_days)
             
             # Calculate suggested reorder quantity (2 weeks of sales + safety stock)
-            suggested_qty = int(avg_daily_sales * 14 + (avg_daily_sales * safety_buffer_days))
+            calculated_qty = int(round(avg_daily_sales * 14 + (avg_daily_sales * safety_buffer_days)))
+            suggested_qty = max(1, calculated_qty) if is_low_stock or avg_daily_sales > 0 else 0
             
             # Urgency level
             days_to_reorder = (reorder_date - self.today).days
-            if days_to_reorder <= 0:
+            
+            # Only include products that actually need restocking within 30 days or are currently under low stock alert
+            if days_to_reorder > 30 and not is_low_stock:
+                continue
+
+            if days_to_reorder <= 0 or is_low_stock:
                 urgency = 'critical'
                 urgency_color = 'red'
-            elif days_to_reorder <= 3:
+            elif days_to_reorder <= 5:
                 urgency = 'high'
                 urgency_color = 'orange'
-            elif days_to_reorder <= 7:
+            elif days_to_reorder <= 15:
                 urgency = 'medium'
                 urgency_color = 'yellow'
             else:
@@ -207,7 +220,7 @@ class MLPredictions:
                 'days_until_stockout': round(days_until_stockout, 1),
                 'stockout_date': stockout_date.isoformat(),
                 'reorder_date': reorder_date.isoformat(),
-                'days_to_reorder': days_to_reorder,
+                'days_to_reorder': max(0, days_to_reorder),
                 'suggested_qty': suggested_qty,
                 'urgency': urgency,
                 'urgency_color': urgency_color,

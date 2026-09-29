@@ -10,6 +10,7 @@ services:
       - REDIS_URL=redis://redis:6379/1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CONN_MAX_AGE=0
     restart: unless-stopped
     mem_limit: 650m
     cpus: "0.60"
@@ -161,7 +162,7 @@ services:
       - -c
       - maintenance_work_mem=32MB
       - -c
-      - max_connections=30
+      - max_connections=100
       - -c
       - synchronous_commit=on
       - -c

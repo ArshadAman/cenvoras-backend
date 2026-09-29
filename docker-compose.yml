@@ -11,8 +11,8 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     restart: unless-stopped
-    mem_limit: 800m
-    cpus: "0.50"
+    mem_limit: 650m
+    cpus: "0.60"
     logging:
       driver: json-file
       options:
@@ -52,8 +52,8 @@ services:
     volumes:
       - redisdata:/data
     restart: unless-stopped
-    mem_limit: 220m
-    cpus: "0.20"
+    mem_limit: 90m
+    cpus: "0.10"
     logging:
       driver: json-file
       options:
@@ -67,7 +67,7 @@ services:
 
   celery_worker:
     build: .
-    command: celery -A cenvoras worker -l info --pool=prefork --concurrency=2 --prefetch-multiplier=1 --max-tasks-per-child=50
+    command: celery -A cenvoras worker -l info --pool=prefork --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20
     env_file:
       - .env
     environment:
@@ -76,8 +76,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CONN_MAX_AGE=0
     restart: unless-stopped
-    mem_limit: 450m
-    cpus: "0.60"
+    mem_limit: 220m
+    cpus: "0.35"
     logging:
       driver: json-file
       options:
@@ -105,8 +105,8 @@ services:
     volumes:
       - celerybeat_data:/app/celerybeat-data
     restart: unless-stopped
-    mem_limit: 180m
-    cpus: "0.20"
+    mem_limit: 100m
+    cpus: "0.10"
     logging:
       driver: json-file
       options:
@@ -147,21 +147,21 @@ services:
       - -c
       - wal_level=replica
       - -c
-      - max_wal_size=2GB
+      - max_wal_size=512MB
       - -c
-      - min_wal_size=512MB
+      - min_wal_size=128MB
       - -c
-      - checkpoint_timeout=10min
+      - checkpoint_timeout=15min
       - -c
-      - shared_buffers=256MB
+      - shared_buffers=128MB
       - -c
-      - effective_cache_size=768MB
+      - effective_cache_size=384MB
       - -c
-      - work_mem=4MB
+      - work_mem=2MB
       - -c
-      - maintenance_work_mem=64MB
+      - maintenance_work_mem=32MB
       - -c
-      - max_connections=80
+      - max_connections=30
       - -c
       - synchronous_commit=on
       - -c
@@ -175,8 +175,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data/
     restart: unless-stopped
-    mem_limit: 900m
-    cpus: "0.80"
+    mem_limit: 400m
+    cpus: "0.50"
     logging:
       driver: json-file
       options:
@@ -205,8 +205,8 @@ services:
       web:
         condition: service_healthy
     restart: unless-stopped
-    mem_limit: 150m
-    cpus: "0.20"
+    mem_limit: 80m
+    cpus: "0.15"
     logging:
       driver: json-file
       options:

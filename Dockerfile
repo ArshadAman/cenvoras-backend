@@ -41,5 +41,5 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app
 
 USER appuser
 
-# Use Gunicorn with Uvicorn workers (production-grade ASGI)
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "cenvoras.asgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# Use Gunicorn with Uvicorn workers (production-grade ASGI, memory-clamped)
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "cenvoras.asgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--max-requests", "500", "--max-requests-jitter", "50", "--timeout", "60"]

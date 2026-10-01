@@ -61,10 +61,11 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
         'secondary_unit': ['secondary_unit', 'secondaryunit'],
         'conversion_factor': ['conversion_factor', 'conversionfactor'],
         'warranty_months': ['warranty_months', 'warranty', 'warranty_month'],
+        'manufacturer': ['manufacturer', 'mfg', 'mfg_by', 'brand', 'company', 'make'],
     }
 
-    expected_fields = ['name', 'hsn_sac_code', 'description', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
-    optional_nullable_fields = {'hsn_sac_code', 'description', 'secondary_unit', 'sale_price'}
+    expected_fields = ['name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
+    optional_nullable_fields = {'hsn_sac_code', 'description', 'manufacturer', 'secondary_unit', 'sale_price'}
     integer_fields = {'stock', 'conversion_factor', 'low_stock_alert', 'warranty_months'}
     decimal_fields = {'tax', 'cost_price', 'sale_price'}
 

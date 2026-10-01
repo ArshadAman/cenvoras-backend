@@ -23,14 +23,28 @@ DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes', 'on')
 if not DEBUG and SECRET_KEY == 'django-insecure-local-dev-fallback':
     raise ValueError('DJANGO_SECRET_KEY must be set in production.')
 
+DEFAULT_ALLOWED_HOSTS = [
+    'api.cenvora.co.in',
+    '.cenvora.co.in',
+    'cenvora.co.in',
+    'api.cenvora.app',
+    'devapi.cenvora.app',
+    'dev.cenvora.app',
+    '.cenvora.app',
+    'localhost',
+    '127.0.0.1',
+    '10.0.2.2',
+]
+
 raw_allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
 if raw_allowed_hosts.strip():
-    ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+    env_hosts = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+    ALLOWED_HOSTS = list(dict.fromkeys(env_hosts + DEFAULT_ALLOWED_HOSTS))
 else:
-    ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
+    ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS
 
-if not DEBUG and not ALLOWED_HOSTS:
-    raise ValueError('DJANGO_ALLOWED_HOSTS must be set in production.')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 
 
 # Application definition

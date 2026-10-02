@@ -53,12 +53,10 @@ def send_async_email_notification(self, user_id, to_email, subject, body, relate
     )
 
     # Dynamic Sender Configuration
-    business_name = user.business_name if user and user.business_name else "Cenvora"
-    # Simple sanitization to create businessname@email.cenvora.app
-    sanitized_name = "".join(e for e in business_name if e.isalnum()).lower()
+    business_name = user.business_name if user and user.business_name else "Cenvora App"
     
     API_KEY = getattr(settings, 'TRANSACTIONAL_EMAIL_API_KEY', '')
-    FROM_EMAIL = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', f"{sanitized_name}@email.cenvora.app")
+    FROM_EMAIL = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
     FROM_NAME = business_name
     BASE_URL = (getattr(settings, 'TRANSACTIONAL_EMAIL_API_URL', '') or 'https://api.ahasend.com/v1').rstrip('/')
     SEND_ENDPOINT = getattr(settings, 'TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
@@ -83,7 +81,7 @@ def send_async_email_notification(self, user_id, to_email, subject, body, relate
                 "reply_to": {"email": FROM_EMAIL, "name": FROM_NAME},
             },
             "headers": {
-                "X-Mailer": "Cenvora-Cloud-Notifier",
+                "X-Mailer": "Cenvora-App-Notifier",
                 "X-Priority": "3 (Normal)",
             }
         }

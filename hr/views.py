@@ -1803,7 +1803,7 @@ An official notification has been broadcasted by the HR/Admin team:
 {announcement_message}
                     </div>
                     <div class="footer">
-                        &copy; 2026 Cenvora Cloud. All rights reserved. Sent securely on behalf of {tenant.business_name or 'HR Team'}.
+                        &copy; 2026 Cenvora App. All rights reserved. Sent securely on behalf of {tenant.business_name or 'HR Team'}.
                     </div>
                 </div>
             </body>

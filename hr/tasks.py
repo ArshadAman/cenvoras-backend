@@ -188,13 +188,13 @@ def send_employee_account_creation_email(employee_email, name, password, busines
                 </div>
             </div>
             <div style="margin: 30px 0;">
-                <a href="https://cenvora.app/login" class="btn-primary">Access Your Portal</a>
+                <a href="https://cenvora.co.in/login" class="btn-primary">Access Your Portal</a>
             </div>
             <div class="welcome-text" style="font-size: 14px; margin-top: 20px;">
                 <em>Note: For security reasons, please log in and update your password immediately upon access.</em>
             </div>
             <div class="footer">
-                &copy; 2026 Cenvora Cloud. All rights reserved. Sent securely on behalf of {business_name} HR Team.
+                &copy; 2026 Cenvora App. All rights reserved. Sent securely on behalf of {business_name} HR Team.
             </div>
         </div>
     </body>
@@ -290,7 +290,7 @@ Hello {name},
             </div>
             {cta_section}
             <div class="footer">
-                {footer_text or '&copy; 2026 Cenvora Cloud. All rights reserved.'}
+                {footer_text or '&copy; 2026 Cenvora App. All rights reserved.'}
             </div>
         </div>
     </body>

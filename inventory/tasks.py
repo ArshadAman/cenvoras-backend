@@ -66,9 +66,12 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
 
     expected_fields = ['name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
     optional_nullable_fields = {'hsn_sac_code', 'description', 'manufacturer', 'secondary_unit', 'sale_price'}
+    # unit is optional — missing/blank column defaults to 'pcs'; any provided string is accepted as-is
+    optional_with_default_fields = {'unit'}
     integer_fields = {'stock', 'conversion_factor', 'low_stock_alert', 'warranty_months'}
     decimal_fields = {'tax', 'cost_price', 'sale_price'}
 
+    # Common aliases normalized to their canonical form (stored as-is from CSV otherwise)
     unit_aliases = {
         'nos': 'pcs',
         'no': 'pcs',
@@ -78,11 +81,33 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
         'pcs': 'pcs',
         'unit': 'pcs',
         'units': 'pcs',
+        'number': 'pcs',
+        'each': 'pcs',
+        'ea': 'pcs',
         'ltr': 'l',
         'litre': 'l',
         'liter': 'l',
         'litres': 'l',
         'liters': 'l',
+        'kgs': 'kg',
+        'kilogram': 'kg',
+        'kilograms': 'kg',
+        'gm': 'g',
+        'gram': 'g',
+        'grams': 'g',
+        'milligram': 'mg',
+        'milligrams': 'mg',
+        'milliliter': 'ml',
+        'milliliters': 'ml',
+        'millilitre': 'ml',
+        'millilitres': 'ml',
+        'mtr': 'm',
+        'meter': 'm',
+        'meters': 'm',
+        'metre': 'm',
+        'metres': 'm',
+        'centimeter': 'cm',
+        'centimeters': 'cm',
     }
 
     created_count = 0
@@ -108,11 +133,15 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
                 if value in (None, ''):
                     if field in optional_nullable_fields:
                         payload[field] = None
+                    elif field in optional_with_default_fields:
+                        # unit: if missing/blank, use model default 'pcs'
+                        payload[field] = 'pcs'
                     continue
 
                 if field == 'unit' and isinstance(value, str):
+                    # Normalize common aliases; any unrecognized value is stored as-is (free-text)
                     normalized_unit = value.strip().lower()
-                    value = unit_aliases.get(normalized_unit, normalized_unit)
+                    value = unit_aliases.get(normalized_unit, value.strip())
 
                 if field in integer_fields:
                     numeric_value = _extract_numeric(value)

@@ -4,7 +4,7 @@ from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal
 from .serializers_sidecar import ProductMetaSerializer, BillOfMaterialSerializer, StockJournalSerializer
 
 class ProductSerializer(serializers.ModelSerializer):
-    unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, required=False)
+    unit = serializers.CharField(max_length=50, required=False, allow_blank=True, default='pcs')
     cost_price = serializers.DecimalField(source='price', max_digits=14, decimal_places=4, required=False, allow_null=True)
     sale_price = serializers.DecimalField(max_digits=14, decimal_places=4, required=False)
     current_stock = serializers.IntegerField(source='stock', read_only=True)

@@ -13,7 +13,7 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'current_stock', 'unit',
+            'id', 'item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'current_stock', 'unit',
             'secondary_unit', 'conversion_factor',
             'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'is_active', 'created_by',
             'meta'
@@ -31,6 +31,21 @@ class ProductSerializer(serializers.ModelSerializer):
         cost_price = attrs.get('price')
         if cost_price is None:
             attrs['price'] = self.instance.price if self.instance else 0
+
+        # Validate item_code uniqueness within tenant
+        item_code = attrs.get('item_code')
+        if item_code:
+            item_code = str(item_code).strip()
+            attrs['item_code'] = item_code
+            request = self.context.get('request')
+            user = request.user if request else None
+            tenant = getattr(user, 'active_tenant', user) if user else None
+            if tenant:
+                qs = Product.objects.filter(created_by=tenant, item_code__iexact=item_code)
+                if self.instance:
+                    qs = qs.exclude(id=self.instance.id)
+                if qs.exists():
+                    raise serializers.ValidationError({'item_code': f"Item code '{item_code}' is already used by another product."})
 
         return attrs
 

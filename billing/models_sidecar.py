@@ -139,6 +139,8 @@ class SalesOrder(models.Model):
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     notes = models.TextField(blank=True)
+    po_number = models.CharField(max_length=100, blank=True, null=True, help_text="Customer PO Number")
+    po_date = models.DateField(null=True, blank=True, help_text="Customer PO Date")
     source_quotation = models.ForeignKey(
         'billing.Quotation',
         on_delete=models.SET_NULL,

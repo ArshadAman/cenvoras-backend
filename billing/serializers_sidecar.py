@@ -162,7 +162,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'source_quotation', 'items', 'created_by', 'created_at']
+        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'po_number', 'po_date', 'source_quotation', 'items', 'created_by', 'created_at']
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
 
     def to_representation(self, instance):

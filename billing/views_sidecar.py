@@ -184,7 +184,8 @@ def convert_order_to_invoice(request, pk):
             place_of_supply=order.customer.state if order.customer and order.customer.state else None,
             invoice_number=next_invoice_number,
             invoice_date=date.today(),
-            po_number=order.order_number,
+            po_number=order.po_number or order.order_number,
+            po_date=order.po_date,
             source_sales_order=order,
             created_by=tenant,
             total_amount=Decimal('0.00'),
@@ -474,6 +475,8 @@ def convert_order_to_challan(request, pk):
             transport_mode=transport_mode,
             eway_bill_number=eway_bill_number,
             sales_order=order,
+            po_number=order.po_number or order.order_number,
+            po_date=order.po_date,
             total_amount=Decimal('0.00'),
             status='open',
             notes=custom_notes or f"Converted from Sales Order {order.order_number}",
@@ -1041,7 +1044,7 @@ def quotation_next_number(request):
     from billing.sequence_service import preview_next_number
 
     tenant = request.user.active_tenant
-    prefix = request.GET.get('prefix', 'QT-')
+    prefix = request.GET.get('prefix') or getattr(tenant, 'quotation_prefix', 'QT-') or 'QT-'
     is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
 
     next_number, suffix = preview_next_number(
@@ -1073,10 +1076,23 @@ def quotation_convert_to_sales_order(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    items_input = request.data.get('items', [])
     approved_item_ids = request.data.get('approved_item_ids', [])
+
+    items_override_map = {}
+    if isinstance(items_input, list) and items_input:
+        for it in items_input:
+            if isinstance(it, dict) and 'id' in it:
+                items_override_map[str(it['id'])] = it
+        target_ids = list(items_override_map.keys())
+    elif approved_item_ids:
+        target_ids = [str(i) for i in approved_item_ids]
+    else:
+        target_ids = []
+
     selected_qs = quotation.items.select_related('product').filter(approval_status='approved', converted_to_order=False)
-    if approved_item_ids:
-        selected_qs = selected_qs.filter(id__in=approved_item_ids)
+    if target_ids:
+        selected_qs = selected_qs.filter(id__in=target_ids)
 
     selected_items = list(selected_qs)
     if not selected_items:
@@ -1085,7 +1101,6 @@ def quotation_convert_to_sales_order(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    order_total = sum(Decimal(str(item.amount)) for item in selected_items)
     from billing.sequence_service import allocate_next_number
     order_number = allocate_next_number(tenant, document_type='sales_order')
 
@@ -1103,33 +1118,66 @@ def quotation_convert_to_sales_order(request, pk):
     if not order_customer:
         return Response({'message': 'Quotation must have a customer to convert.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    po_number = (request.data.get('po_number') or quotation.po_number or '').strip() or None
+    po_date = request.data.get('po_date') or quotation.po_date or None
+
     order = SalesOrder.objects.create(
         order_number=order_number,
         date=date.today(),
         customer=order_customer,
-        total_amount=order_total,
+        total_amount=Decimal('0.00'),
+        po_number=po_number,
+        po_date=po_date,
         notes=f'Converted from quotation {quotation.quotation_number}',
         source_quotation=quotation,
         created_by=tenant,
     )
 
+    from billing.sync_service import DocumentSyncService
+    total_amount = Decimal('0.00')
 
     for item in selected_items:
+        override = items_override_map.get(str(item.id), {})
+
+        raw_qty = override.get('quantity')
+        qty = Decimal(str(raw_qty)) if raw_qty is not None and str(raw_qty).strip() != '' else item.quantity
+        if qty <= 0:
+            qty = item.quantity
+
+        raw_disc = override.get('discount')
+        discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else (getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'))
+
+        raw_price = override.get('price')
+        price = Decimal(str(raw_price)) if raw_price is not None and str(raw_price).strip() != '' else item.price
+
+        tax = getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00')
+
+        line_amount = DocumentSyncService.calculate_line_amount(
+            quantity=qty,
+            price=price,
+            discount=discount,
+            tax=tax
+        )
+        total_amount += line_amount
+
         SalesOrderItem.objects.create(
             order=order,
             product=item.product,
-            quantity=item.quantity,
+            quantity=qty,
             free_quantity=getattr(item, 'free_quantity', 0) or 0,
-            price=item.price,
-            amount=item.amount,
+            price=price,
+            amount=line_amount,
             unit=item.unit or (item.product.unit if item.product else 'pcs') or 'pcs',
-            discount=getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'),
-            tax=getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00'),
+            discount=discount,
+            tax=tax,
             description=getattr(item, 'description', '') or '',
             source_item_id=str(item.id),
         )
         item.converted_to_order = True
         item.save(update_fields=['converted_to_order'])
+
+    order.total_amount = total_amount
+    order.save(update_fields=['total_amount'])
 
     remaining = quotation.items.filter(approval_status='approved', converted_to_order=False).exists()
     quotation.status = 'partially_converted' if remaining else 'converted'

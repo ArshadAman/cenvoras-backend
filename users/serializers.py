@@ -143,7 +143,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
+            'business_name', 'invoice_prefix', 'quotation_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
@@ -169,7 +169,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
+            'invoice_prefix', 'quotation_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
@@ -180,6 +180,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'phone': {'required': False},
             'business_name': {'required': False},
             'invoice_prefix': {'required': False},
+            'quotation_prefix': {'required': False},
             'email': {'required': False},
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
             'pan_number': {'required': False, 'allow_blank': True, 'allow_null': True},
@@ -199,6 +200,10 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     def validate_invoice_prefix(self, value):
         normalized = str(value or '').strip().upper()
         return normalized or 'INV-'
+
+    def validate_quotation_prefix(self, value):
+        normalized = str(value or '').strip().upper()
+        return normalized or 'QT-'
     
     def validate(self, attrs):
         user = self.instance

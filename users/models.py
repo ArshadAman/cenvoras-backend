@@ -23,6 +23,7 @@ class User(AbstractUser):
     phone = models.CharField(max_length=15, null=True, blank=True, help_text="Phone number for login recovery and communication")
     business_name = models.CharField(max_length=100, blank=True, null=True, help_text="Business/Shop name (appears on invoices)")
     invoice_prefix = models.CharField(max_length=20, default='INV-', help_text="Default invoice prefix for this user")
+    quotation_prefix = models.CharField(max_length=20, default='QT-', help_text="Default quotation prefix for this user")
     
     # Regional Settings
     country = models.CharField(max_length=2, choices=CountryChoices.choices, default=CountryChoices.IN, help_text="Active country for the shop")

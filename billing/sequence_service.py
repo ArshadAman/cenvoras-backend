@@ -29,7 +29,7 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
     if document_type == 'sales_invoice':
         base = (prefix or getattr(tenant, 'invoice_prefix', 'INV-') or 'INV-').strip().upper()
     elif document_type == 'quotation':
-        base = (prefix or 'QT-').strip().upper()
+        base = (prefix or getattr(tenant, 'quotation_prefix', 'QT-') or 'QT-').strip().upper()
     elif document_type == 'credit_note':
         base = (prefix or 'CN-').strip().upper()
     elif document_type == 'debit_note':

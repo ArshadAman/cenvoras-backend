@@ -397,10 +397,11 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     amount = serializers.DecimalField(required=False, allow_null=True, max_digits=12, decimal_places=2, default=0)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
+    source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch']
+        fields = ['id', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch', 'source_item_id']
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -1043,9 +1044,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
 
-        # Delete existing items and create new ones when provided
-        if items_data:
-            instance.items.all().delete()
+        # Sync items and propagate bidirectionally
+        if items_data is not None:
             bonus_items = []
             try:
                 from billing.scheme_service import evaluate_schemes_for_items
@@ -1059,33 +1059,26 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             except Exception as e:
                 print(f"DEBUG SalesInvoiceSerializer: Scheme evaluation exception on update: {e}")
 
-            for item_data in items_data:
-                item_data.pop('applied_scheme', None)
-                item_data.pop('product_detail', None)
-                item_data.pop('is_scheme_bonus', None)
-                item_data.pop('id', None)
-                item_data['amount'] = self._calculate_line_amount(item_data)
-                SalesInvoiceItem.objects.create(sales_invoice=instance, **item_data)
-
+            all_items_to_sync = list(items_data)
             for bonus_item in bonus_items:
-                bonus_product = bonus_item.get('product')
-                if bonus_product:
-                    SalesInvoiceItem.objects.create(
-                        sales_invoice=instance,
-                        product=bonus_product,
-                        quantity=bonus_item.get('quantity', 0),
-                        free_quantity=bonus_item.get('free_quantity', 0),
-                        unit=bonus_item.get('unit') or 'pcs',
-                        price=bonus_item.get('price', Decimal('0.00')),
-                        discount=bonus_item.get('discount', Decimal('0.00')),
-                        tax=bonus_item.get('tax', Decimal('0.00')),
-                        amount=Decimal('0.00'),
-                    )
+                if bonus_item.get('product'):
+                    all_items_to_sync.append({
+                        'product': bonus_item.get('product'),
+                        'quantity': bonus_item.get('quantity', 0),
+                        'free_quantity': bonus_item.get('free_quantity', 0),
+                        'unit': bonus_item.get('unit') or 'pcs',
+                        'price': Decimal('0.00'),
+                        'discount': Decimal('0.00'),
+                        'tax': Decimal('0.00'),
+                        'amount': Decimal('0.00'),
+                    })
+
+            from billing.sync_service import DocumentSyncService
+            DocumentSyncService.sync_document_items(instance, all_items_to_sync, user=instance.created_by)
 
             round_off = validated_data.get('round_off', instance.round_off)
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0')) + Decimal(str(round_off))
-            instance.total_amount = recalculated_total
             instance.round_off = round_off
+            DocumentSyncService.recalculate_document_total(instance)
 
         if instance.amount_paid > instance.total_amount:
             instance.amount_paid = instance.total_amount

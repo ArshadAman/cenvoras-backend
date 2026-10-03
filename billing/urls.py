@@ -68,6 +68,7 @@ urlpatterns = [
     path('sales-orders/<uuid:pk>/pdf/', views_sidecar.sales_order_pdf_download, name='sales_order_pdf_download'),
     path('sales-orders/<uuid:pk>/convert_to_invoice/', views_sidecar.convert_order_to_invoice, name='convert_order_to_invoice'),
     path('sales-orders/<uuid:pk>/convert_to_challan/', views_sidecar.convert_order_to_challan, name='convert_order_to_challan'),
+    path('sales-orders/<uuid:pk>/convert_to_purchase_order/', views_sidecar.convert_order_to_purchase_order, name='convert_order_to_purchase_order'),
 
     
     path('delivery-challans/', views_sidecar.delivery_challan_list_create, name='delivery_challan_list_create'),

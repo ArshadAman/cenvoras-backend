@@ -33,6 +33,7 @@ class Product(models.Model):
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     manufacturer = models.CharField(max_length=255, blank=True, null=True, help_text="Product manufacturer or brand")
+    internal_reference = models.CharField(max_length=100, blank=True, null=True, db_index=True, help_text="Internal alphanumeric reference code")
     unit = models.CharField(max_length=50, default="pcs")  # free-text; UNIT_CHOICES kept for UI hints only
     
     # Unit Conversion (Phase 4)

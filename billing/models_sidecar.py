@@ -175,6 +175,7 @@ class SalesOrderItem(models.Model):
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
+    source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source QuotationItem")
 
     @property
     def pending_quantity(self):
@@ -256,6 +257,7 @@ class DeliveryChallanItem(models.Model):
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
+    source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source SalesOrderItem")
 
     def __str__(self):
         prod_name = self.product.name if self.product else (self.description or 'Note')
@@ -334,6 +336,7 @@ class QuotationItem(models.Model):
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
+    source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of upstream item if applicable")
 
     approval_status = models.CharField(
         max_length=20,

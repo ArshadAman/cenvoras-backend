@@ -170,6 +170,14 @@ class PurchaseOrder(models.Model):
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
     notes = models.TextField(blank=True, null=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    source_sales_order = models.ForeignKey(
+        'billing.SalesOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='purchase_orders',
+        help_text="Original sales order this purchase order was generated from"
+    )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -189,6 +197,7 @@ class PurchaseOrderItem(models.Model):
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
+    source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source item in SalesOrder")
 
     def __str__(self):
         return f"{self.product.name} x{self.quantity}"
@@ -239,6 +248,14 @@ class SalesInvoice(models.Model):
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where items are sold")
+    source_sales_order = models.ForeignKey(
+        'billing.SalesOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_invoices',
+        help_text="Original sales order this invoice was converted from"
+    )
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
@@ -307,6 +324,7 @@ class SalesInvoiceItem(models.Model):
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
+    source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source item in DeliveryChallan or SalesOrder")
     
     # Scheme Support (Phase 6)
     free_quantity = models.PositiveIntegerField(default=0, help_text="Qty given free under scheme (Buy X Get Y)")

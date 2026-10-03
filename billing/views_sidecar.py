@@ -47,7 +47,7 @@ def sales_order_list_create(request):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-@api_view(['GET', 'PUT', 'DELETE'])
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def sales_order_detail(request, pk):
     tenant = request.user.active_tenant
@@ -60,11 +60,14 @@ def sales_order_detail(request, pk):
         serializer = SalesOrderSerializer(order)
         return Response(serializer.data)
         
-    elif request.method == 'PUT':
-        serializer = SalesOrderSerializer(order, data=request.data, context={'request': request})
+    elif request.method in ['PUT', 'PATCH']:
+        serializer = SalesOrderSerializer(order, data=request.data, partial=(request.method == 'PATCH'), context={'request': request})
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
+            if hasattr(order, '_prefetched_objects_cache'):
+                order._prefetched_objects_cache.clear()
+            order.refresh_from_db()
+            return Response(SalesOrderSerializer(order).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
     elif request.method == 'DELETE':
@@ -182,6 +185,7 @@ def convert_order_to_invoice(request, pk):
             invoice_number=next_invoice_number,
             invoice_date=date.today(),
             po_number=order.order_number,
+            source_sales_order=order,
             created_by=tenant,
             total_amount=Decimal('0.00'),
             status='final',
@@ -248,6 +252,7 @@ def convert_order_to_invoice(request, pk):
                 unit=r_item['unit'],
                 tax=r_item['tax'],
                 discount=r_item['discount'],
+                source_item_id=str(r_item['order_item'].id) if r_item.get('order_item') else None,
             )
             if is_post_delivery_invoicing:
                 inv_item._skip_stock_deduction = True
@@ -368,7 +373,7 @@ def delivery_challan_list_create(request):
             return Response(DeliveryChallanSerializer(challan).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-@api_view(['GET', 'PUT', 'DELETE'])
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def delivery_challan_detail(request, pk):
     tenant = request.user.active_tenant
@@ -380,11 +385,14 @@ def delivery_challan_detail(request, pk):
     if request.method == 'GET':
         serializer = DeliveryChallanSerializer(challan)
         return Response(serializer.data)
-    elif request.method == 'PUT':
-        serializer = DeliveryChallanSerializer(challan, data=request.data, context={'request': request})
+    elif request.method in ['PUT', 'PATCH']:
+        serializer = DeliveryChallanSerializer(challan, data=request.data, partial=(request.method == 'PATCH'), context={'request': request})
         if serializer.is_valid():
-            updated_challan = serializer.save()
-            return Response(DeliveryChallanSerializer(updated_challan).data)
+            serializer.save()
+            if hasattr(challan, '_prefetched_objects_cache'):
+                challan._prefetched_objects_cache.clear()
+            challan.refresh_from_db()
+            return Response(DeliveryChallanSerializer(challan).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     elif request.method == 'DELETE':
         if challan.is_billed:
@@ -540,6 +548,7 @@ def convert_order_to_challan(request, pk):
                 unit=item_unit,
                 tax=item_tax,
                 discount=item_discount,
+                source_item_id=str(order_item.id),
             )
 
             # Deduct stock for dispatched item
@@ -614,6 +623,7 @@ def convert_challan_to_invoice(request, pk):
                 po_number=challan.po_number or (challan.sales_order.order_number if challan.sales_order else ''),
                 po_date=challan.po_date,
                 warehouse=challan.warehouse,
+                source_sales_order=challan.sales_order,
                 round_off=challan.round_off or Decimal('0.00'),
                 total_amount=Decimal('0.00'),  # Set to 0.00 initially so item signals add up cleanly
                 status='final',
@@ -649,6 +659,7 @@ def convert_challan_to_invoice(request, pk):
                     discount=discount,
                     tax=tax,
                     description=getattr(c_item, 'description', '') or '',
+                    source_item_id=str(c_item.id),
                 )
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
@@ -821,6 +832,7 @@ def bulk_convert_challans_to_invoice(request):
                         discount=discount,
                         tax=tax,
                         description=getattr(c_item, 'description', '') or '',
+                        source_item_id=str(c_item.id),
                     )
                     inv_item._skip_stock_deduction = True
                     inv_item.save()
@@ -1013,7 +1025,10 @@ def quotation_detail(request, pk):
         )
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
+            if hasattr(quotation, '_prefetched_objects_cache'):
+                quotation._prefetched_objects_cache.clear()
+            quotation.refresh_from_db()
+            return Response(QuotationSerializer(quotation).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     quotation.delete()
@@ -1111,6 +1126,7 @@ def quotation_convert_to_sales_order(request, pk):
             discount=getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'),
             tax=getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00'),
             description=getattr(item, 'description', '') or '',
+            source_item_id=str(item.id),
         )
         item.converted_to_order = True
         item.save(update_fields=['converted_to_order'])
@@ -1252,5 +1268,69 @@ def sales_order_pdf_download(request, pk):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     response['Content-Length'] = len(pdf_bytes)
     return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def convert_order_to_purchase_order(request, pk):
+    """
+    Converts a SalesOrder to a vendor PurchaseOrder (drop-shipping / procurement).
+    Links items via source_item_id.
+    """
+    tenant = request.user.active_tenant
+    try:
+        order = SalesOrder.objects.prefetch_related('items__product').get(pk=pk, created_by=tenant)
+    except SalesOrder.DoesNotExist:
+        return Response({"message": "Sales order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    vendor_id = request.data.get('vendor_id')
+    vendor = None
+    if vendor_id:
+        from billing.models import Vendor
+        vendor = Vendor.objects.filter(pk=vendor_id, created_by=tenant).first()
+
+    from billing.sequence_service import allocate_next_number
+    next_po_number = allocate_next_number(tenant, document_type='purchase_order', prefix='PO-')
+
+    from billing.models import PurchaseOrder, PurchaseOrderItem
+    po = PurchaseOrder.objects.create(
+        po_number=next_po_number,
+        vendor=vendor,
+        expected_date=request.data.get('expected_date') or None,
+        notes=request.data.get('notes') or f"Generated from Sales Order {order.order_number}",
+        source_sales_order=order,
+        total_amount=Decimal('0.00'),
+        created_by=tenant,
+    )
+
+    total = Decimal('0.00')
+    for so_item in order.items.all():
+        if not so_item.product:
+            continue
+        cost_price = getattr(so_item.product, 'price', None) or getattr(so_item.product, 'cost_price', None) or so_item.price or Decimal('0.00')
+        line_total = Decimal(str(so_item.quantity)) * Decimal(str(cost_price))
+        total += line_total
+        PurchaseOrderItem.objects.create(
+            purchase_order=po,
+            product=so_item.product,
+            quantity=so_item.quantity,
+            unit=so_item.unit or so_item.product.unit or 'pcs',
+            price=cost_price,
+            discount=Decimal('0.00'),
+            tax=so_item.tax or Decimal('0.00'),
+            amount=line_total,
+            description=so_item.description or '',
+            source_item_id=str(so_item.id),
+        )
+
+    po.total_amount = total
+    po.save(update_fields=['total_amount'])
+
+    return Response({
+        "message": "Purchase order created from sales order successfully.",
+        "purchase_order_id": str(po.id),
+        "po_number": po.po_number,
+    }, status=status.HTTP_201_CREATED)
+
 
 

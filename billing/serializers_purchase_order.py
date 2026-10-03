@@ -14,10 +14,11 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     product_display_name = serializers.CharField(source='product.name', read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
+    source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = PurchaseOrderItem
-        fields = ['id', 'product', 'product_name', 'product_display_name', 'description', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
+        fields = ['id', 'product', 'product_name', 'product_display_name', 'description', 'batch', 'quantity', 'unit', 'price', 'discount', 'tax', 'amount', 'source_item_id']
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -114,8 +115,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             setattr(instance, k, v)
         instance.save()
         if items is not None:
-            instance.items.all().delete()
             for item in items:
                 item.pop('product_name', None)
-                PurchaseOrderItem.objects.create(purchase_order=instance, **item)
+            from billing.sync_service import DocumentSyncService
+            DocumentSyncService.sync_document_items(instance, items, user=instance.created_by)
         return instance

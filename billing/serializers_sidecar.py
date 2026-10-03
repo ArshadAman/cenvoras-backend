@@ -63,13 +63,14 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     pending_quantity = serializers.IntegerField(read_only=True)
     fulfillment_status = serializers.SerializerMethodField(read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
+    source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     
     class Meta:
         model = SalesOrderItem
         fields = [
             'id', 'row_type', 'product', 'product_name', 'description', 'quantity', 'dispatched_quantity', 
             'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit', 
-            'price', 'discount', 'tax', 'amount'
+            'price', 'discount', 'tax', 'amount', 'source_item_id'
         ]
 
     def to_representation(self, instance):
@@ -230,11 +231,10 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
 
-        # Replace items if provided
+        # Sync items and propagate bidirectionally
         if items_data is not None:
-            instance.items.all().delete()
-            for item_data in items_data:
-                SalesOrderItem.objects.create(order=instance, **item_data)
+            from billing.sync_service import DocumentSyncService
+            DocumentSyncService.sync_document_items(instance, items_data, user=instance.created_by)
 
         return instance
 
@@ -245,6 +245,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
     product_detail = serializers.SerializerMethodField(read_only=True)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
+    source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = DeliveryChallanItem
@@ -264,6 +265,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             'amount',
             'hsn_sac_code',
             'batch',
+            'source_item_id',
         ]
 
     def to_representation(self, instance):
@@ -524,9 +526,6 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         return challan
 
     def update(self, instance, validated_data):
-        if instance.is_billed:
-            raise serializers.ValidationError({"detail": "Cannot modify an invoiced delivery challan."})
-
         items_data = validated_data.pop('items', None)
 
         old_status = instance.status
@@ -539,44 +538,12 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-
+        instance.save()
 
         if items_data is not None:
-            # Restore stock for existing items
-            old_warehouse = instance.warehouse
-            for old_item in instance.items.all():
-                old_qty = (old_item.quantity or 0) + (old_item.free_quantity or 0)
-                if old_item.product_id and old_qty > 0:
-                    Product.objects.filter(pk=old_item.product_id).update(stock=F('stock') + old_qty)
-                    if old_item.batch and old_warehouse:
-                        StockPoint.objects.filter(batch=old_item.batch, warehouse=old_warehouse).update(
-                            quantity=F('quantity') + old_qty
-                        )
+            from billing.sync_service import DocumentSyncService
+            DocumentSyncService.sync_document_items(instance, items_data, user=instance.created_by)
 
-            instance.items.all().delete()
-
-            total = Decimal('0.00')
-            for item_data in items_data:
-                item_data['amount'] = self._calculate_line_amount(item_data)
-                total += item_data['amount']
-                DeliveryChallanItem.objects.create(challan=instance, **item_data)
-
-            round_off = instance.round_off or Decimal('0.00')
-            instance.total_amount = total + round_off
-
-            # Deduct stock for new items
-            new_warehouse = instance.warehouse
-            for new_item in instance.items.all():
-                eff_qty = (new_item.quantity or 0) + (new_item.free_quantity or 0)
-                if new_item.product_id and eff_qty > 0:
-                    Product.objects.filter(pk=new_item.product_id).update(stock=F('stock') - eff_qty)
-                    if new_item.batch and new_warehouse:
-                        sp, _ = StockPoint.objects.get_or_create(
-                            batch=new_item.batch, warehouse=new_warehouse, defaults={'quantity': 0}
-                        )
-                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
-
-        instance.save()
         return instance
 
 class PurchaseIndentItemSerializer(serializers.ModelSerializer):
@@ -612,6 +579,7 @@ class QuotationItemSerializer(serializers.ModelSerializer):
     row_type = serializers.CharField(required=False, default='item')
     product_name = serializers.CharField(source='product.name', read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
+    source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = QuotationItem
@@ -632,6 +600,7 @@ class QuotationItemSerializer(serializers.ModelSerializer):
             'batch',
             'approval_status',
             'converted_to_order',
+            'source_item_id',
         ]
         read_only_fields = ['converted_to_order']
 
@@ -949,12 +918,7 @@ class QuotationSerializer(serializers.ModelSerializer):
 
 
         if items_data is not None:
-            instance.items.all().delete()
-            for item_data in items_data:
-                QuotationItem.objects.create(quotation=instance, **item_data)
-
-            total = sum(Decimal(str(item.amount)) for item in instance.items.all())
-            instance.total_amount = total + Decimal(str(instance.round_off or 0))
-            instance.save(update_fields=['total_amount'])
+            from billing.sync_service import DocumentSyncService
+            DocumentSyncService.sync_document_items(instance, items_data, user=instance.created_by)
 
         return instance

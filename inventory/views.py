@@ -64,7 +64,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['name', 'description', 'hsn_sac_code']
+    search_fields = ['name', 'item_code', 'description', 'hsn_sac_code']
     idempotency_ttl = 600
     idempotency_lock_ttl = 300
 
@@ -325,6 +325,8 @@ def download_product_csv_template(request):
     writer.writerow(headers)
     # Add one sample row for quick guidance in spreadsheet tools.
     sample = ['' for _ in headers]
+    if 'item_code' in headers:
+        sample[headers.index('item_code')] = 'PRD-001'
     if 'unit' in headers:
         sample[headers.index('unit')] = 'pcs'
     if 'conversion_factor' in headers:

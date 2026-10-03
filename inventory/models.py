@@ -22,6 +22,13 @@ class Product(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    item_code = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="User-defined unique product code / SKU per business"
+    )
     name = models.CharField(max_length=255)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
@@ -40,6 +47,15 @@ class Product(models.Model):
     low_stock_alert = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True, db_index=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by', 'item_code'],
+                name='unique_tenant_product_item_code',
+                condition=models.Q(item_code__isnull=False) & ~models.Q(item_code='')
+            )
+        ]
 
     def __str__(self):
         return self.name

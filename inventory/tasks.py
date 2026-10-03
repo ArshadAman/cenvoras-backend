@@ -50,6 +50,7 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
         return (key or '').strip().lower().replace(' ', '_').replace('-', '_')
 
     header_aliases = {
+        'item_code': ['item_code', 'itemcode', 'item_id', 'itemid', 'sku', 'product_code', 'product_id', 'code'],
         'name': ['name', 'product_name', 'item_name', 'product', 'item'],
         'unit': ['unit', 'uom', 'unit_of_measure', 'measurement_unit'],
         'cost_price': ['cost_price', 'price', 'purchase_price', 'cost'],
@@ -64,8 +65,8 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
         'manufacturer': ['manufacturer', 'mfg', 'mfg_by', 'brand', 'company', 'make'],
     }
 
-    expected_fields = ['name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
-    optional_nullable_fields = {'hsn_sac_code', 'description', 'manufacturer', 'secondary_unit', 'sale_price'}
+    expected_fields = ['item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
+    optional_nullable_fields = {'item_code', 'hsn_sac_code', 'description', 'manufacturer', 'secondary_unit', 'sale_price'}
     # unit is optional — missing/blank column defaults to 'pcs'; any provided string is accepted as-is
     optional_with_default_fields = {'unit'}
     integer_fields = {'stock', 'conversion_factor', 'low_stock_alert', 'warranty_months'}
@@ -111,6 +112,8 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
     }
 
     created_count = 0
+    updated_count = 0
+    skipped_count = 0
     errors = []
 
     with transaction.atomic():
@@ -166,19 +169,113 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
             if payload is None:
                 continue
 
-            serializer = ProductSerializer(data=payload, context={'request': fake_request})
-            if serializer.is_valid():
-                serializer.save(created_by=user.active_tenant)
-                created_count += 1
+            # Check if this product already exists by user-defined item_code
+            incoming_item_code = payload.get('item_code')
+            existing_product = None
+            if incoming_item_code:
+                existing_product = Product.objects.filter(
+                    created_by=user.active_tenant,
+                    item_code__iexact=str(incoming_item_code).strip()
+                ).first()
+
+            if existing_product:
+                diff_fields = {}
+
+                # Name
+                if 'name' in payload and payload['name'] is not None:
+                    clean_name = str(payload['name']).strip()
+                    if clean_name != existing_product.name:
+                        diff_fields['name'] = clean_name
+
+                # Unit
+                if 'unit' in payload and payload['unit'] is not None:
+                    if payload['unit'] != existing_product.unit:
+                        diff_fields['unit'] = payload['unit']
+
+                # Cost Price (stored as price on Product model)
+                if 'cost_price' in payload and payload['cost_price'] is not None:
+                    existing_cost = float(existing_product.price or 0)
+                    if round(float(payload['cost_price']), 4) != round(existing_cost, 4):
+                        diff_fields['price'] = payload['cost_price']
+
+                # Sale Price
+                if 'sale_price' in payload and payload['sale_price'] is not None:
+                    existing_sale = float(existing_product.sale_price or 0) if existing_product.sale_price is not None else None
+                    if existing_sale is None or round(float(payload['sale_price']), 4) != round(existing_sale, 4):
+                        diff_fields['sale_price'] = payload['sale_price']
+
+                # Stock
+                if 'stock' in payload and payload['stock'] is not None:
+                    if int(payload['stock']) != int(existing_product.stock or 0):
+                        diff_fields['stock'] = payload['stock']
+
+                # Tax
+                if 'tax' in payload and payload['tax'] is not None:
+                    existing_tax = float(existing_product.tax or 0)
+                    if round(float(payload['tax']), 2) != round(existing_tax, 2):
+                        diff_fields['tax'] = payload['tax']
+
+                # HSN / SAC Code
+                if 'hsn_sac_code' in payload and payload['hsn_sac_code'] != (existing_product.hsn_sac_code or None):
+                    diff_fields['hsn_sac_code'] = payload['hsn_sac_code']
+
+                # Manufacturer
+                if 'manufacturer' in payload and payload['manufacturer'] != (existing_product.manufacturer or None):
+                    diff_fields['manufacturer'] = payload['manufacturer']
+
+                # Description
+                if 'description' in payload and payload['description'] != (existing_product.description or None):
+                    diff_fields['description'] = payload['description']
+
+                # Secondary Unit
+                if 'secondary_unit' in payload and payload['secondary_unit'] != (existing_product.secondary_unit or None):
+                    diff_fields['secondary_unit'] = payload['secondary_unit']
+
+                # Conversion Factor
+                if 'conversion_factor' in payload and payload['conversion_factor'] is not None:
+                    if int(payload['conversion_factor']) != int(existing_product.conversion_factor or 1):
+                        diff_fields['conversion_factor'] = payload['conversion_factor']
+
+                # Low Stock Alert
+                if 'low_stock_alert' in payload and payload['low_stock_alert'] is not None:
+                    if int(payload['low_stock_alert']) != int(existing_product.low_stock_alert or 0):
+                        diff_fields['low_stock_alert'] = payload['low_stock_alert']
+
+                # Warranty Months
+                if 'warranty_months' in payload and payload['warranty_months'] is not None:
+                    if int(payload['warranty_months']) != int(existing_product.warranty_months or 0):
+                        diff_fields['warranty_months'] = payload['warranty_months']
+
+                if not diff_fields:
+                    # All fields identical: skip reimporting, unchanged
+                    skipped_count += 1
+                else:
+                    for attr, val in diff_fields.items():
+                        setattr(existing_product, attr, val)
+                    existing_product.save(update_fields=list(diff_fields.keys()))
+                    updated_count += 1
             else:
-                errors.append({'row': index, 'errors': serializer.errors})
+                serializer = ProductSerializer(data=payload, context={'request': fake_request})
+                if serializer.is_valid():
+                    serializer.save(created_by=user.active_tenant)
+                    created_count += 1
+                else:
+                    errors.append({'row': index, 'errors': serializer.errors})
 
     if errors:
         logger.warning(
-            'Bulk upload completed with validation errors. created=%s failed=%s sample_errors=%s',
+            'Bulk upload completed with validation errors. created=%s updated=%s skipped=%s failed=%s sample_errors=%s',
             created_count,
+            updated_count,
+            skipped_count,
             len(errors),
             errors[:5],
         )
 
-    return {"created_count": created_count, "failed_count": len(errors), "errors": errors}
+    return {
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+        "failed_count": len(errors),
+        "errors": errors
+    }

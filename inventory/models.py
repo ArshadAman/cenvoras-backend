@@ -26,7 +26,7 @@ class Product(models.Model):
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     manufacturer = models.CharField(max_length=255, blank=True, null=True, help_text="Product manufacturer or brand")
-    unit = models.CharField(max_length=20, choices=UNIT_CHOICES, default="pcs")
+    unit = models.CharField(max_length=50, default="pcs")  # free-text; UNIT_CHOICES kept for UI hints only
     
     # Unit Conversion (Phase 4)
     secondary_unit = models.CharField(max_length=20, blank=True, null=True, help_text="e.g., Box")

@@ -63,10 +63,11 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
         'conversion_factor': ['conversion_factor', 'conversionfactor'],
         'warranty_months': ['warranty_months', 'warranty', 'warranty_month'],
         'manufacturer': ['manufacturer', 'mfg', 'mfg_by', 'brand', 'company', 'make'],
+        'internal_reference': ['internal_reference', 'internal_ref', 'internalref', 'reference', 'ref_no', 'ref'],
     }
 
-    expected_fields = ['item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
-    optional_nullable_fields = {'item_code', 'hsn_sac_code', 'description', 'manufacturer', 'secondary_unit', 'sale_price'}
+    expected_fields = ['item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'internal_reference', 'tax', 'stock', 'unit', 'secondary_unit', 'conversion_factor', 'cost_price', 'sale_price', 'low_stock_alert', 'warranty_months']
+    optional_nullable_fields = {'item_code', 'hsn_sac_code', 'description', 'manufacturer', 'internal_reference', 'secondary_unit', 'sale_price'}
     # unit is optional — missing/blank column defaults to 'pcs'; any provided string is accepted as-is
     optional_with_default_fields = {'unit'}
     integer_fields = {'stock', 'conversion_factor', 'low_stock_alert', 'warranty_months'}
@@ -222,6 +223,10 @@ def process_bulk_upload_csv(csv_content: str, user_id: str):
                 # Manufacturer
                 if 'manufacturer' in payload and payload['manufacturer'] != (existing_product.manufacturer or None):
                     diff_fields['manufacturer'] = payload['manufacturer']
+
+                # Internal Reference
+                if 'internal_reference' in payload and payload['internal_reference'] != (existing_product.internal_reference or None):
+                    diff_fields['internal_reference'] = payload['internal_reference']
 
                 # Description
                 if 'description' in payload and payload['description'] != (existing_product.description or None):

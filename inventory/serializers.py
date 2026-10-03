@@ -13,7 +13,7 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'tax', 'stock', 'current_stock', 'unit',
+            'id', 'item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'internal_reference', 'tax', 'stock', 'current_stock', 'unit',
             'secondary_unit', 'conversion_factor',
             'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'is_active', 'created_by',
             'meta'
@@ -46,6 +46,10 @@ class ProductSerializer(serializers.ModelSerializer):
                     qs = qs.exclude(id=self.instance.id)
                 if qs.exists():
                     raise serializers.ValidationError({'item_code': f"Item code '{item_code}' is already used by another product."})
+
+        internal_ref = attrs.get('internal_reference')
+        if internal_ref:
+            attrs['internal_reference'] = str(internal_ref).strip()
 
         return attrs
 

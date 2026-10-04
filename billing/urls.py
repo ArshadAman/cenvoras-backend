@@ -74,6 +74,7 @@ urlpatterns = [
     path('delivery-challans/', views_sidecar.delivery_challan_list_create, name='delivery_challan_list_create'),
     path('delivery-challans/next-number/', views_sidecar.delivery_challan_next_number, name='delivery_challan_next_number'),
     path('delivery-challans/bulk-convert-to-invoice/', views_sidecar.bulk_convert_challans_to_invoice, name='bulk_convert_challans_to_invoice'),
+    path('delivery-challans/bulk-delete/', views_sidecar.bulk_delete_delivery_challans, name='bulk_delete_delivery_challans'),
     path('delivery-challans/<uuid:pk>/', views_sidecar.delivery_challan_detail, name='delivery_challan_detail'),
     path('delivery-challans/<uuid:pk>/convert_to_invoice/', views_sidecar.convert_challan_to_invoice, name='convert_challan_to_invoice'),
     path('delivery-challans/<uuid:pk>/pdf/', views_sidecar.delivery_challan_pdf_download, name='delivery_challan_pdf_download'),

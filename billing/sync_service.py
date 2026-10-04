@@ -354,36 +354,44 @@ class DocumentSyncService:
                         matching_target_item.save(update_fields=['source_item_id'])
 
             from billing.models import PurchaseOrder
+            from billing.models_sidecar import SalesOrder
             is_po_sync = isinstance(target_doc, PurchaseOrder) or isinstance(source_doc, PurchaseOrder)
+            is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
 
             if matching_target_item:
                 old_t_qty = getattr(matching_target_item, 'quantity', 0)
-                matching_target_item.quantity = item.quantity
-                if hasattr(matching_target_item, 'free_quantity') and hasattr(item, 'free_quantity'):
-                    matching_target_item.free_quantity = item.free_quantity
-                if not is_po_sync:
-                    matching_target_item.price = item.price
-                    matching_target_item.discount = item.discount
-                    matching_target_item.tax = item.tax
-                matching_target_item.amount = cls.calculate_line_amount(
-                    matching_target_item.quantity,
-                    matching_target_item.price,
-                    matching_target_item.discount,
-                    matching_target_item.tax
-                )
-                if hasattr(matching_target_item, 'unit') and hasattr(item, 'unit'):
-                    matching_target_item.unit = item.unit
-                if hasattr(matching_target_item, 'description') and hasattr(item, 'description'):
-                    matching_target_item.description = item.description
+                if is_dc_to_so_upstream:
+                    # When editing a Delivery Challan linked to a Sales Order:
+                    # Do NOT overwrite matching_target_item.quantity (the original ordered quantity)!
+                    # Instead, adjust dispatched_quantity by delta = item.quantity - old_dispatched_for_this_challan
+                    # matching_target_item.dispatched_quantity will be recalculated or adjusted.
+                    pass
+                else:
+                    matching_target_item.quantity = item.quantity
+                    if hasattr(matching_target_item, 'free_quantity') and hasattr(item, 'free_quantity'):
+                        matching_target_item.free_quantity = item.free_quantity
+                    if not is_po_sync:
+                        matching_target_item.price = item.price
+                        matching_target_item.discount = item.discount
+                        matching_target_item.tax = item.tax
+                    matching_target_item.amount = cls.calculate_line_amount(
+                        matching_target_item.quantity,
+                        matching_target_item.price,
+                        matching_target_item.discount,
+                        matching_target_item.tax
+                    )
+                    if hasattr(matching_target_item, 'unit') and hasattr(item, 'unit'):
+                        matching_target_item.unit = item.unit
+                    if hasattr(matching_target_item, 'description') and hasattr(item, 'description'):
+                        matching_target_item.description = item.description
 
-                # Stock adjustment for DeliveryChallan target
-                from billing.models_sidecar import DeliveryChallan
-                if isinstance(target_doc, DeliveryChallan) and matching_target_item.product_id:
-                    delta = matching_target_item.quantity - old_t_qty
-                    if delta != 0:
-                        Product.objects.filter(pk=matching_target_item.product_id).update(stock=F('stock') - delta)
+                    # Stock adjustment for DeliveryChallan target
+                    if isinstance(target_doc, DeliveryChallan) and matching_target_item.product_id:
+                        delta = matching_target_item.quantity - old_t_qty
+                        if delta != 0:
+                            Product.objects.filter(pk=matching_target_item.product_id).update(stock=F('stock') - delta)
 
-                matching_target_item.save()
+                    matching_target_item.save()
 
         # 2. Propagate Deletions
         for del_info in deleted_items:
@@ -403,23 +411,33 @@ class DocumentSyncService:
                     matching_target_item = same_prod[0]
 
             if matching_target_item:
-                from billing.models_sidecar import DeliveryChallan
-                if isinstance(target_doc, DeliveryChallan) and matching_target_item.product_id:
-                    restore_qty = (matching_target_item.quantity or 0) + (getattr(matching_target_item, 'free_quantity', 0) or 0)
-                    if restore_qty > 0:
-                        Product.objects.filter(pk=matching_target_item.product_id).update(stock=F('stock') + restore_qty)
+                from billing.models_sidecar import DeliveryChallan, SalesOrder
+                is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
+                if is_dc_to_so_upstream:
+                    # Deleting an item from a challan does NOT delete the item from the sales order!
+                    # The sales order line remains, but dispatched_quantity will be recomputed below.
+                    pass
+                else:
+                    if isinstance(target_doc, DeliveryChallan) and matching_target_item.product_id:
+                        restore_qty = (matching_target_item.quantity or 0) + (getattr(matching_target_item, 'free_quantity', 0) or 0)
+                        if restore_qty > 0:
+                            Product.objects.filter(pk=matching_target_item.product_id).update(stock=F('stock') + restore_qty)
 
-                matching_target_item.delete()
+                    matching_target_item.delete()
 
         # 3. Propagate Additions
         TargetItemModel = target_doc.items.model
-        for item in created_items:
-            # Check if target already has this item
-            already_exists = False
-            if is_upstream:
-                already_exists = any(str(ti.id) == getattr(item, 'source_item_id', None) for ti in target_items)
-            else:
-                already_exists = any(getattr(ti, 'source_item_id', None) == str(item.id) for ti in target_items)
+        from billing.models_sidecar import DeliveryChallan, SalesOrder
+        is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
+
+        if not is_dc_to_so_upstream:
+            for item in created_items:
+                # Check if target already has this item
+                already_exists = False
+                if is_upstream:
+                    already_exists = any(str(ti.id) == getattr(item, 'source_item_id', None) for ti in target_items)
+                else:
+                    already_exists = any(getattr(ti, 'source_item_id', None) == str(item.id) for ti in target_items)
 
             if not already_exists:
                 if isinstance(target_doc, PurchaseOrder):
@@ -474,6 +492,32 @@ class DocumentSyncService:
                     deduct_qty = (new_target_item.quantity or 0) + (getattr(new_target_item, 'free_quantity', 0) or 0)
                     if deduct_qty > 0:
                         Product.objects.filter(pk=new_target_item.product_id).update(stock=F('stock') - deduct_qty)
+
+        # If target is SalesOrder and source is DeliveryChallan, re-evaluate dispatched quantities & stage
+        if is_dc_to_so_upstream:
+            from billing.models_sidecar import DeliveryChallanItem
+            from django.db.models import Sum, Q, Count
+            # 1. Recompute dispatched_quantity for each item in target_doc from all linked non-cancelled DeliveryChallans
+            so_items = list(target_doc.items.all())
+            challan_items_agg = DeliveryChallanItem.objects.filter(
+                challan__sales_order=target_doc,
+                challan__status__in=['open', 'billed', 'dispatched', 'delivered']
+            ).exclude(challan__status='cancelled').values('source_item_id').annotate(
+                total_dispatched=Sum('quantity')
+            )
+            dispatched_map = {str(row['source_item_id']): (row['total_dispatched'] or 0) for row in challan_items_agg if row['source_item_id']}
+
+            for so_item in so_items:
+                calc_qty = dispatched_map.get(str(so_item.id), 0)
+                if so_item.dispatched_quantity != calc_qty:
+                    so_item.dispatched_quantity = calc_qty
+                    so_item.save(update_fields=['dispatched_quantity'])
+
+            # 2. Recalculate SalesOrder stage
+            all_fulfilled = len(so_items) > 0 and all(i.is_fulfilled for i in so_items)
+            any_dispatched = any((i.dispatched_quantity or 0) > 0 for i in so_items)
+            target_doc.stage = 'completed' if all_fulfilled else ('shipped' if any_dispatched else 'new')
+            target_doc.save(update_fields=['stage'])
 
         # Recalculate target total
         cls.recalculate_document_total(target_doc)

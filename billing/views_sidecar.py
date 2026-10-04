@@ -374,6 +374,126 @@ def delivery_challan_list_create(request):
             return Response(DeliveryChallanSerializer(challan).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+from collections import defaultdict
+from django.db.models import Case, When, Value, F, Q, Count, DecimalField
+from django.db.models.functions import Greatest
+from inventory.models import StockPoint
+
+def batch_revert_challan_dispatches_and_stocks(challans, tenant):
+    """
+    Batch reverts inventory stock and linked SalesOrder dispatched quantities.
+    STRICTLY ZERO N+1 QUERIES: Uses in-memory aggregations and single-pass batch SQL.
+    """
+    challan_ids = [c.id for c in challans]
+    if not challan_ids:
+        return
+
+    items = list(DeliveryChallanItem.objects.filter(
+        challan_id__in=challan_ids
+    ).values(
+        'product_id',
+        'batch_id',
+        'quantity',
+        'free_quantity',
+        'source_item_id',
+        'challan__warehouse_id',
+        'challan__sales_order_id',
+        'row_type'
+    ))
+
+    if not items:
+        return
+
+    # In-memory accumulators
+    product_deltas = defaultdict(lambda: Decimal('0.00'))
+    stock_point_deltas = defaultdict(lambda: Decimal('0.00'))  # (batch_id, warehouse_id) -> delta
+    so_item_deltas = defaultdict(lambda: Decimal('0.00'))      # source_item_id -> delta
+    affected_so_ids = set()
+
+    for item in items:
+        if item.get('row_type') == 'note':
+            continue
+
+        qty = Decimal(str(item.get('quantity') or 0)) + Decimal(str(item.get('free_quantity') or 0))
+        prod_id = item.get('product_id')
+        batch_id = item.get('batch_id')
+        wh_id = item.get('challan__warehouse_id')
+        src_item_id = item.get('source_item_id')
+        so_id = item.get('challan__sales_order_id')
+
+        if prod_id and qty > 0:
+            product_deltas[prod_id] += qty
+            if batch_id and wh_id:
+                stock_point_deltas[(batch_id, wh_id)] += qty
+
+        if src_item_id and qty > 0:
+            so_item_deltas[src_item_id] += qty
+            if so_id:
+                affected_so_ids.add(so_id)
+
+    # 1. Batch Update Product stock (Single query using CASE/WHEN)
+    if product_deltas:
+        cases = [
+            When(id=pid, then=F('stock') + delta)
+            for pid, delta in product_deltas.items()
+        ]
+        Product.objects.filter(id__in=product_deltas.keys(), company=tenant).update(
+            stock=Case(*cases, default=F('stock'), output_field=DecimalField())
+        )
+
+    # 2. Batch Update StockPoints (Single query using CASE/WHEN)
+    if stock_point_deltas:
+        sp_filter = Q()
+        cases = []
+        for (bid, wid), delta in stock_point_deltas.items():
+            sp_filter |= Q(batch_id=bid, warehouse_id=wid)
+            cases.append(When(batch_id=bid, warehouse_id=wid, then=F('quantity') + delta))
+
+        StockPoint.objects.filter(sp_filter).update(
+            quantity=Case(*cases, default=F('quantity'), output_field=DecimalField())
+        )
+
+    # 3. Batch Revert SalesOrderItem dispatched_quantity (Single query using CASE/WHEN with Greatest())
+    if so_item_deltas:
+        cases = [
+            When(id=item_id, then=Greatest(F('dispatched_quantity') - int(delta), 0))
+            for item_id, delta in so_item_deltas.items()
+        ]
+        SalesOrderItem.objects.filter(id__in=so_item_deltas.keys()).update(
+            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'))
+        )
+
+    # 4. Batch Recalculate SalesOrder stages for all affected Sales Orders (Single aggregated query)
+    if affected_so_ids:
+        order_item_stats = SalesOrderItem.objects.filter(
+            order_id__in=affected_so_ids
+        ).values('order_id').annotate(
+            total_items=Count('id'),
+            fulfilled_items=Count('id', filter=Q(dispatched_quantity__gte=F('quantity'), quantity__gt=0)),
+            partially_dispatched_items=Count('id', filter=Q(dispatched_quantity__gt=0))
+        )
+
+        stage_cases = []
+        for stat in order_item_stats:
+            so_id = stat['order_id']
+            tot = stat['total_items']
+            ful = stat['fulfilled_items']
+            part = stat['partially_dispatched_items']
+
+            if tot > 0 and ful == tot:
+                new_stage = 'completed'
+            elif part > 0:
+                new_stage = 'shipped'
+            else:
+                new_stage = 'new'
+            stage_cases.append(When(id=so_id, then=Value(new_stage)))
+
+        if stage_cases:
+            SalesOrder.objects.filter(id__in=affected_so_ids, created_by=tenant).update(
+                stage=Case(*stage_cases, default=F('stage'))
+            )
+
+
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def delivery_challan_detail(request, pk):
@@ -399,20 +519,49 @@ def delivery_challan_detail(request, pk):
         if challan.is_billed:
             return Response({"message": "Cannot delete an invoiced delivery challan."}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Restore stock for deleted challan
-        from inventory.models import StockPoint
-        from django.db.models import F
-        target_warehouse = challan.warehouse
-        for item in challan.items.all():
-            eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
-            if eff_qty > 0:
-                Product.objects.filter(pk=item.product_id).update(stock=F('stock') + eff_qty)
-                if item.batch and target_warehouse:
-                    StockPoint.objects.filter(batch=item.batch, warehouse=target_warehouse).update(
-                        quantity=F('quantity') + eff_qty
-                    )
-        challan.delete()
+        with transaction.atomic():
+            # Revert stock and sales order dispatched status (Zero N+1)
+            batch_revert_challan_dispatches_and_stocks([challan], tenant)
+            challan.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def bulk_delete_delivery_challans(request):
+    """
+    Bulk delete delivery challans with zero N+1 queries.
+    Reverts stock and sales order dispatched status atomically.
+    """
+    tenant = request.user.active_tenant
+    challan_ids = request.data.get('ids', [])
+    
+    if not challan_ids or not isinstance(challan_ids, list):
+        return Response({'message': 'A list of challan IDs is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    with transaction.atomic():
+        challans = list(DeliveryChallan.objects.filter(
+            pk__in=challan_ids,
+            created_by=tenant
+        ).select_for_update(of=('self',)))
+        
+        if not challans:
+            return Response({'message': 'No matching delivery challans found.'}, status=status.HTTP_404_NOT_FOUND)
+        
+        billed = [c.challan_number for c in challans if c.is_billed]
+        if billed:
+            return Response({
+                'message': f"Cannot delete challan(s) {', '.join(billed)} because they are already converted to sales invoices."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 1. Batch revert inventory and SO items (constant queries)
+        batch_revert_challan_dispatches_and_stocks(challans, tenant)
+        
+        # 2. Bulk delete in single SQL query
+        count = len(challans)
+        DeliveryChallan.objects.filter(pk__in=challan_ids, created_by=tenant).delete()
+            
+        return Response({'message': f'Successfully deleted {count} delivery challan(s).', 'count': count})
 
 
 @api_view(['GET'])
@@ -597,16 +746,21 @@ def convert_challan_to_invoice(request, pk):
 
     try:
         with transaction.atomic():
-            challan = DeliveryChallan.objects.select_for_update().select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+            challan = DeliveryChallan.objects.select_for_update(of=('self',)).select_related(
+                'customer', 'warehouse', 'sales_order'
+            ).prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
             if challan.is_billed:
                 return Response({"message": "Delivery Challan has already been converted to an invoice."}, status=status.HTTP_400_BAD_REQUEST)
 
             # Check credit limit
             if challan.customer and not challan.customer.allow_credit:
-                new_balance = challan.customer.current_balance + challan.total_amount
-                if new_balance > challan.customer.credit_limit:
+                curr_balance = challan.customer.current_balance or Decimal('0.00')
+                cred_limit = challan.customer.credit_limit or Decimal('0.00')
+                challan_tot = challan.total_amount or Decimal('0.00')
+                new_balance = curr_balance + challan_tot
+                if new_balance > cred_limit:
                     return Response(
-                        {"message": f"Credit limit exceeded. Current: {challan.customer.current_balance}, Limit: {challan.customer.credit_limit}"},
+                        {"message": f"Credit limit exceeded. Current: {curr_balance}, Limit: {cred_limit}"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -638,27 +792,44 @@ def convert_challan_to_invoice(request, pk):
 
             total_items_amount = Decimal('0.00')
             for c_item in challan.items.all():
-                price = Decimal(str(c_item.price or c_item.product.sale_price or c_item.product.price or 0))
-                qty = int(c_item.quantity or 1)
-                discount = Decimal(str(c_item.discount or 0))
-                tax = Decimal(str(c_item.tax or 0))
-                base_amount = qty * price
-                discount_amount = (base_amount * discount) / Decimal('100')
-                taxable_amount = base_amount - discount_amount
-                tax_amount = (taxable_amount * tax) / Decimal('100')
-                line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
-                total_items_amount += line_amount
+                is_note = getattr(c_item, 'row_type', 'item') == 'note' or not c_item.product_id
+                prod = c_item.product
+                if is_note:
+                    price = Decimal('0.00')
+                    qty = 0
+                    discount = Decimal('0.00')
+                    tax = Decimal('0.00')
+                    line_amount = Decimal('0.00')
+                    unit = ''
+                    hsn_sac_code = ''
+                else:
+                    price = Decimal(str(
+                        c_item.price if c_item.price is not None
+                        else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
+                    ))
+                    qty = int(c_item.quantity or 1)
+                    discount = Decimal(str(c_item.discount or 0))
+                    tax = Decimal(str(c_item.tax or 0))
+                    base_amount = qty * price
+                    discount_amount = (base_amount * discount) / Decimal('100')
+                    taxable_amount = base_amount - discount_amount
+                    tax_amount = (taxable_amount * tax) / Decimal('100')
+                    line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+                    total_items_amount += line_amount
+                    unit = c_item.unit or getattr(prod, 'unit', 'pcs') or 'pcs'
+                    hsn_sac_code = c_item.hsn_sac_code or getattr(prod, 'hsn_sac_code', '') or ''
 
                 inv_item = SalesInvoiceItem(
                     sales_invoice=invoice,
-                    product=c_item.product,
+                    product=prod,
+                    row_type=getattr(c_item, 'row_type', 'item') or 'item',
                     batch=c_item.batch,
-                    hsn_sac_code=c_item.hsn_sac_code or c_item.product.hsn_sac_code or '',
+                    hsn_sac_code=hsn_sac_code,
                     quantity=qty,
                     free_quantity=c_item.free_quantity or 0,
                     price=price,
                     amount=line_amount,
-                    unit=c_item.unit or c_item.product.unit or 'pcs',
+                    unit=unit,
                     discount=discount,
                     tax=tax,
                     description=getattr(c_item, 'description', '') or '',
@@ -743,7 +914,7 @@ def bulk_convert_challans_to_invoice(request):
     try:
         with transaction.atomic():
             challans = list(
-                DeliveryChallan.objects.select_for_update()
+                DeliveryChallan.objects.select_for_update(of=('self',))
                 .select_related('customer', 'warehouse', 'sales_order')
                 .prefetch_related('items__product', 'items__batch')
                 .filter(pk__in=challan_ids, created_by=tenant)
@@ -773,10 +944,12 @@ def bulk_convert_challans_to_invoice(request):
             # Check credit limit
             est_total = sum((c.total_amount for c in challans), Decimal('0.00'))
             if customer and not customer.allow_credit:
-                new_balance = customer.current_balance + est_total
-                if new_balance > customer.credit_limit:
+                curr_balance = customer.current_balance or Decimal('0.00')
+                cred_limit = customer.credit_limit or Decimal('0.00')
+                new_balance = curr_balance + est_total
+                if new_balance > cred_limit:
                     return Response(
-                        {"message": f"Credit limit exceeded. Current: {customer.current_balance}, Limit: {customer.credit_limit}"},
+                        {"message": f"Credit limit exceeded. Current: {curr_balance}, Limit: {cred_limit}"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -811,27 +984,44 @@ def bulk_convert_challans_to_invoice(request):
             total_items_amount = Decimal('0.00')
             for challan in challans:
                 for c_item in challan.items.all():
-                    price = Decimal(str(c_item.price or c_item.product.sale_price or c_item.product.price or 0))
-                    qty = int(c_item.quantity or 1)
-                    discount = Decimal(str(c_item.discount or 0))
-                    tax = Decimal(str(c_item.tax or 0))
-                    base_amount = qty * price
-                    discount_amount = (base_amount * discount) / Decimal('100')
-                    taxable_amount = base_amount - discount_amount
-                    tax_amount = (taxable_amount * tax) / Decimal('100')
-                    line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
-                    total_items_amount += line_amount
+                    is_note = getattr(c_item, 'row_type', 'item') == 'note' or not c_item.product_id
+                    prod = c_item.product
+                    if is_note:
+                        price = Decimal('0.00')
+                        qty = 0
+                        discount = Decimal('0.00')
+                        tax = Decimal('0.00')
+                        line_amount = Decimal('0.00')
+                        unit = ''
+                        hsn_sac_code = ''
+                    else:
+                        price = Decimal(str(
+                            c_item.price if c_item.price is not None
+                            else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
+                        ))
+                        qty = int(c_item.quantity or 1)
+                        discount = Decimal(str(c_item.discount or 0))
+                        tax = Decimal(str(c_item.tax or 0))
+                        base_amount = qty * price
+                        discount_amount = (base_amount * discount) / Decimal('100')
+                        taxable_amount = base_amount - discount_amount
+                        tax_amount = (taxable_amount * tax) / Decimal('100')
+                        line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+                        total_items_amount += line_amount
+                        unit = c_item.unit or getattr(prod, 'unit', 'pcs') or 'pcs'
+                        hsn_sac_code = c_item.hsn_sac_code or getattr(prod, 'hsn_sac_code', '') or ''
 
                     inv_item = SalesInvoiceItem(
                         sales_invoice=invoice,
-                        product=c_item.product,
+                        product=prod,
+                        row_type=getattr(c_item, 'row_type', 'item') or 'item',
                         batch=c_item.batch,
-                        hsn_sac_code=c_item.hsn_sac_code or c_item.product.hsn_sac_code or '',
+                        hsn_sac_code=hsn_sac_code,
                         quantity=qty,
                         free_quantity=c_item.free_quantity or 0,
                         price=price,
                         amount=line_amount,
-                        unit=c_item.unit or c_item.product.unit or 'pcs',
+                        unit=unit,
                         discount=discount,
                         tax=tax,
                         description=getattr(c_item, 'description', '') or '',

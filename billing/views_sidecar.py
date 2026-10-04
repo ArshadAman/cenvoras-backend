@@ -57,6 +57,11 @@ def sales_order_detail(request, pk):
         return Response({"success": False, "message": "Order not found"}, status=404)
         
     if request.method == 'GET':
+        from billing.sync_service import DocumentSyncService
+        DocumentSyncService.reconcile_sales_order_dispatched_state(order, tenant)
+        if hasattr(order, '_prefetched_objects_cache'):
+            order._prefetched_objects_cache.clear()
+        order.refresh_from_db()
         serializer = SalesOrderSerializer(order)
         return Response(serializer.data)
         
@@ -100,6 +105,13 @@ def convert_order_to_invoice(request, pk):
         existing_invoice = SalesInvoice.objects.filter(created_by=tenant, po_number=order.order_number).first()
         if existing_invoice:
             return Response({"message": f"Order has already been converted to an invoice (#{existing_invoice.invoice_number})."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Reconcile any drift in dispatched_quantity prior to conversion
+        from billing.sync_service import DocumentSyncService
+        DocumentSyncService.reconcile_sales_order_dispatched_state(order, tenant)
+        if hasattr(order, '_prefetched_objects_cache'):
+            order._prefetched_objects_cache.clear()
+        order.refresh_from_db()
 
         # Parse requested conversion items & quantities
         items_payload = request.data.get('items')
@@ -605,6 +617,13 @@ def convert_order_to_challan(request, pk):
         order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
         if order.stage in ['completed', 'cancelled']:
             return Response({"message": f"Order has stage '{order.stage}' and cannot be converted."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Reconcile any drift in dispatched_quantity prior to conversion
+        from billing.sync_service import DocumentSyncService
+        DocumentSyncService.reconcile_sales_order_dispatched_state(order, tenant)
+        if hasattr(order, '_prefetched_objects_cache'):
+            order._prefetched_objects_cache.clear()
+        order.refresh_from_db()
 
         from billing.sequence_service import allocate_next_number
         next_challan_number = allocate_next_number(tenant, document_type='delivery_challan', prefix='DC-')

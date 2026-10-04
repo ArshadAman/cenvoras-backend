@@ -585,3 +585,108 @@ class DeliveryChallanFlowTests(TestCase):
         so_item.refresh_from_db()
         self.assertEqual(so_item.dispatched_quantity, 8)
 
+    def test_invoice_deletion_reverts_challan_and_syncs_so(self):
+        """
+        When a sales invoice generated from a delivery challan is deleted,
+        the delivery challan status must revert from billed to open, is_billed to False,
+        and linked sales order stage must be re-evaluated.
+        """
+        so = SalesOrder.objects.create(
+            order_number="SO-REC-01",
+            customer=self.customer,
+            date=date.today(),
+            total_amount=Decimal("500.00"),
+            stage="shipped",
+            created_by=self.tenant
+        )
+        so_item = SalesOrderItem.objects.create(
+            order=so,
+            product=self.product,
+            quantity=10,
+            dispatched_quantity=5,
+            price=Decimal("100.00"),
+            amount=Decimal("1000.00")
+        )
+        challan = DeliveryChallan.objects.create(
+            challan_number="DC-REC-01",
+            customer=self.customer,
+            sales_order=so,
+            date=date.today(),
+            total_amount=Decimal("500.00"),
+            status="billed",
+            is_billed=True,
+            created_by=self.tenant
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan,
+            product=self.product,
+            quantity=5,
+            price=Decimal("100.00"),
+            amount=Decimal("500.00"),
+            source_item_id=str(so_item.id)
+        )
+        invoice = SalesInvoice.objects.create(
+            invoice_number="INV-REC-01",
+            customer=self.customer,
+            invoice_date=date.today(),
+            total_amount=Decimal("500.00"),
+            payment_status="pending",
+            challan_number="DC-REC-01",
+            created_by=self.tenant
+        )
+        challan.converted_invoice = invoice
+        challan.save(update_fields=['converted_invoice'])
+
+        # Delete invoice via API endpoint
+        res = self.client.delete(f"/api/billing/sales-invoices/{invoice.id}/edit/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify DeliveryChallan reverted to open and is_billed=False
+        challan.refresh_from_db()
+        self.assertFalse(challan.is_billed)
+        self.assertEqual(challan.status, "open")
+        self.assertIsNone(challan.converted_invoice)
+
+        # Verify SalesOrder stage is re-evaluated to shipped (since DC is open)
+        so.refresh_from_db()
+        self.assertEqual(so.stage, "shipped")
+
+    def test_sales_order_dispatched_quantity_auto_healing(self):
+        """
+        If a SalesOrderItem has phantom dispatched_quantity (no actual DeliveryChallan created),
+        fetching the sales order detail must auto-heal dispatched_quantity to 0 and stage to new.
+        """
+        so = SalesOrder.objects.create(
+            order_number="SO-HEAL-01",
+            customer=self.customer,
+            date=date.today(),
+            total_amount=Decimal("300.00"),
+            stage="shipped",
+            created_by=self.tenant
+        )
+        so_item = SalesOrderItem.objects.create(
+            order=so,
+            product=self.product,
+            quantity=3,
+            dispatched_quantity=2,  # Phantom quantity! No DeliveryChallan exists.
+            price=Decimal("100.00"),
+            amount=Decimal("300.00")
+        )
+
+        # Request order details via GET endpoint
+        res = self.client.get(f"/api/billing/sales-orders/{so.id}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # Item dispatched quantity in response should be 0, pending should be 3
+        items = res.data.get("items", [])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["dispatched_quantity"], 0)
+        self.assertEqual(items[0]["pending_quantity"], 3)
+
+        # Database state should also be healed
+        so_item.refresh_from_db()
+        self.assertEqual(so_item.dispatched_quantity, 0)
+        so.refresh_from_db()
+        self.assertEqual(so.stage, "new")
+
+

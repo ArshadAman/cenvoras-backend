@@ -281,12 +281,35 @@ class SalesInvoice(models.Model):
                   f"{old_status} → {status_value}", file=sys.stderr)
 
     def delete(self, *args, **kwargs):
-        from billing.models_sidecar import DeliveryChallan
-        DeliveryChallan.objects.filter(converted_invoice=self).update(
+        from billing.models_sidecar import DeliveryChallan, SalesOrder
+        from django.db.models import Q
+
+        challan_numbers = [c.strip() for c in (self.challan_number or '').split(',') if c.strip()]
+        challans_to_revert = DeliveryChallan.objects.filter(
+            Q(converted_invoice=self) |
+            (Q(challan_number__in=challan_numbers) & Q(created_by=self.created_by))
+        )
+        reverted_challans = list(challans_to_revert)
+        challans_to_revert.update(
             is_billed=False,
             status='open',
             converted_invoice=None
         )
+
+        # If any reverted challan or invoice was linked to a sales order, reconcile order stage & quantities
+        so_ids = {c.sales_order_id for c in reverted_challans if c.sales_order_id}
+        if getattr(self, 'sales_order_id', None):
+            so_ids.add(self.sales_order_id)
+        if self.po_number:
+            so_by_po = SalesOrder.objects.filter(order_number=self.po_number, created_by=self.created_by).values_list('id', flat=True)
+            so_ids.update(so_by_po)
+
+        if so_ids:
+            from billing.sync_service import DocumentSyncService
+            sos = list(SalesOrder.objects.filter(id__in=so_ids, created_by=self.created_by))
+            if sos:
+                DocumentSyncService.reconcile_sales_order_dispatched_state(sos, self.created_by)
+
         return super().delete(*args, **kwargs)
 
     class Meta:

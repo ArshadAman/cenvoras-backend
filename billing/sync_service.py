@@ -544,3 +544,85 @@ class DocumentSyncService:
 
         # Continue propagating through target's connections
         cls._propagate_changes(target_doc, updated_items, deleted_items, created_items)
+
+    @classmethod
+    def reconcile_sales_order_dispatched_state(cls, order_or_orders, tenant=None):
+        """
+        Reconciles SalesOrderItem.dispatched_quantity and SalesOrder.stage against
+        actual linked non-cancelled DeliveryChallans and converted SalesInvoices.
+        Prevents N+1 queries by executing in constant batch queries.
+        """
+        from billing.models_sidecar import SalesOrder, SalesOrderItem, DeliveryChallanItem
+        from billing.models import SalesInvoiceItem
+        from django.db.models import Sum
+
+        if not order_or_orders:
+            return
+
+        if isinstance(order_or_orders, SalesOrder):
+            orders = [order_or_orders]
+        elif hasattr(order_or_orders, '__iter__'):
+            orders = list(order_or_orders)
+        else:
+            orders = [order_or_orders]
+
+        if not orders:
+            return
+
+        order_ids = [o.id for o in orders]
+        tenant_filter = {'challan__created_by': tenant} if tenant else {}
+
+        # 1. Aggregate dispatched quantities from DeliveryChallanItems linked to these orders
+        dc_agg = DeliveryChallanItem.objects.filter(
+            challan__sales_order_id__in=order_ids,
+            challan__status__in=['open', 'billed', 'dispatched', 'delivered'],
+            **tenant_filter
+        ).exclude(challan__status='cancelled').values('source_item_id').annotate(
+            total_dispatched=Sum('quantity')
+        )
+        dispatched_map = {str(row['source_item_id']): (row['total_dispatched'] or 0) for row in dc_agg if row['source_item_id']}
+
+        # 2. Also check if any order was directly invoiced (without DeliveryChallan)
+        order_numbers = [o.order_number for o in orders if getattr(o, 'order_number', None)]
+        if order_numbers:
+            inv_filter = {'sales_invoice__created_by': tenant} if tenant else {}
+            direct_inv_agg = SalesInvoiceItem.objects.filter(
+                sales_invoice__po_number__in=order_numbers,
+                **inv_filter
+            ).values('source_item_id').annotate(
+                total_invoiced=Sum('quantity')
+            )
+            for row in direct_inv_agg:
+                s_id = str(row['source_item_id']) if row.get('source_item_id') else None
+                if s_id:
+                    dispatched_map[s_id] = max(dispatched_map.get(s_id, 0), row['total_invoiced'] or 0)
+
+        # 3. Fetch all items for these orders and check for discrepancies
+        items_to_update = []
+        so_items_by_order = {}
+        all_so_items = SalesOrderItem.objects.filter(order_id__in=order_ids)
+
+        for so_item in all_so_items:
+            expected_qty = dispatched_map.get(str(so_item.id), 0)
+            if (so_item.dispatched_quantity or 0) != expected_qty:
+                so_item.dispatched_quantity = expected_qty
+                items_to_update.append(so_item)
+            so_items_by_order.setdefault(so_item.order_id, []).append(so_item)
+
+        # Batch update mismatched items in a single query (constant query, no N+1)
+        if items_to_update:
+            SalesOrderItem.objects.bulk_update(items_to_update, ['dispatched_quantity'])
+
+        # 4. Update stage for each order if needed
+        orders_to_update = []
+        for order in orders:
+            items = so_items_by_order.get(order.id, [])
+            all_fulfilled = len(items) > 0 and all(i.is_fulfilled for i in items)
+            any_dispatched = any((i.dispatched_quantity or 0) > 0 for i in items)
+            expected_stage = 'completed' if all_fulfilled else ('shipped' if any_dispatched else 'new')
+            if order.stage != expected_stage and order.stage in ['new', 'shipped', 'completed']:
+                order.stage = expected_stage
+                orders_to_update.append(order)
+
+        if orders_to_update:
+            SalesOrder.objects.bulk_update(orders_to_update, ['stage'])

@@ -409,3 +409,179 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertIn("DC-", inv.challan_number)
         self.assertEqual(inv.items.count(), 1)
         self.assertEqual(inv.items.first().quantity, 4)
+
+    def test_delete_delivery_challan_restores_stock_and_so_dispatch(self):
+        """Deleting a delivery challan must restore product stock and sales order item dispatched quantity."""
+        order = SalesOrder.objects.create(
+            order_number="SO-DEL-01",
+            date=date.today(),
+            customer=self.customer,
+            stage="new",
+            total_amount=Decimal("472.00"),
+            created_by=self.tenant
+        )
+        so_item = SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=10,
+            dispatched_quantity=0,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("472.00"),
+            unit="bag"
+        )
+        # Create challan dispatching 4 bags
+        challan = DeliveryChallan.objects.create(
+            challan_number="DC-DEL-001",
+            date=date.today(),
+            customer=self.customer,
+            sales_order=order,
+            warehouse=self.warehouse,
+            total_amount=Decimal("188.80"),
+            status="open",
+            created_by=self.tenant
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan,
+            product=self.product,
+            quantity=4,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("188.80"),
+            source_item_id=str(so_item.id)
+        )
+        so_item.dispatched_quantity = 4
+        so_item.save(update_fields=['dispatched_quantity'])
+        order.stage = 'shipped'
+        order.save(update_fields=['stage'])
+
+        # Stock before delete
+        initial_stock = self.product.stock  # 100
+        # Delete challan via API
+        res = self.client.delete(f"/api/billing/delivery-challans/{challan.id}/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify challan is deleted
+        self.assertFalse(DeliveryChallan.objects.filter(id=challan.id).exists())
+
+        # Verify Product stock is restored by 4
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, initial_stock + 4)
+
+        # Verify SalesOrderItem dispatched_quantity is restored to 0
+        so_item.refresh_from_db()
+        self.assertEqual(so_item.dispatched_quantity, 0)
+
+        # Verify SalesOrder stage is reverted to 'new'
+        order.refresh_from_db()
+        self.assertEqual(order.stage, 'new')
+
+    def test_delete_sales_invoice_reverts_delivery_challan_to_open(self):
+        """Deleting a sales invoice must revert the converted delivery challan back to is_billed=False and status='open'."""
+        challan = DeliveryChallan.objects.create(
+            challan_number="DC-REV-001",
+            date=date.today(),
+            customer=self.customer,
+            warehouse=self.warehouse,
+            total_amount=Decimal("472.00"),
+            status="open",
+            created_by=self.tenant
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan,
+            product=self.product,
+            quantity=1,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("472.00")
+        )
+
+        # Convert to invoice
+        res = self.client.post(f"/api/billing/delivery-challans/{challan.id}/convert_to_invoice/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        inv_id = res.data["invoice_id"]
+
+        challan.refresh_from_db()
+        self.assertTrue(challan.is_billed)
+        self.assertEqual(challan.status, "billed")
+        self.assertEqual(str(challan.converted_invoice_id), str(inv_id))
+
+        # Now delete the Sales Invoice
+        del_res = self.client.delete(f"/api/billing/sales-invoices/{inv_id}/edit/")
+        self.assertEqual(del_res.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify Delivery Challan is reverted back to open
+        challan.refresh_from_db()
+        self.assertFalse(challan.is_billed)
+        self.assertEqual(challan.status, "open")
+        self.assertIsNone(challan.converted_invoice)
+
+    def test_edit_delivery_challan_updates_so_dispatch_and_stock(self):
+        """Editing quantity on a delivery challan updates product stock and sales order item dispatched quantity."""
+        order = SalesOrder.objects.create(
+            order_number="SO-EDIT-01",
+            date=date.today(),
+            customer=self.customer,
+            stage="shipped",
+            total_amount=Decimal("4720.00"),
+            created_by=self.tenant
+        )
+        so_item = SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=10,
+            dispatched_quantity=5,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("4720.00"),
+            unit="bag"
+        )
+        challan = DeliveryChallan.objects.create(
+            challan_number="DC-EDIT-001",
+            date=date.today(),
+            customer=self.customer,
+            sales_order=order,
+            warehouse=self.warehouse,
+            total_amount=Decimal("2360.00"),
+            status="open",
+            created_by=self.tenant
+        )
+        dc_item = DeliveryChallanItem.objects.create(
+            challan=challan,
+            product=self.product,
+            quantity=5,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("2360.00"),
+            source_item_id=str(so_item.id)
+        )
+
+        stock_before = self.product.stock  # 100
+
+        # Edit challan to increase quantity to 8 (delta = +3)
+        res = self.client.put(f"/api/billing/delivery-challans/{challan.id}/", {
+            "date": str(date.today()),
+            "customer": str(self.customer.id),
+            "customer_name": self.customer.name,
+            "warehouse": str(self.warehouse.id),
+            "items": [
+                {
+                    "id": str(dc_item.id),
+                    "product": str(self.product.id),
+                    "quantity": 8,
+                    "price": 400.00,
+                    "tax": 18.00,
+                    "source_item_id": str(so_item.id),
+                }
+            ]
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+
+        # Product stock should be decremented by 3
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, stock_before - 3)
+
+        # SalesOrderItem dispatched quantity should be updated to 8
+        so_item.refresh_from_db()
+        self.assertEqual(so_item.dispatched_quantity, 8)
+

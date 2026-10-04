@@ -418,6 +418,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             "description": obj.product.description,
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
+            "manufacturer": getattr(obj.product, 'manufacturer', '') or '',
         }
         if hasattr(obj.product, 'meta'):
             detail['storage_condition'] = obj.product.meta.storage_condition

@@ -111,6 +111,7 @@ class InvoiceSettings(models.Model):
     show_item_free_quantity = models.BooleanField(default=True)
     show_item_discount = models.BooleanField(default=True)
     show_item_tax = models.BooleanField(default=True)
+    show_item_manufacturer = models.BooleanField(default=True)
     
     def __str__(self):
         return f"Invoice Settings for {self.user}"

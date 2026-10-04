@@ -230,6 +230,12 @@ class DocumentSyncService:
                 delta = new_qty - (old_qty + old_free_qty)
                 if delta != 0:
                     Product.objects.filter(pk=item.product_id).update(stock=F('stock') - delta)
+                    if getattr(item, 'batch_id', None) and getattr(document, 'warehouse_id', None):
+                        from inventory.models import StockPoint
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch_id=item.batch_id, warehouse_id=document.warehouse_id, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - delta)
 
             item.save()
             updated_items.append(item)
@@ -241,6 +247,12 @@ class DocumentSyncService:
                 restore_qty = (item.quantity or 0) + (getattr(item, 'free_quantity', 0) or 0)
                 if restore_qty > 0:
                     Product.objects.filter(pk=item.product_id).update(stock=F('stock') + restore_qty)
+                    if getattr(item, 'batch_id', None) and getattr(document, 'warehouse_id', None):
+                        from inventory.models import StockPoint
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch_id=item.batch_id, warehouse_id=document.warehouse_id, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') + restore_qty)
 
             deleted_items.append({
                 'id': str(item.id),
@@ -294,6 +306,12 @@ class DocumentSyncService:
                 deduct_qty = (created_item.quantity or 0) + (getattr(created_item, 'free_quantity', 0) or 0)
                 if deduct_qty > 0:
                     Product.objects.filter(pk=created_item.product_id).update(stock=F('stock') - deduct_qty)
+                    if getattr(created_item, 'batch_id', None) and getattr(document, 'warehouse_id', None):
+                        from inventory.models import StockPoint
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch_id=created_item.batch_id, warehouse_id=document.warehouse_id, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - deduct_qty)
 
             created_items.append(created_item)
 
@@ -327,6 +345,8 @@ class DocumentSyncService:
     def _sync_target_document(cls, source_doc, target_doc, updated_items, deleted_items, created_items, is_upstream=False):
         """Synchronizes item changes from source_doc into target_doc."""
         from inventory.models import Product
+        from billing.models import PurchaseOrder
+        from billing.models_sidecar import DeliveryChallan, SalesOrder
         target_items = list(target_doc.items.all())
 
         # 1. Propagate Updates
@@ -439,59 +459,59 @@ class DocumentSyncService:
                 else:
                     already_exists = any(getattr(ti, 'source_item_id', None) == str(item.id) for ti in target_items)
 
-            if not already_exists:
-                if isinstance(target_doc, PurchaseOrder):
-                    cost_price = getattr(item.product, 'price', None) or getattr(item.product, 'cost_price', None) or item.price
-                    item_price = cost_price
-                    item_discount = Decimal('0.00')
-                else:
-                    item_price = item.price
-                    item_discount = item.discount
+                if not already_exists:
+                    if isinstance(target_doc, PurchaseOrder):
+                        cost_price = getattr(item.product, 'price', None) or getattr(item.product, 'cost_price', None) or item.price
+                        item_price = cost_price
+                        item_discount = Decimal('0.00')
+                    else:
+                        item_price = item.price
+                        item_discount = item.discount
 
-                item_data = {
-                    'product': item.product,
-                    'quantity': item.quantity,
-                    'price': item_price,
-                    'discount': item_discount,
-                    'tax': item.tax,
-                    'amount': cls.calculate_line_amount(item.quantity, item_price, item_discount, item.tax),
-                    'unit': getattr(item, 'unit', 'pcs') or 'pcs',
-                    'description': getattr(item, 'description', '') or '',
-                }
-                if hasattr(TargetItemModel, 'free_quantity'):
-                    item_data['free_quantity'] = getattr(item, 'free_quantity', 0) or 0
-                if hasattr(TargetItemModel, 'batch'):
-                    item_data['batch'] = getattr(item, 'batch', None)
-                if hasattr(TargetItemModel, 'hsn_sac_code'):
-                    item_data['hsn_sac_code'] = getattr(item, 'hsn_sac_code', '') or ''
-                if hasattr(TargetItemModel, 'row_type'):
-                    item_data['row_type'] = getattr(item, 'row_type', 'item') or 'item'
+                    item_data = {
+                        'product': item.product,
+                        'quantity': item.quantity,
+                        'price': item_price,
+                        'discount': item_discount,
+                        'tax': item.tax,
+                        'amount': cls.calculate_line_amount(item.quantity, item_price, item_discount, item.tax),
+                        'unit': getattr(item, 'unit', 'pcs') or 'pcs',
+                        'description': getattr(item, 'description', '') or '',
+                    }
+                    if hasattr(TargetItemModel, 'free_quantity'):
+                        item_data['free_quantity'] = getattr(item, 'free_quantity', 0) or 0
+                    if hasattr(TargetItemModel, 'batch'):
+                        item_data['batch'] = getattr(item, 'batch', None)
+                    if hasattr(TargetItemModel, 'hsn_sac_code'):
+                        item_data['hsn_sac_code'] = getattr(item, 'hsn_sac_code', '') or ''
+                    if hasattr(TargetItemModel, 'row_type'):
+                        item_data['row_type'] = getattr(item, 'row_type', 'item') or 'item'
 
-                if not is_upstream and hasattr(TargetItemModel, 'source_item_id'):
-                    item_data['source_item_id'] = str(item.id)
+                    if not is_upstream and hasattr(TargetItemModel, 'source_item_id'):
+                        item_data['source_item_id'] = str(item.id)
 
-                fk_field = None
-                for field in TargetItemModel._meta.fields:
-                    if field.is_relation and isinstance(target_doc, field.related_model):
-                        fk_field = field.name
-                        break
+                    fk_field = None
+                    for field in TargetItemModel._meta.fields:
+                        if field.is_relation and isinstance(target_doc, field.related_model):
+                            fk_field = field.name
+                            break
 
-                if fk_field:
-                    item_data[fk_field] = target_doc
+                    if fk_field:
+                        item_data[fk_field] = target_doc
 
-                new_target_item = TargetItemModel.objects.create(**item_data)
+                    new_target_item = TargetItemModel.objects.create(**item_data)
 
-                # If we created upstream, link backward
-                if is_upstream and hasattr(item, 'source_item_id'):
-                    item.source_item_id = str(new_target_item.id)
-                    item.save(update_fields=['source_item_id'])
+                    # If we created upstream, link backward
+                    if is_upstream and hasattr(item, 'source_item_id'):
+                        item.source_item_id = str(new_target_item.id)
+                        item.save(update_fields=['source_item_id'])
 
-                # Stock adjustment for DeliveryChallan target
-                from billing.models_sidecar import DeliveryChallan
-                if isinstance(target_doc, DeliveryChallan) and new_target_item.product_id:
-                    deduct_qty = (new_target_item.quantity or 0) + (getattr(new_target_item, 'free_quantity', 0) or 0)
-                    if deduct_qty > 0:
-                        Product.objects.filter(pk=new_target_item.product_id).update(stock=F('stock') - deduct_qty)
+                    # Stock adjustment for DeliveryChallan target
+                    from billing.models_sidecar import DeliveryChallan
+                    if isinstance(target_doc, DeliveryChallan) and new_target_item.product_id:
+                        deduct_qty = (new_target_item.quantity or 0) + (getattr(new_target_item, 'free_quantity', 0) or 0)
+                        if deduct_qty > 0:
+                            Product.objects.filter(pk=new_target_item.product_id).update(stock=F('stock') - deduct_qty)
 
         # If target is SalesOrder and source is DeliveryChallan, re-evaluate dispatched quantities & stage
         if is_dc_to_so_upstream:

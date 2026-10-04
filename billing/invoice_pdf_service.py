@@ -530,6 +530,13 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             clean_desc = escape(str(item_desc).strip()).replace('\n', '<br/>')
             desc_text += f"<br/><font color='#64748b' size=7>{clean_desc}</font>"
 
+        # Manufacturer
+        mfr = getattr(item, 'manufacturer', '') or (getattr(item.product, 'manufacturer', '') if getattr(item, 'product', None) else '')
+        if mfr:
+            from xml.sax.saxutils import escape
+            clean_mfr = escape(str(mfr).strip())
+            desc_text += f"<br/><font color='#64748b' size=7><i>Mfr: {clean_mfr}</i></font>"
+
         qty_display = f"{int(qty) if qty % 1 == 0 else qty}"
         if getattr(item, 'unit', None):
             qty_display += f" {item.unit}"

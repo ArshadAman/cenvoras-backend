@@ -437,7 +437,7 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
             When(id=pid, then=F('stock') + delta)
             for pid, delta in product_deltas.items()
         ]
-        Product.objects.filter(id__in=product_deltas.keys(), company=tenant).update(
+        Product.objects.filter(id__in=product_deltas.keys(), created_by=tenant).update(
             stock=Case(*cases, default=F('stock'), output_field=DecimalField())
         )
 
@@ -455,12 +455,13 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
 
     # 3. Batch Revert SalesOrderItem dispatched_quantity (Single query using CASE/WHEN with Greatest())
     if so_item_deltas:
+        from django.db.models import PositiveIntegerField
         cases = [
             When(id=item_id, then=Greatest(F('dispatched_quantity') - int(delta), 0))
             for item_id, delta in so_item_deltas.items()
         ]
         SalesOrderItem.objects.filter(id__in=so_item_deltas.keys()).update(
-            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'))
+            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'), output_field=PositiveIntegerField())
         )
 
     # 4. Batch Recalculate SalesOrder stages for all affected Sales Orders (Single aggregated query)

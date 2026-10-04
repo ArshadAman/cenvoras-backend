@@ -49,6 +49,7 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
             'show_item_free_quantity',
             'show_item_discount',
             'show_item_tax',
+            'show_item_manufacturer',
         ]
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
@@ -284,6 +285,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             "description": getattr(obj.product, 'description', '') or '',
             "hsn_sac_code": getattr(obj.product, 'hsn_sac_code', '') or '',
             "unit": getattr(obj.product, 'unit', 'pcs') or 'pcs',
+            "manufacturer": getattr(obj.product, 'manufacturer', '') or '',
         }
 
     def _get_tenant(self):

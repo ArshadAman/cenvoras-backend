@@ -279,7 +279,16 @@ class SalesInvoice(models.Model):
             print(f"DEBUG: SalesInvoice {self.pk} refresh_payment_status - "
                   f"amount_paid={self.amount_paid}, total={self.total_amount}, "
                   f"{old_status} → {status_value}", file=sys.stderr)
-        
+
+    def delete(self, *args, **kwargs):
+        from billing.models_sidecar import DeliveryChallan
+        DeliveryChallan.objects.filter(converted_invoice=self).update(
+            is_billed=False,
+            status='open',
+            converted_invoice=None
+        )
+        return super().delete(*args, **kwargs)
+
     class Meta:
         unique_together = [['created_by', 'invoice_number']]
         indexes = [

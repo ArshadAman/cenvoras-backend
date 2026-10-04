@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db import DatabaseError, ProgrammingError
+from django.db import DatabaseError, ProgrammingError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import status
@@ -441,7 +441,14 @@ def sales_invoice_update_delete(request, pk):
     if invoice.payment_status != 'pending':
         return Response({'error': 'Only pending sales invoices can be deleted.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    invoice.delete()
+    with transaction.atomic():
+        from billing.models_sidecar import DeliveryChallan
+        DeliveryChallan.objects.filter(converted_invoice=invoice).update(
+            is_billed=False,
+            status='open',
+            converted_invoice=None
+        )
+        invoice.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 

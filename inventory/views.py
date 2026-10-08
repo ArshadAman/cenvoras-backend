@@ -344,9 +344,10 @@ def download_product_csv_template(request):
 def bulk_upload_products(request):
     """
     Bulk create products from a CSV file.
-    Streams uploaded file to a temporary file, then dispatches background Celery job.
+    Decodes CSV and stores in shared Redis cache, then dispatches background Celery job.
     Expected file form key: file
     """
+    import uuid
     uploaded_file = request.FILES.get('file')
     if not uploaded_file:
         return Response({'error': 'CSV file is required using form key "file".'}, status=status.HTTP_400_BAD_REQUEST)
@@ -361,28 +362,31 @@ def bulk_upload_products(request):
     from inventory.tasks import process_bulk_upload_csv
 
     try:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='w', encoding='utf-8')
         raw_bytes = uploaded_file.read()
         csv_content = _decode_csv_bytes(raw_bytes)
         if not csv_content.strip():
-            temp_file.close()
-            try:
-                os.unlink(temp_file.name)
-            except OSError:
-                pass
             return Response({'error': 'CSV file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
-        temp_file.write(csv_content)
-        temp_file.close()
     except UnicodeDecodeError:
         return Response(
             {'error': 'Unable to decode CSV. Supported encodings: UTF-8, UTF-16, Windows-1252, Latin-1.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
-        return Response({'error': f'Unable to store CSV file: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': f'Unable to process CSV file: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Generate task ID and store CSV payload in Redis cache (accessible by all containers/workers)
+    task_id = str(uuid.uuid4())
+    cache_key = f"bulk_upload_csv_payload_{task_id}"
+    try:
+        cache.set(cache_key, csv_content, timeout=1800)  # 30 minutes TTL
+    except Exception as e:
+        logger.warning(f"Failed to cache CSV in Redis: {e}")
 
     try:
-        task = process_bulk_upload_csv.delay(temp_file.name, str(request.user.id))
+        task = process_bulk_upload_csv.apply_async(
+            args=[cache_key, str(request.user.id)],
+            task_id=task_id
+        )
         return Response(
             {
                 'success': True,
@@ -394,10 +398,11 @@ def bulk_upload_products(request):
             },
             status=status.HTTP_202_ACCEPTED,
         )
-    except Exception:
+    except Exception as e:
         # Fallback to direct synchronous execution if Celery broker is unavailable
+        logger.warning(f"Celery dispatch failed: {e}. Executing synchronously.")
         try:
-            result = process_bulk_upload_csv(temp_file.name, str(request.user.id))
+            result = process_bulk_upload_csv(csv_content, str(request.user.id))
             return Response(
                 {
                     'success': True,
@@ -407,6 +412,7 @@ def bulk_upload_products(request):
                     'updated_count': result.get('updated_count', 0),
                     'skipped_count': result.get('skipped_count', 0),
                     'failed_count': result.get('failed_count', 0),
+                    'total_rows': result.get('total_rows', 0),
                     'errors': result.get('errors', []),
                 },
                 status=status.HTTP_200_OK,
@@ -447,10 +453,17 @@ def inventory_csv_job_status(request, task_id):
         result = task.result or {}
         payload['result'] = result
         payload['percent'] = 100
-        payload['created_count'] = result.get('created_count', 0)
-        payload['updated_count'] = result.get('updated_count', 0)
-        payload['skipped_count'] = result.get('skipped_count', 0)
-        payload['failed_count'] = result.get('failed_count', 0)
+        created = result.get('created_count', 0)
+        updated = result.get('updated_count', 0)
+        skipped = result.get('skipped_count', 0)
+        failed = result.get('failed_count', 0)
+        total = result.get('total_rows', 0)
+        payload['created_count'] = created
+        payload['updated_count'] = updated
+        payload['skipped_count'] = skipped
+        payload['failed_count'] = failed
+        payload['total'] = total or (created + updated + skipped + failed)
+        payload['current'] = payload['total']
         payload['errors'] = result.get('errors', [])
     elif task.state == 'FAILURE':
         payload['percent'] = 100

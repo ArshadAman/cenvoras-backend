@@ -513,17 +513,18 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         for item_data in processed_items:
             DeliveryChallanItem.objects.create(challan=challan, **item_data)
 
-        # Deduct stock for dispatched goods
-        target_warehouse = challan.warehouse
-        for item in challan.items.all():
-            eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
-            if item.product_id and eff_qty > 0:
-                Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
-                if item.batch and target_warehouse:
-                    sp, _ = StockPoint.objects.get_or_create(
-                        batch=item.batch, warehouse=target_warehouse, defaults={'quantity': 0}
-                    )
-                    StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
+        # Deduct stock for dispatched goods only if confirmed (not a draft)
+        if not is_draft:
+            target_warehouse = challan.warehouse
+            for item in challan.items.all():
+                eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
+                if item.product_id and eff_qty > 0:
+                    Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
+                    if item.batch and target_warehouse:
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch=item.batch, warehouse=target_warehouse, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
 
         return challan
 
@@ -535,7 +536,13 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         is_draft_promotion = (old_status == 'draft' or (instance.challan_number and instance.challan_number.startswith('D-DC-'))) and new_status not in ['draft', 'cancelled']
         if is_draft_promotion:
             from billing.sequence_service import allocate_next_number
-            instance.challan_number = allocate_next_number(instance.created_by, document_type='delivery_challan', is_draft=False)
+            raw_prefix = self.context['request'].data.get('prefix') if 'request' in self.context else None
+            instance.challan_number = allocate_next_number(
+                instance.created_by,
+                document_type='delivery_challan',
+                prefix=raw_prefix,
+                is_draft=False
+            )
             validated_data.pop('challan_number', None)
 
         for attr, value in validated_data.items():
@@ -545,6 +552,19 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         if items_data is not None:
             from billing.sync_service import DocumentSyncService
             DocumentSyncService.sync_document_items(instance, items_data, user=instance.created_by)
+
+        # Deduct stock if promoting from draft to confirmed/open
+        if is_draft_promotion:
+            target_warehouse = instance.warehouse
+            for item in instance.items.all():
+                eff_qty = (item.quantity or 0) + (item.free_quantity or 0)
+                if item.product_id and eff_qty > 0:
+                    Product.objects.filter(pk=item.product_id).update(stock=F('stock') - eff_qty)
+                    if item.batch and target_warehouse:
+                        sp, _ = StockPoint.objects.get_or_create(
+                            batch=item.batch, warehouse=target_warehouse, defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - eff_qty)
 
         return instance
 

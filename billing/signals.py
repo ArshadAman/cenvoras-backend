@@ -262,9 +262,35 @@ def update_balance_on_sale(sender, instance, created, **kwargs):
     pass
 
 @receiver(post_delete, sender=SalesInvoice)
-def revert_balance_on_sale_delete(sender, instance, **kwargs):
-    # Handled by SalesInvoiceItem deletions
-    pass
+def revert_balance_and_challans_on_sale_delete(sender, instance, **kwargs):
+    from billing.models_sidecar import DeliveryChallan, SalesOrder
+    from django.db.models import Q
+
+    raw_challan_numbers = [c.strip() for c in (instance.challan_number or '').split(',') if c.strip()]
+    challan_numbers = set()
+    for num in raw_challan_numbers:
+        challan_numbers.add(num)
+        clean = num.lstrip('#').strip()
+        challan_numbers.add(clean)
+        challan_numbers.add(f"#{clean}")
+
+    challans_to_revert = list(DeliveryChallan.objects.filter(
+        Q(converted_invoice=instance) |
+        (Q(challan_number__in=list(challan_numbers)) & Q(created_by=instance.created_by))
+    ).distinct())
+
+    if challans_to_revert:
+        DeliveryChallan.objects.filter(id__in=[c.id for c in challans_to_revert]).update(
+            is_billed=False,
+            status='open',
+            converted_invoice=None
+        )
+        so_ids = {c.sales_order_id for c in challans_to_revert if c.sales_order_id}
+        if so_ids:
+            from billing.sync_service import DocumentSyncService
+            sos = list(SalesOrder.objects.filter(id__in=so_ids, created_by=instance.created_by))
+            if sos:
+                DocumentSyncService.reconcile_sales_order_dispatched_state(sos, instance.created_by)
 
 @receiver(pre_save, sender=Payment)
 def track_payment_pre_save(sender, instance, **kwargs):

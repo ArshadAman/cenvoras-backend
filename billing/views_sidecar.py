@@ -76,12 +76,14 @@ def sales_order_detail(request, pk):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
     elif request.method == 'DELETE':
-        source_quotation = getattr(order, 'source_quotation', None)
-        if source_quotation:
-            source_quotation.status = 'pending'
-            source_quotation.save(update_fields=['status'])
-            source_quotation.items.update(converted_to_order=False)
-        order.delete()
+        with transaction.atomic():
+            DeliveryChallan.objects.filter(sales_order=order).update(sales_order=None)
+            source_quotation = getattr(order, 'source_quotation', None)
+            if source_quotation:
+                source_quotation.status = 'pending'
+                source_quotation.save(update_fields=['status'])
+                source_quotation.items.update(converted_to_order=False)
+            order.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -349,6 +351,13 @@ def delivery_challan_list_create(request):
         status_filter = request.GET.get('status', '').strip()
         ordering = request.GET.get('ordering', '-date').strip() or '-date'
 
+        # Auto-heal any orphaned challans where invoice was deleted/SET_NULL
+        DeliveryChallan.objects.filter(
+            created_by=tenant,
+            converted_invoice__isnull=True,
+            is_billed=True
+        ).update(is_billed=False, status='open')
+
         challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch')
         
         if search:
@@ -361,7 +370,9 @@ def delivery_challan_list_create(request):
             )
 
         if status_filter and status_filter != 'all':
-            if status_filter == 'open':
+            if status_filter == 'draft':
+                challans = challans.filter(status='draft')
+            elif status_filter == 'open':
                 challans = challans.filter(is_billed=False, status='open')
             elif status_filter in ['billed', 'invoiced']:
                 challans = challans.filter(Q(is_billed=True) | Q(status='billed'))
@@ -396,7 +407,8 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
     Batch reverts inventory stock and linked SalesOrder dispatched quantities.
     STRICTLY ZERO N+1 QUERIES: Uses in-memory aggregations and single-pass batch SQL.
     """
-    challan_ids = [c.id for c in challans]
+    # Exclude drafts since drafts never deducted stock or updated Sales Order dispatches
+    challan_ids = [c.id for c in challans if getattr(c, 'status', '') != 'draft']
     if not challan_ids:
         return
 
@@ -583,7 +595,8 @@ def delivery_challan_next_number(request):
     from billing.sequence_service import preview_next_number
 
     tenant = request.user.active_tenant
-    prefix = request.GET.get('prefix', 'DC-')
+    default_prefix = getattr(tenant, 'delivery_challan_prefix', 'DC-') or 'DC-'
+    prefix = request.GET.get('prefix') or default_prefix
     is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
 
     next_number, suffix = preview_next_number(

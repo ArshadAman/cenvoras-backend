@@ -284,17 +284,25 @@ class SalesInvoice(models.Model):
         from billing.models_sidecar import DeliveryChallan, SalesOrder
         from django.db.models import Q
 
-        challan_numbers = [c.strip() for c in (self.challan_number or '').split(',') if c.strip()]
-        challans_to_revert = DeliveryChallan.objects.filter(
+        raw_challan_numbers = [c.strip() for c in (self.challan_number or '').split(',') if c.strip()]
+        challan_numbers = set()
+        for num in raw_challan_numbers:
+            challan_numbers.add(num)
+            clean = num.lstrip('#').strip()
+            challan_numbers.add(clean)
+            challan_numbers.add(f"#{clean}")
+
+        challans_to_revert = list(DeliveryChallan.objects.filter(
             Q(converted_invoice=self) |
-            (Q(challan_number__in=challan_numbers) & Q(created_by=self.created_by))
-        )
-        reverted_challans = list(challans_to_revert)
-        challans_to_revert.update(
-            is_billed=False,
-            status='open',
-            converted_invoice=None
-        )
+            (Q(challan_number__in=list(challan_numbers)) & Q(created_by=self.created_by))
+        ).distinct())
+        reverted_challans = challans_to_revert
+        if reverted_challans:
+            DeliveryChallan.objects.filter(id__in=[c.id for c in reverted_challans]).update(
+                is_billed=False,
+                status='open',
+                converted_invoice=None
+            )
 
         # If any reverted challan or invoice was linked to a sales order, reconcile order stage & quantities
         so_ids = {c.sales_order_id for c in reverted_challans if c.sales_order_id}

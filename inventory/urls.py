@@ -10,6 +10,7 @@ urlpatterns = [
     path('products/bulk-delete/', views.bulk_delete_products, name='product-bulk-delete'),
     path('products/template/csv/', views.download_product_csv_template, name='product-csv-template'),
     path('products/bulk-upload/csv/', views.bulk_upload_products, name='product-bulk-upload-csv'),
+    path('products/csv-jobs/<str:task_id>/', views.inventory_csv_job_status, name='inventory-csv-job-status'),
     path('warehouses/', views.WarehouseListCreateView.as_view(), name='warehouse-list-create'),
     path('warehouses/<uuid:pk>/', views.WarehouseDetailView.as_view(), name='warehouse-detail'),
     path('stock-points/', views.stock_point_list, name='stock-point-list'),

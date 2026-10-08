@@ -43,50 +43,87 @@ def _extract_numeric(value):
 def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
     """
     High-performance, memory-efficient bulk CSV inventory importer.
-    Supports streaming file paths or raw strings with per-row savepoints,
-    bulk in-memory lookup cache to prevent N+1 queries, and real-time Celery progress.
+    Supports Redis cache payloads (cross-container Docker safe), streaming file paths,
+    or raw strings with per-row savepoints, bulk in-memory lookup cache to eliminate
+    N+1 queries, and real-time Celery progress updates.
     """
     user = User.objects.get(id=user_id)
     tenant = getattr(user, 'active_tenant', user)
 
     is_temp_file = False
-    raw_content = ""
-    if os.path.exists(file_path_or_content):
+    raw_content = None
+
+    # 1. Fetch from Redis Cache (handles cross-container Docker environments)
+    if isinstance(file_path_or_content, str) and file_path_or_content.startswith('bulk_upload_csv_payload_'):
+        try:
+            from django.core.cache import cache
+            cached = cache.get(file_path_or_content)
+            if cached:
+                raw_content = cached
+                try:
+                    cache.delete(file_path_or_content)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("Failed to retrieve CSV from Redis cache key %s: %s", file_path_or_content, e)
+
+    # 2. Check local filesystem (if shared volume or local development)
+    if raw_content is None and isinstance(file_path_or_content, str) and len(file_path_or_content) < 1024 and os.path.exists(file_path_or_content):
         is_temp_file = True
         try:
             with open(file_path_or_content, 'r', encoding='utf-8', errors='replace') as f:
                 raw_content = f.read()
         except Exception as e:
-            logger.error("Failed to read CSV tempfile %s: %s", file_path_or_content, e)
-            return {
-                "created_count": 0,
-                "updated_count": 0,
-                "skipped_count": 0,
-                "failed_count": 1,
-                "errors": [{"row": 0, "errors": {"file": [f"Unable to read CSV file: {str(e)}"]}}]
-            }
-    else:
+            logger.warning("Failed to read CSV tempfile %s: %s", file_path_or_content, e)
+
+    # 3. Direct CSV string payload
+    if raw_content is None:
         raw_content = file_path_or_content
+
+    # Handle completely empty content
+    if not raw_content or not str(raw_content).strip():
+        return {
+            "created_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "total_rows": 0,
+            "errors": [{"row": 0, "errors": {"file": ["CSV content is empty."]}}]
+        }
+
+    # Safety check: if raw_content looks like an unresolvable file path (single line without commas)
+    if "\n" not in raw_content and (raw_content.startswith("/") or "\\" in raw_content) and "," not in raw_content:
+        logger.error("CSV raw_content appears to be an unresolvable file path across containers: %s", raw_content)
+        return {
+            "created_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "failed_count": 1,
+            "total_rows": 0,
+            "errors": [{"row": 0, "errors": {"file": [f"File could not be accessed across containers: {raw_content}"]}}]
+        }
 
     try:
         def normalize_key(key):
-            return (key or '').strip().lower().replace(' ', '_').replace('-', '_')
+            cleaned = (key or '').strip().lstrip('\ufeff').lower()
+            return cleaned.replace(' ', '_').replace('-', '_')
 
         header_aliases = {
             'item_code': ['item_code', 'itemcode', 'item_id', 'itemid', 'sku', 'product_code', 'product_id', 'code'],
-            'name': ['name', 'product_name', 'item_name', 'product', 'item'],
-            'unit': ['unit', 'uom', 'unit_of_measure', 'measurement_unit'],
-            'cost_price': ['cost_price', 'price', 'purchase_price', 'cost'],
-            'sale_price': ['sale_price', 'sales_price', 'selling_price', 'saleprice', 'salesprice'],
-            'hsn_sac_code': ['hsn_sac_code', 'hsn_code', 'hsn'],
-            'tax': ['tax', 'gst', 'gst_rate', 'tax_rate'],
-            'low_stock_alert': ['low_stock_alert', 'min_stock_level', 'reorder_level'],
-            'stock': ['stock', 'opening_stock', 'current_stock'],
-            'secondary_unit': ['secondary_unit', 'secondaryunit'],
-            'conversion_factor': ['conversion_factor', 'conversionfactor'],
+            'name': ['name', 'product_name', 'item_name', 'product', 'item', 'title', 'description_name'],
+            'unit': ['unit', 'uom', 'unit_of_measure', 'measurement_unit', 'unit_name'],
+            'cost_price': ['cost_price', 'purchase_price', 'cost', 'buying_price', 'purchase_rate'],
+            'sale_price': ['sale_price', 'sales_price', 'selling_price', 'saleprice', 'salesprice', 'mrp', 'rate', 'price', 'retail_price'],
+            'hsn_sac_code': ['hsn_sac_code', 'hsn_code', 'hsn', 'sac', 'hsncode', 'sac_code'],
+            'tax': ['tax', 'gst', 'gst_rate', 'tax_rate', 'gst_%'],
+            'low_stock_alert': ['low_stock_alert', 'min_stock_level', 'reorder_level', 'min_stock'],
+            'stock': ['stock', 'opening_stock', 'current_stock', 'qty', 'quantity', 'balance'],
+            'secondary_unit': ['secondary_unit', 'secondaryunit', 'alt_unit'],
+            'conversion_factor': ['conversion_factor', 'conversionfactor', 'factor'],
             'warranty_months': ['warranty_months', 'warranty', 'warranty_month'],
-            'manufacturer': ['manufacturer', 'mfg', 'mfg_by', 'brand', 'company', 'make'],
+            'manufacturer': ['manufacturer', 'mfg', 'mfg_by', 'brand', 'company', 'make', 'producer'],
             'internal_reference': ['internal_reference', 'internal_ref', 'internalref', 'reference', 'ref_no', 'ref'],
+            'description': ['description', 'desc', 'notes', 'details', 'remarks', 'item_description'],
         }
 
         expected_fields = [
@@ -96,7 +133,7 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
         ]
         optional_nullable_fields = {
             'item_code', 'hsn_sac_code', 'description', 'manufacturer',
-            'internal_reference', 'secondary_unit', 'sale_price'
+            'internal_reference', 'secondary_unit'
         }
         optional_with_default_fields = {'unit'}
         integer_fields = {'stock', 'conversion_factor', 'low_stock_alert', 'warranty_months'}
@@ -115,14 +152,35 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
 
         # Count total rows for percentage calculation
         raw_lines = [l for l in raw_content.splitlines() if l.strip()]
+        if not raw_lines:
+            return {
+                "created_count": 0,
+                "updated_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "total_rows": 0,
+                "errors": []
+            }
         total_rows = max(0, len(raw_lines) - 1)
 
-        reader = csv.DictReader(StringIO(raw_content))
+        # Detect delimiter (comma vs semicolon vs tab)
+        delimiter = ','
+        first_line = raw_lines[0]
+        if ';' in first_line and ',' not in first_line:
+            delimiter = ';'
+        elif '\t' in first_line and ',' not in first_line:
+            delimiter = '\t'
 
-        # Bulk pre-fetch existing item codes for tenant into O(1) dictionary to eliminate N+1 queries
-        existing_products_map = {}
-        for p in Product.objects.filter(created_by=tenant).exclude(item_code__isnull=True).exclude(item_code=''):
-            existing_products_map[p.item_code.strip().lower()] = p
+        reader = csv.DictReader(StringIO(raw_content), delimiter=delimiter)
+
+        # Bulk pre-fetch existing items for tenant into O(1) maps by code and by name
+        existing_by_code = {}
+        existing_by_name = {}
+        for p in Product.objects.filter(created_by=tenant):
+            if p.item_code and p.item_code.strip():
+                existing_by_code[p.item_code.strip().lower()] = p
+            if p.name and p.name.strip():
+                existing_by_name[p.name.strip().lower()] = p
 
         created_count = 0
         updated_count = 0
@@ -205,16 +263,34 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
 
             payload['name'] = product_name
 
-            # Check required sale_price
+            # Flexible pricing defaults:
+            cost_price = payload.get('cost_price')
             sale_price = payload.get('sale_price')
-            if sale_price in (None, ''):
-                errors.append({'row': index, 'errors': {'sale_price': ['Sale price is required.']}})
-                continue
 
-            # Check if this product already exists by user-defined item_code using O(1) in-memory map
+            if sale_price in (None, ''):
+                sale_price = cost_price if cost_price not in (None, '') else 0
+            payload['sale_price'] = sale_price
+
+            if cost_price in (None, ''):
+                cost_price = sale_price if sale_price not in (None, '') else 0
+            payload['cost_price'] = cost_price
+
+            if payload.get('unit') in (None, ''):
+                payload['unit'] = 'pcs'
+
+            if payload.get('stock') is None:
+                payload['stock'] = 0
+
+            if payload.get('tax') is None:
+                payload['tax'] = 0
+
+            # Match existing product: first by user-defined item_code, then by name
             incoming_item_code = payload.get('item_code')
             normalized_item_code = str(incoming_item_code).strip().lower() if incoming_item_code else None
-            existing_product = existing_products_map.get(normalized_item_code) if normalized_item_code else None
+            existing_product = existing_by_code.get(normalized_item_code) if normalized_item_code else None
+
+            if not existing_product and product_name:
+                existing_product = existing_by_name.get(product_name.lower())
 
             # Resilient isolated savepoint per row so a bad row never aborts previously created rows
             try:
@@ -286,8 +362,8 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                             updated_count += 1
                     else:
                         # Map cost_price to model field 'price'
-                        cost_price = payload.pop('cost_price', None)
-                        payload['price'] = cost_price if cost_price is not None else 0
+                        cost_price_val = payload.pop('cost_price', 0)
+                        payload['price'] = cost_price_val if cost_price_val is not None else 0
 
                         # Create Product directly with minimum overhead
                         new_product = Product.objects.create(
@@ -298,7 +374,8 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                         created_count += 1
 
                         if normalized_item_code:
-                            existing_products_map[normalized_item_code] = new_product
+                            existing_by_code[normalized_item_code] = new_product
+                        existing_by_name[product_name.lower()] = new_product
             except Exception as exc:
                 errors.append({'row': index, 'errors': {'database': [str(exc)]}})
                 logger.warning('Error saving row %s in bulk upload: %s', index, exc)

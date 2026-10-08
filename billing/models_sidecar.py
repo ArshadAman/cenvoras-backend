@@ -155,6 +155,9 @@ class SalesOrder(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def delete(self, *args, **kwargs):
+        from billing.models_sidecar import DeliveryChallan
+        # Decouple any linked delivery challans so sales order deletion is never blocked
+        DeliveryChallan.objects.filter(sales_order=self).update(sales_order=None)
         if self.source_quotation:
             q = self.source_quotation
             q.status = 'pending'

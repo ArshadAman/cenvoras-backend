@@ -35,7 +35,7 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
     elif document_type == 'debit_note':
         base = (prefix or 'DN-').strip().upper()
     elif document_type == 'delivery_challan':
-        base = (prefix or 'DC-').strip().upper()
+        base = (prefix or getattr(tenant, 'delivery_challan_prefix', 'DC-') or 'DC-').strip().upper()
     elif document_type == 'sales_order':
         base = (prefix or 'SO-').strip().upper()
     elif document_type == 'purchase_bill':

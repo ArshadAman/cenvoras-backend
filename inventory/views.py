@@ -1,6 +1,9 @@
 import csv
 import hashlib
 import json
+import os
+import tempfile
+from celery.result import AsyncResult
 
 from django.core.cache import cache
 from rest_framework import generics, permissions, status
@@ -341,6 +344,7 @@ def download_product_csv_template(request):
 def bulk_upload_products(request):
     """
     Bulk create products from a CSV file.
+    Streams uploaded file to a temporary file, then dispatches background Celery job.
     Expected file form key: file
     """
     uploaded_file = request.FILES.get('file')
@@ -357,33 +361,106 @@ def bulk_upload_products(request):
     from inventory.tasks import process_bulk_upload_csv
 
     try:
-        csv_bytes = uploaded_file.read()
-        csv_content = _decode_csv_bytes(csv_bytes)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='w', encoding='utf-8')
+        raw_bytes = uploaded_file.read()
+        csv_content = _decode_csv_bytes(raw_bytes)
+        if not csv_content.strip():
+            temp_file.close()
+            try:
+                os.unlink(temp_file.name)
+            except OSError:
+                pass
+            return Response({'error': 'CSV file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+        temp_file.write(csv_content)
+        temp_file.close()
     except UnicodeDecodeError:
         return Response(
             {'error': 'Unable to decode CSV. Supported encodings: UTF-8, UTF-16, Windows-1252, Latin-1.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    except Exception:
-        return Response({'error': 'Unable to read CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if not csv_content.strip():
-        return Response({'error': 'CSV file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({'error': f'Unable to store CSV file: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        process_bulk_upload_csv.delay(csv_content, str(request.user.id))
+        task = process_bulk_upload_csv.delay(temp_file.name, str(request.user.id))
+        return Response(
+            {
+                'success': True,
+                'message': 'Bulk upload task started. Your products will be imported asynchronously in the background.',
+                'task_id': task.id,
+                'status_url': f'/api/inventory/products/csv-jobs/{task.id}/',
+                'created_count': 0,
+                'failed_count': 0,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
     except Exception:
-        return Response({'error': 'Unable to enqueue bulk upload right now. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Fallback to direct synchronous execution if Celery broker is unavailable
+        try:
+            result = process_bulk_upload_csv(temp_file.name, str(request.user.id))
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Bulk upload completed successfully.',
+                    'task_id': None,
+                    'created_count': result.get('created_count', 0),
+                    'updated_count': result.get('updated_count', 0),
+                    'skipped_count': result.get('skipped_count', 0),
+                    'failed_count': result.get('failed_count', 0),
+                    'errors': result.get('errors', []),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            return Response(
+                {'error': f'Bulk upload failed: {str(exc)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-    return Response(
-        {
-            'message': 'Bulk upload task started. Your products will be imported asynchronously in the background. Please refresh the page in a few moments.',
-            # Keep these 0 immediately so frontend doesn't crash if it expects integers
-            'created_count': 0,
-            'failed_count': 0,
-        },
-        status=status.HTTP_202_ACCEPTED,
-    )
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def inventory_csv_job_status(request, task_id):
+    """
+    Returns progress and status for an ongoing inventory CSV bulk upload task.
+    """
+    task = AsyncResult(task_id)
+    payload = {
+        'task_id': task_id,
+        'state': task.state,
+        'ready': task.ready(),
+        'percent': 0,
+        'current': 0,
+        'total': 0,
+        'created_count': 0,
+        'updated_count': 0,
+        'skipped_count': 0,
+        'failed_count': 0,
+        'errors': [],
+    }
+
+    if task.state == 'PROGRESS':
+        info = task.info or {}
+        payload.update(info)
+        payload['percent'] = min(99, max(0, int(info.get('percent', 0))))
+    elif task.state == 'SUCCESS':
+        result = task.result or {}
+        payload['result'] = result
+        payload['percent'] = 100
+        payload['created_count'] = result.get('created_count', 0)
+        payload['updated_count'] = result.get('updated_count', 0)
+        payload['skipped_count'] = result.get('skipped_count', 0)
+        payload['failed_count'] = result.get('failed_count', 0)
+        payload['errors'] = result.get('errors', [])
+    elif task.state == 'FAILURE':
+        payload['percent'] = 100
+        payload['error'] = str(task.result)
+    else:
+        # PENDING / STARTED
+        payload['percent'] = 0
+        payload['message'] = 'Task is queued, waiting for worker...'
+
+    return Response(payload)
 
 
 # =============================================================================

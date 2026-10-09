@@ -22,7 +22,7 @@ def sales_order_list_create(request):
     tenant = request.user.active_tenant
     if request.method == 'GET':
         search = request.GET.get('search', '')
-        orders = SalesOrder.objects.filter(created_by=tenant).select_related('customer').prefetch_related('items__product')
+        orders = SalesOrder.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch')
         
         if search:
             orders = orders.filter(
@@ -52,7 +52,7 @@ def sales_order_list_create(request):
 def sales_order_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+        order = SalesOrder.objects.select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
     except SalesOrder.DoesNotExist:
         return Response({"success": False, "message": "Order not found"}, status=404)
         
@@ -358,7 +358,7 @@ def delivery_challan_list_create(request):
             is_billed=True
         ).update(is_billed=False, status='open')
 
-        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch')
+        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch')
         
         if search:
             challans = challans.filter(
@@ -524,7 +524,7 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
 def delivery_challan_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'converted_invoice', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'converted_invoice', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
     except DeliveryChallan.DoesNotExist:
         return Response({"message": "Delivery Challan not found"}, status=status.HTTP_404_NOT_FOUND)
         
@@ -770,7 +770,7 @@ def convert_order_to_challan(request, pk):
 def convert_challan_to_invoice(request, pk):
     tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'sales_order').prefetch_related('items__product', 'items__batch').get(pk=pk, created_by=tenant)
+        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
     except DeliveryChallan.DoesNotExist:
         return Response({"message": "Delivery Challan not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1115,7 +1115,7 @@ def delivery_challan_pdf_download(request, pk):
 
     tenant = request.user.active_tenant
     try:
-        challan = DeliveryChallan.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(
+        challan = DeliveryChallan.objects.select_related('customer', 'warehouse', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(
             Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
         )
     except DeliveryChallan.DoesNotExist:
@@ -1207,7 +1207,7 @@ def quotation_list_create(request):
         search = request.GET.get('search', '').strip()
         status_filter = request.GET.get('status', '').strip()
 
-        qs = Quotation.objects.filter(created_by=tenant).prefetch_related('items__product').order_by('-quotation_date', '-created_at')
+        qs = Quotation.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').order_by('-quotation_date', '-created_at')
 
         if search:
             qs = qs.filter(Q(quotation_number__icontains=search) | Q(customer_name__icontains=search))
@@ -1235,7 +1235,7 @@ def quotation_list_create(request):
 def quotation_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        quotation = Quotation.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+        quotation = Quotation.objects.select_related('customer', 'warehouse', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
     except Quotation.DoesNotExist:
         return Response({'message': 'Quotation not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1423,7 +1423,7 @@ def quotation_pdf_download(request, pk):
 
     tenant = request.user.active_tenant
     try:
-        quotation = Quotation.objects.select_related('customer').prefetch_related('items__product').get(
+        quotation = Quotation.objects.select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(
             Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
         )
     except Quotation.DoesNotExist:
@@ -1487,7 +1487,7 @@ def sales_order_pdf_download(request, pk):
 
     tenant = request.user.active_tenant
     try:
-        order = SalesOrder.objects.select_related('customer').prefetch_related('items__product').get(
+        order = SalesOrder.objects.select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(
             Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
         )
     except SalesOrder.DoesNotExist:

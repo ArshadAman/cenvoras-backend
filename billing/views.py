@@ -267,8 +267,8 @@ def sales_invoice_list_create(request):
                 SalesInvoice.objects.filter(
                     Q(created_by=tenant) | Q(created_by__parent=tenant)
                 )
-                .select_related('customer')
-                .prefetch_related('items__product')
+                .select_related('customer', 'warehouse', 'created_by', 'meta')
+                .prefetch_related('items__product', 'items__product__meta', 'items__batch')
                 .order_by('-invoice_date', '-created_at')
             )
             customer_id = request.GET.get('customer')
@@ -343,7 +343,7 @@ def sales_invoice_list_create(request):
 def sales_invoice_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        invoice = SalesInvoice.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+        invoice = SalesInvoice.objects.select_related('customer', 'warehouse', 'created_by', 'meta').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
     except SalesInvoice.DoesNotExist:
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -359,7 +359,7 @@ def sales_invoice_pdf_download(request, pk):
 
     tenant = request.user.active_tenant
     try:
-        invoice = SalesInvoice.objects.select_related('customer', 'warehouse').prefetch_related('items__product').get(
+        invoice = SalesInvoice.objects.select_related('customer', 'warehouse', 'created_by', 'meta').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(
             Q(pk=pk) & (Q(created_by=tenant) | Q(created_by__parent=tenant))
         )
     except SalesInvoice.DoesNotExist:

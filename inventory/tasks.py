@@ -386,6 +386,8 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
             from django.core.cache import cache
             cache.delete(tenant_cache_key('inventory', tenant.id, 'expiry-report', 'days-90'))
             cache.delete(tenant_cache_key('inventory', tenant.id, 'expiry-summary', 'days-90'))
+            from inventory.views import invalidate_tenant_catalog
+            invalidate_tenant_catalog(tenant.id)
         except Exception:
             pass
 

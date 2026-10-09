@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import tempfile
+import urllib.parse
 from celery.result import AsyncResult
 
 from django.core.cache import cache
@@ -63,6 +64,37 @@ def _normalize_idempotency_payload(payload):
 
     return json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
 
+
+def get_tenant_catalog_version(tenant_id):
+    """
+    Returns the integer cache version counter for a tenant.
+    Provides O(1) instant cache invalidation without key scanning.
+    """
+    if not tenant_id:
+        return 1
+    version_key = f'inventory:tenant:{tenant_id}:catalog_version'
+    ver = cache.get(version_key)
+    if ver is None:
+        ver = 1
+        cache.set(version_key, ver, timeout=86400 * 30)
+    return ver
+
+
+def invalidate_tenant_catalog(tenant_id):
+    """
+    Increments the tenant's catalog cache version.
+    Instantly invalidates all cached searches and catalog lists for this tenant
+    with mathematical zero impact on any other tenant.
+    """
+    if not tenant_id:
+        return
+    version_key = f'inventory:tenant:{tenant_id}:catalog_version'
+    try:
+        cache.incr(version_key)
+    except Exception:
+        cache.set(version_key, int(timezone.now().timestamp()), timeout=86400 * 30)
+
+
 class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -70,6 +102,29 @@ class ProductListCreateView(generics.ListCreateAPIView):
     search_fields = ['name', 'item_code', 'internal_reference', 'description', 'hsn_sac_code', 'manufacturer']
     idempotency_ttl = 600
     idempotency_lock_ttl = 300
+
+    def list(self, request, *args, **kwargs):
+        tenant_id = getattr(request.user.active_tenant, 'id', request.user.id)
+        if not tenant_id:
+            return super().list(request, *args, **kwargs)
+
+        # Build deterministic query key from request params
+        query_dict = request.query_params.dict()
+        sorted_params = sorted(query_dict.items())
+        params_str = urllib.parse.urlencode(sorted_params)
+
+        version = get_tenant_catalog_version(tenant_id)
+        cache_key = f'inventory:tenant:{tenant_id}:v{version}:products_list:{hashlib.sha256(params_str.encode("utf-8")).hexdigest()}'
+
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            return Response(cached_result)
+
+        response = super().list(request, *args, **kwargs)
+        if response.status_code == 200:
+            cache.set(cache_key, response.data, timeout=300)
+
+        return response
 
     def get_queryset(self):
         qs = Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant)
@@ -143,7 +198,10 @@ class ProductListCreateView(generics.ListCreateAPIView):
             cache.delete(lock_key)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user.active_tenant)
+        tenant = self.request.user.active_tenant
+        serializer.save(created_by=tenant)
+        tenant_id = getattr(tenant, 'id', self.request.user.id)
+        invalidate_tenant_catalog(tenant_id)
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductSerializer
@@ -151,20 +209,23 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False): return Product.objects.none()
-        return Product.objects.filter(created_by=self.request.user.active_tenant)
+        return Product.objects.select_related('meta').filter(created_by=self.request.user.active_tenant)
 
     def destroy(self, request, *args, **kwargs):
         from django.db.models.deletion import ProtectedError
         from django.db import transaction
         instance = self.get_object()
+        tenant_id = getattr(request.user.active_tenant, 'id', request.user.id)
         try:
             with transaction.atomic():
                 self.perform_destroy(instance)
+                invalidate_tenant_catalog(tenant_id)
                 return Response(status=status.HTTP_204_NO_CONTENT)
         except ProtectedError:
             # Gracefully soft-delete/archive if linked to historical records
             instance.is_active = False
             instance.save(update_fields=['is_active'])
+            invalidate_tenant_catalog(tenant_id)
             return Response(
                 {
                     "success": True,
@@ -175,6 +236,16 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+    def perform_update(self, serializer):
+        serializer.save()
+        tenant_id = getattr(self.request.user.active_tenant, 'id', self.request.user.id)
+        invalidate_tenant_catalog(tenant_id)
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        tenant_id = getattr(self.request.user.active_tenant, 'id', self.request.user.id)
+        invalidate_tenant_catalog(tenant_id)
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -199,9 +270,8 @@ class ProductBatchListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        # Corrected `request.user` to `self.request.user` for class-based view
-        # Removed `perform_create` as it's a ListAPIView
-        return ProductBatch.objects.select_related('product').filter(product__created_by=self.request.user.active_tenant.active_tenant)
+        tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        return ProductBatch.objects.select_related('product', 'product__meta').filter(product__created_by=tenant)
 
 class WarehouseListCreateView(generics.ListCreateAPIView):
     serializer_class = WarehouseSerializer

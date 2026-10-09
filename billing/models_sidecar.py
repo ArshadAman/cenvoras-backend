@@ -43,6 +43,13 @@ class PartyMeta(models.Model):
     # Contact
     whatsapp_number = models.CharField(max_length=20, blank=True, null=True)
     
+    # Customer section format preferences
+    preview_templates = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Customer-specific preview template format per section, e.g. {'sales_invoice': 'classic', 'quotation': 'service'}"
+    )
+    
     def __str__(self):
         return f"Meta for {self.customer.name}"
 
@@ -79,6 +86,7 @@ class TransactionMeta(models.Model):
     
     # Selected bank account for this bill
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this invoice")
+    template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this invoice")
 
     def __str__(self):
         return f"Meta for {self.invoice.invoice_number}"
@@ -152,6 +160,7 @@ class SalesOrder(models.Model):
         help_text="Original quotation this order was converted from"
     )
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this order")
+    template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this order")
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -238,6 +247,7 @@ class DeliveryChallan(models.Model):
     )
     notes = models.TextField(blank=True, null=True)
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this challan")
+    template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this challan")
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -324,6 +334,7 @@ class Quotation(models.Model):
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this quotation")
+    template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this quotation")
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

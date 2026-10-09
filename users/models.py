@@ -22,9 +22,9 @@ class User(AbstractUser):
     # Core signup fields
     phone = models.CharField(max_length=15, null=True, blank=True, help_text="Phone number for login recovery and communication")
     business_name = models.CharField(max_length=100, blank=True, null=True, help_text="Business/Shop name (appears on invoices)")
-    invoice_prefix = models.CharField(max_length=20, default='INV-', help_text="Default invoice prefix for this user")
-    quotation_prefix = models.CharField(max_length=20, default='QT-', help_text="Default quotation prefix for this user")
-    delivery_challan_prefix = models.CharField(max_length=20, default='DC-', help_text="Default delivery challan prefix for this user")
+    invoice_prefix = models.CharField(max_length=20, default='INV', help_text="Default invoice prefix for this user")
+    quotation_prefix = models.CharField(max_length=20, default='QT', help_text="Default quotation prefix for this user")
+    delivery_challan_prefix = models.CharField(max_length=20, default='DC', help_text="Default delivery challan prefix for this user")
     
     # Regional Settings
     country = models.CharField(max_length=2, choices=CountryChoices.choices, default=CountryChoices.IN, help_text="Active country for the shop")
@@ -48,6 +48,8 @@ class User(AbstractUser):
     bank_branch = models.CharField(max_length=100, blank=True, null=True, help_text="Bank branch name")
     bank_upi_id = models.CharField(max_length=50, blank=True, null=True, help_text="UPI ID / VPA for payments")
     bank_qr_code = models.TextField(blank=True, null=True, help_text="Base64 encoded or URL of payment QR code")
+    bank_accounts = models.JSONField(default=list, blank=True, help_text="Up to 3 bank accounts for invoice billing")
+    default_bank_account_sections = models.JSONField(default=dict, blank=True, help_text="Default bank account ID per section")
     
     state = models.CharField(
         max_length=50, 

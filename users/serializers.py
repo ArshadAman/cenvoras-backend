@@ -151,13 +151,31 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
             'profile_completed', 'can_generate_gst_invoice', 'is_trial_active',
             'date_joined', 'last_login_at', 'role'
         )
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Synthesize Account 1 from legacy fields if bank_accounts is empty
+        if not ret.get('bank_accounts') and (instance.bank_name or instance.bank_account_number):
+            ret['bank_accounts'] = [{
+                'id': 'bank_acc_1',
+                'account_name': 'Primary Account',
+                'bank_name': instance.bank_name or '',
+                'account_number': instance.bank_account_number or '',
+                'ifsc_code': instance.bank_ifsc_code or '',
+                'account_holder': instance.business_name or '',
+                'branch': instance.bank_branch or '',
+                'upi_id': instance.bank_upi_id or '',
+                'qr_code': instance.bank_qr_code or '',
+                'is_default': True,
+            }]
+        return ret
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     """Comprehensive profile update serializer"""
@@ -174,7 +192,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections'
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -195,19 +213,53 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'bank_branch': {'required': False, 'allow_blank': True, 'allow_null': True},
             'bank_upi_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'bank_accounts': {'required': False},
+            'default_bank_account_sections': {'required': False},
         }
 
     def validate_invoice_prefix(self, value):
         normalized = str(value or '').strip().upper()
-        return normalized or 'INV-'
+        return normalized or 'INV'
 
     def validate_quotation_prefix(self, value):
         normalized = str(value or '').strip().upper()
-        return normalized or 'QT-'
+        return normalized or 'QT'
 
     def validate_delivery_challan_prefix(self, value):
         normalized = str(value or '').strip().upper()
-        return normalized or 'DC-'
+        return normalized or 'DC'
+
+    def validate_bank_accounts(self, value):
+        if not value:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("bank_accounts must be a list of accounts.")
+        if len(value) > 3:
+            raise serializers.ValidationError("A maximum of 3 bank accounts can be configured.")
+
+        cleaned = []
+        for idx, acc in enumerate(value):
+            if not isinstance(acc, dict):
+                continue
+            cleaned_acc = {
+                'id': str(acc.get('id') or f'bank_acc_{idx+1}'),
+                'account_name': str(acc.get('account_name') or f'Account {idx+1}').strip(),
+                'bank_name': str(acc.get('bank_name') or '').strip(),
+                'account_number': str(acc.get('account_number') or '').strip(),
+                'ifsc_code': str(acc.get('ifsc_code') or '').strip().upper(),
+                'account_holder': str(acc.get('account_holder') or '').strip(),
+                'branch': str(acc.get('branch') or '').strip(),
+                'upi_id': str(acc.get('upi_id') or '').strip(),
+                'qr_code': str(acc.get('qr_code') or '').strip(),
+                'is_default': bool(acc.get('is_default', False if idx > 0 else True)),
+            }
+            cleaned.append(cleaned_acc)
+
+        # Ensure at least one account is marked default if list is non-empty
+        if cleaned and not any(a.get('is_default') for a in cleaned):
+            cleaned[0]['is_default'] = True
+
+        return cleaned
     
     def validate(self, attrs):
         user = self.instance
@@ -259,7 +311,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         bank_fields_changed = any(
             field in attrs and (attrs[field] or '') != (getattr(user, field, '') or '')
             for field in bank_fields
-        )
+        ) or ('bank_accounts' in attrs and attrs['bank_accounts'] != (getattr(user, 'bank_accounts', []) or []))
         if bank_fields_changed:
             if not current_password:
                 raise serializers.ValidationError({
@@ -298,6 +350,25 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         
         # Update regular fields
         instance = super().update(instance, validated_data)
+
+        # Synchronize default/first bank account to legacy fields for 100% backward compatibility
+        bank_accounts = validated_data.get('bank_accounts')
+        if bank_accounts is not None:
+            default_acc = next((a for a in bank_accounts if a.get('is_default')), None)
+            if not default_acc and bank_accounts:
+                default_acc = bank_accounts[0]
+            if default_acc:
+                instance.bank_name = default_acc.get('bank_name', '')
+                instance.bank_account_number = default_acc.get('account_number', '')
+                instance.bank_ifsc_code = default_acc.get('ifsc_code', '')
+                instance.bank_branch = default_acc.get('branch', '')
+                instance.bank_upi_id = default_acc.get('upi_id', '')
+                if default_acc.get('qr_code'):
+                    instance.bank_qr_code = default_acc.get('qr_code')
+                instance.save(update_fields=[
+                    'bank_name', 'bank_account_number', 'bank_ifsc_code',
+                    'bank_branch', 'bank_upi_id', 'bank_qr_code'
+                ])
         
         # Handle password change
         if new_password:

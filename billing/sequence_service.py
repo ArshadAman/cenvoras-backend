@@ -27,24 +27,22 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
         return DRAFT_PREFIX_MAP.get(document_type, 'DFT-')
 
     if document_type == 'sales_invoice':
-        base = (prefix or getattr(tenant, 'invoice_prefix', 'INV-') or 'INV-').strip().upper()
+        base = (prefix or getattr(tenant, 'invoice_prefix', 'INV') or 'INV').strip().upper()
     elif document_type == 'quotation':
-        base = (prefix or getattr(tenant, 'quotation_prefix', 'QT-') or 'QT-').strip().upper()
+        base = (prefix or getattr(tenant, 'quotation_prefix', 'QT') or 'QT').strip().upper()
     elif document_type == 'credit_note':
-        base = (prefix or 'CN-').strip().upper()
+        base = (prefix or 'CN').strip().upper()
     elif document_type == 'debit_note':
-        base = (prefix or 'DN-').strip().upper()
+        base = (prefix or 'DN').strip().upper()
     elif document_type == 'delivery_challan':
-        base = (prefix or getattr(tenant, 'delivery_challan_prefix', 'DC-') or 'DC-').strip().upper()
+        base = (prefix or getattr(tenant, 'delivery_challan_prefix', 'DC') or 'DC').strip().upper()
     elif document_type == 'sales_order':
-        base = (prefix or 'SO-').strip().upper()
+        base = (prefix or 'SO').strip().upper()
     elif document_type == 'purchase_bill':
-        base = (prefix or 'BILL-').strip().upper()
+        base = (prefix or 'BILL').strip().upper()
     else:
-        base = (prefix or 'DOC-').strip().upper()
+        base = (prefix or 'DOC').strip().upper()
 
-    if not base.endswith('-'):
-        base = f"{base}-"
     return base
 
 

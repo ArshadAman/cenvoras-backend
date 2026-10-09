@@ -407,6 +407,14 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         ret = super().to_representation(instance)
         ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
         ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
+        ret['manufacturer'] = getattr(instance.product, 'manufacturer', '') or '' if instance.product else ''
+        ret['internal_reference'] = getattr(instance.product, 'internal_reference', '') or '' if instance.product else ''
+        ret['storage_condition'] = ''
+        try:
+            if instance.product and hasattr(instance.product, 'meta') and instance.product.meta:
+                ret['storage_condition'] = instance.product.meta.storage_condition or ''
+        except Exception:
+            pass
         return ret
 
     def get_product_detail(self, obj):
@@ -419,10 +427,14 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
             "hsn_sac_code": obj.product.hsn_sac_code,
             "unit": obj.product.unit,
             "manufacturer": getattr(obj.product, 'manufacturer', '') or '',
+            "internal_reference": getattr(obj.product, 'internal_reference', '') or '',
         }
-        if hasattr(obj.product, 'meta'):
-            detail['storage_condition'] = obj.product.meta.storage_condition
-            detail['temperature'] = obj.product.meta.temperature
+        try:
+            if hasattr(obj.product, 'meta') and obj.product.meta:
+                detail['storage_condition'] = obj.product.meta.storage_condition or ''
+                detail['temperature'] = obj.product.meta.temperature or ''
+        except Exception:
+            pass
         return detail
 
     def to_internal_value(self, data):
@@ -483,6 +495,10 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     if field in data and data[field] is not None:
                         setattr(product, field, data[field])
                         updated = True
+                for field in ['manufacturer', 'internal_reference']:
+                    if field in data and data[field] is not None and str(data[field]).strip():
+                        setattr(product, field, str(data[field]).strip())
+                        updated = True
                 # For sales invoice, price field is sale_price, not cost price
                 if 'price' in data and data['price'] is not None:
                     product.sale_price = data['price']
@@ -494,6 +510,16 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 if updated:
                     print("DEBUG SalesInvoiceItemSerializer: Updating product fields")
                     product.save()
+
+                storage_cond = data.get('storage_condition')
+                if storage_cond and str(storage_cond).strip():
+                    try:
+                        from inventory.models_sidecar import ProductMeta
+                        p_meta, _ = ProductMeta.objects.get_or_create(product=product)
+                        p_meta.storage_condition = str(storage_cond).strip()
+                        p_meta.save()
+                    except Exception:
+                        pass
             except Product.DoesNotExist:
                 error_msg = f'Product with UUID {uuid_obj} does not exist.'
                 print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
@@ -510,6 +536,10 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     if field in data and data[field] is not None:
                         setattr(product, field, data[field])
                         updated = True
+                for field in ['manufacturer', 'internal_reference']:
+                    if field in data and data[field] is not None and str(data[field]).strip():
+                        setattr(product, field, str(data[field]).strip())
+                        updated = True
                 # For sales invoice, price field is sale_price, not cost price
                 if 'price' in data and data['price'] is not None:
                     product.sale_price = data['price']
@@ -517,6 +547,16 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 if updated:
                     print("DEBUG SalesInvoiceItemSerializer: Updating existing product fields")
                     product.save()
+
+                storage_cond = data.get('storage_condition')
+                if storage_cond and str(storage_cond).strip():
+                    try:
+                        from inventory.models_sidecar import ProductMeta
+                        p_meta, _ = ProductMeta.objects.get_or_create(product=product)
+                        p_meta.storage_condition = str(storage_cond).strip()
+                        p_meta.save()
+                    except Exception:
+                        pass
             except Product.DoesNotExist:
                 if not can_auto_create_inventory:
                     error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
@@ -531,8 +571,20 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                         unit=data.get('unit', 'pcs'),
                         sale_price=data.get('price', 0),
                         tax=data.get('tax', 0),
+                        manufacturer=str(data.get('manufacturer', '') or '').strip() or None,
+                        internal_reference=str(data.get('internal_reference', '') or '').strip() or None,
                         created_by=user,
                     )
+                    storage_cond = data.get('storage_condition')
+                    if storage_cond and str(storage_cond).strip():
+                        try:
+                            from inventory.models_sidecar import ProductMeta
+                            ProductMeta.objects.create(
+                                product=product,
+                                storage_condition=str(storage_cond).strip()
+                            )
+                        except Exception:
+                            pass
                     # Mark product as created during invoice flow so stock can be adjusted later
                     try:
                         setattr(product, '_created_from_invoice', True)
@@ -815,21 +867,37 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 if customer_gstin and customer_gstin != customer_obj.gstin:
                     customer_obj.gstin = customer_gstin
                     updated = True
+                if not customer_obj.state and customer_gstin and len(customer_gstin) >= 2:
+                    st = normalize_indian_state_choice(customer_gstin[:2])
+                    if st:
+                        customer_obj.state = st
+                        updated = True
+                elif not customer_obj.state and data.get('place_of_supply'):
+                    customer_obj.state = normalize_indian_state_choice(data.get('place_of_supply'))
+                    updated = True
                 if updated:
                     customer_obj.save()
                     print("DEBUG SalesInvoiceSerializer: Updated customer details")
+                PartyMeta.objects.get_or_create(customer=customer_obj)
             else:
                 # Create new customer with email
                 print("DEBUG SalesInvoiceSerializer: Creating new customer with email:", customer_name)
+                cust_state = None
+                if customer_gstin and len(customer_gstin) >= 2:
+                    cust_state = normalize_indian_state_choice(customer_gstin[:2])
+                if not cust_state and data.get('place_of_supply'):
+                    cust_state = normalize_indian_state_choice(data.get('place_of_supply'))
                 try:
                     customer_obj = Customer.objects.create(
                         name=customer_name,
                         email=customer_email,
                         phone=customer_phone,
                         address=customer_address,
+                        state=cust_state,
                         gstin=customer_gstin or None,
                         created_by=user,
                     )
+                    PartyMeta.objects.get_or_create(customer=customer_obj)
                     print("DEBUG SalesInvoiceSerializer: New customer created:", customer_obj.id)
                 except Exception as e:
                     error_msg = f'Failed to create customer: {str(e)}'
@@ -850,16 +918,32 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if customer_gstin and customer_gstin != customer_obj.gstin:
                         customer_obj.gstin = customer_gstin
                         updated = True
+                    if not customer_obj.state and customer_gstin and len(customer_gstin) >= 2:
+                        st = normalize_indian_state_choice(customer_gstin[:2])
+                        if st:
+                            customer_obj.state = st
+                            updated = True
+                    elif not customer_obj.state and data.get('place_of_supply'):
+                        customer_obj.state = normalize_indian_state_choice(data.get('place_of_supply'))
+                        updated = True
                     if updated:
                         customer_obj.save()
+                    PartyMeta.objects.get_or_create(customer=customer_obj)
                 else:
+                    cust_state = None
+                    if customer_gstin and len(customer_gstin) >= 2:
+                        cust_state = normalize_indian_state_choice(customer_gstin[:2])
+                    if not cust_state and data.get('place_of_supply'):
+                        cust_state = normalize_indian_state_choice(data.get('place_of_supply'))
                     customer_obj = Customer.objects.create(
                         name=customer_name.strip(),
                         phone=customer_phone or None,
                         address=customer_address or None,
+                        state=cust_state,
                         gstin=customer_gstin or None,
                         created_by=user,
                     )
+                    PartyMeta.objects.get_or_create(customer=customer_obj)
 
         if not customer_address:
             if self.instance and getattr(self.instance, 'customer_address', None):
@@ -1233,6 +1317,16 @@ class CustomerSerializer(serializers.ModelSerializer):
             meta.save()
             
         return instance
+
+    def to_representation(self, instance):
+        try:
+            _ = instance.meta
+        except Exception:
+            try:
+                PartyMeta.objects.get_or_create(customer=instance)
+            except Exception:
+                pass
+        return super().to_representation(instance)
 
 class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)

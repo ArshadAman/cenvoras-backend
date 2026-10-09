@@ -57,6 +57,12 @@ class Product(models.Model):
                 condition=models.Q(item_code__isnull=False) & ~models.Q(item_code='')
             )
         ]
+        indexes = [
+            models.Index(fields=['created_by', 'is_active', 'name'], name='idx_prod_tenant_active_name'),
+            models.Index(fields=['created_by', 'item_code'], name='idx_prod_tenant_itemcode'),
+            models.Index(fields=['created_by', 'internal_reference'], name='idx_prod_tenant_intref'),
+            models.Index(fields=['created_by', 'manufacturer'], name='idx_prod_tenant_mfr'),
+        ]
 
     def __str__(self):
         return self.name

@@ -56,6 +56,10 @@ def bulk_delete_products(request):
     if protected_products:
         parts.append(f"{len(protected_products)} product(s) could not be deleted because they are linked to financial records")
 
+    if deleted_count or archived_count:
+        from inventory.views import invalidate_tenant_catalog
+        invalidate_tenant_catalog(getattr(request.user.active_tenant, 'id', request.user.id))
+
     message = f"Successfully {', and '.join(parts)}." if (deleted_count or archived_count) else f"{len(protected_products)} product(s) protected."
 
     return Response({

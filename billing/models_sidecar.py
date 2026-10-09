@@ -77,10 +77,9 @@ class TransactionMeta(models.Model):
     # Feature 82: Bill Tagging & Feature 41: Print Coords (can be part of settings or per bill)
     tags = models.JSONField(default=list, blank=True, help_text="Tags like 'Urgent', 'Morning Delivery'")
     
-    # Feature 41: Configurable Invoice (Per invoice settings snapshot?)
-    # or just keep generic settings elsewhere. 
-    # Storing specific print flags here if needed.
-    
+    # Selected bank account for this bill
+    bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this invoice")
+
     def __str__(self):
         return f"Meta for {self.invoice.invoice_number}"
 
@@ -152,6 +151,7 @@ class SalesOrder(models.Model):
         related_name='sales_orders',
         help_text="Original quotation this order was converted from"
     )
+    bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this order")
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -237,6 +237,7 @@ class DeliveryChallan(models.Model):
         related_name='source_delivery_challans'
     )
     notes = models.TextField(blank=True, null=True)
+    bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this challan")
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -322,6 +323,7 @@ class Quotation(models.Model):
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this quotation")
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

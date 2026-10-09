@@ -24,7 +24,7 @@ from django.db.models import F
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransactionMeta
-        fields = ['status', 'delivery_status', 'delivery_boy', 'tags']
+        fields = ['status', 'delivery_status', 'delivery_boy', 'tags', 'bank_account_id']
 
 class PartyMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -164,7 +164,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'po_number', 'po_date', 'source_quotation', 'items', 'created_by', 'created_at']
+        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'po_number', 'po_date', 'source_quotation', 'bank_account_id', 'items', 'created_by', 'created_at']
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
 
     def to_representation(self, instance):
@@ -408,6 +408,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             'is_billed',
             'converted_invoice',
             'notes',
+            'bank_account_id',
             'items',
             'created_by',
             'created_at',
@@ -772,6 +773,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             'warehouse',
             'total_amount',
             'round_off',
+            'bank_account_id',
             'items',
             'created_by',
             'created_at',

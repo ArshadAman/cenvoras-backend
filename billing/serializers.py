@@ -665,13 +665,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
     meta = TransactionMetaSerializer(required=False)
+    bank_account_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -710,6 +711,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['customer_gstin'] = getattr(customer, 'gstin', None) if customer else data.get('customer_gstin')
         from billing.sequence_service import display_document_number
         data['display_number'] = display_document_number(instance.invoice_number)
+        data['bank_account_id'] = getattr(getattr(instance, 'meta', None), 'bank_account_id', None)
         return data
 
 
@@ -980,6 +982,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Creating sales invoice with data:", validated_data)
         items_data = validated_data.pop('items')
         meta_data = validated_data.pop('meta', None)
+        bank_account_id = validated_data.pop('bank_account_id', None)
         provided_total_amount = validated_data.pop('total_amount', None)
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
 
@@ -1054,8 +1057,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
             
             # Create Transaction Meta
-            if meta_data:
-                TransactionMeta.objects.create(invoice=sales_invoice, **meta_data)
+            meta_dict = dict(meta_data or {})
+            if bank_account_id:
+                meta_dict['bank_account_id'] = bank_account_id
+            if meta_dict:
+                TransactionMeta.objects.create(invoice=sales_invoice, **meta_dict)
             else:
                 TransactionMeta.objects.create(invoice=sales_invoice)
                 
@@ -1087,6 +1093,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
+        bank_account_id = validated_data.pop('bank_account_id', None)
         old_customer_id = instance.customer_id
         old_status = instance.status
         old_total_amount = Decimal(str(instance.total_amount or 0))
@@ -1171,10 +1178,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         instance.refresh_payment_status(save=False)
         instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
         
-        if meta_data:
+        if meta_data or bank_account_id is not None:
             meta, created = TransactionMeta.objects.get_or_create(invoice=instance)
-            for attr, value in meta_data.items():
-                setattr(meta, attr, value)
+            if bank_account_id is not None:
+                meta.bank_account_id = bank_account_id
+            if meta_data:
+                for attr, value in meta_data.items():
+                    setattr(meta, attr, value)
             meta.save()
 
         new_total_amount = Decimal(str(instance.total_amount or 0))

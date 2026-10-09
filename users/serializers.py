@@ -151,7 +151,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -192,7 +192,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -215,6 +215,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
             'bank_accounts': {'required': False},
             'default_bank_account_sections': {'required': False},
+            'default_preview_template_sections': {'required': False},
         }
 
     def validate_invoice_prefix(self, value):

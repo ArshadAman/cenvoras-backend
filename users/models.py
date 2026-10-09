@@ -50,6 +50,7 @@ class User(AbstractUser):
     bank_qr_code = models.TextField(blank=True, null=True, help_text="Base64 encoded or URL of payment QR code")
     bank_accounts = models.JSONField(default=list, blank=True, help_text="Up to 3 bank accounts for invoice billing")
     default_bank_account_sections = models.JSONField(default=dict, blank=True, help_text="Default bank account ID per section")
+    default_preview_template_sections = models.JSONField(default=dict, blank=True, help_text="Default preview template format per section")
     
     state = models.CharField(
         max_length=50, 

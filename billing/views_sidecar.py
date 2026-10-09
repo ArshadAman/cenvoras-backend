@@ -1337,6 +1337,7 @@ def quotation_convert_to_sales_order(request, pk):
                 address=quotation.customer_address,
                 created_by=tenant,
             )
+            PartyMeta.objects.get_or_create(customer=order_customer)
 
     if not order_customer:
         return Response({'message': 'Quotation must have a customer to convert.'}, status=status.HTTP_400_BAD_REQUEST)

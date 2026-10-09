@@ -15,6 +15,7 @@ from .models_sidecar import (
     InvoiceSettings,
     Quotation,
     QuotationItem,
+    PartyMeta,
 )
 from inventory.models import Product, Warehouse, ProductBatch, StockPoint
 from billing.models import Customer
@@ -27,8 +28,6 @@ class TransactionMetaSerializer(serializers.ModelSerializer):
 
 class PartyMetaSerializer(serializers.ModelSerializer):
     class Meta:
-        # Import PartyMeta inside or ensure it's imported at top
-        from .models_sidecar import PartyMeta
         model = PartyMeta
         fields = ['loyalty_points', 'party_category', 'credit_days', 'gst_type', 'whatsapp_number']
 
@@ -50,6 +49,8 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
             'show_item_discount',
             'show_item_tax',
             'show_item_manufacturer',
+            'show_item_storage_condition',
+            'show_item_internal_reference',
         ]
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
@@ -195,6 +196,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
                 phone=customer_phone if customer_phone else None,
                 created_by=user,
             )
+            PartyMeta.objects.get_or_create(customer=customer)
         return customer
 
     def create(self, validated_data):
@@ -489,12 +491,14 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             if existing_cust:
                 validated_data['customer'] = existing_cust
             else:
-                validated_data['customer'] = Customer.objects.create(
+                new_customer = Customer.objects.create(
                     name=cust_name.strip(),
                     address=validated_data.get('customer_address') or '',
                     gstin=validated_data.get('customer_gstin') or '',
                     created_by=user,
                 )
+                PartyMeta.objects.get_or_create(customer=new_customer)
+                validated_data['customer'] = new_customer
 
         # Calculate line amounts and total
         total = Decimal('0.00')
@@ -880,7 +884,7 @@ class QuotationSerializer(serializers.ModelSerializer):
                 customer.save()
             return customer
 
-        return Customer.objects.create(
+        new_customer = Customer.objects.create(
             name=customer_name,
             email=customer_email or None,
             phone=customer_phone or None,
@@ -888,6 +892,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             gstin=customer_gstin or None,
             created_by=user,
         )
+        PartyMeta.objects.get_or_create(customer=new_customer)
+        return new_customer
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])

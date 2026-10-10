@@ -80,9 +80,12 @@ def sales_order_detail(request, pk):
             DeliveryChallan.objects.filter(sales_order=order).update(sales_order=None)
             source_quotation = getattr(order, 'source_quotation', None)
             if source_quotation:
-                source_quotation.status = 'pending'
-                source_quotation.save(update_fields=['status'])
-                source_quotation.items.update(converted_to_order=False)
+                other_orders = SalesOrder.objects.filter(source_quotation=source_quotation).exclude(pk=order.pk).exists()
+                if not other_orders:
+                    has_pending = source_quotation.items.filter(approval_status='pending').exists()
+                    source_quotation.status = 'pending' if has_pending else 'approved'
+                    source_quotation.save(update_fields=['status'])
+                    source_quotation.items.update(converted_to_order=False)
             order.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

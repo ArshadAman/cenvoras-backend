@@ -156,11 +156,9 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
                     defaults={'last_number': 0}
                 )
 
-                if created or seq.last_number == 0:
-                    max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
-                    seq.last_number = max_existing
-
-                seq.last_number += 1
+                max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
+                current_base = max(seq.last_number, max_existing)
+                seq.last_number = current_base + 1
 
                 # Guard against any manual out-of-order records inserted in the past
                 while _number_exists(tenant, document_type, f"{full_prefix}{seq.last_number:0{min_digits}d}"):
@@ -191,10 +189,10 @@ def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_
     ).first()
 
     current_num = seq.last_number if seq else 0
-    if not seq or current_num == 0:
-        current_num = _get_existing_max_number(tenant, document_type, full_prefix)
+    max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
+    current_base = max(current_num, max_existing)
 
-    candidate = current_num + 1
+    candidate = current_base + 1
     while _number_exists(tenant, document_type, f"{full_prefix}{candidate:0{min_digits}d}"):
         candidate += 1
 

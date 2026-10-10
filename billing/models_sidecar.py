@@ -170,10 +170,16 @@ class SalesOrder(models.Model):
         # Decouple any linked delivery challans so sales order deletion is never blocked
         DeliveryChallan.objects.filter(sales_order=self).update(sales_order=None)
         if self.source_quotation:
-            q = self.source_quotation
-            q.status = 'pending'
-            q.save(update_fields=['status'])
-            q.items.update(converted_to_order=False)
+            try:
+                q = self.source_quotation
+                other_orders = SalesOrder.objects.filter(source_quotation=q).exclude(pk=self.pk).exists()
+                if not other_orders:
+                    has_pending = q.items.filter(approval_status='pending').exists()
+                    q.status = 'pending' if has_pending else 'approved'
+                    q.save(update_fields=['status'])
+                    q.items.update(converted_to_order=False)
+            except Exception:
+                pass
         return super().delete(*args, **kwargs)
 
     def __str__(self):
@@ -431,9 +437,12 @@ def revert_quotation_on_sales_order_delete(sender, instance, **kwargs):
     if getattr(instance, 'source_quotation', None):
         try:
             q = instance.source_quotation
-            q.status = 'pending'
-            q.save(update_fields=['status'])
-            q.items.update(converted_to_order=False)
+            other_orders = sender.objects.filter(source_quotation=q).exclude(pk=instance.pk).exists()
+            if not other_orders:
+                has_pending = q.items.filter(approval_status='pending').exists()
+                q.status = 'pending' if has_pending else 'approved'
+                q.save(update_fields=['status'])
+                q.items.update(converted_to_order=False)
         except Exception:
             pass
 

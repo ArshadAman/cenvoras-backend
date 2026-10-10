@@ -283,11 +283,21 @@ class DocumentSyncService:
                     prod_obj = Product.objects.filter(name__iexact=prod_val, created_by=tenant).first()
                     clean_data['product'] = prod_obj
 
-            qty = clean_data.get('quantity', 1) or 1
-            price = Decimal(str(clean_data.get('price', 0) or 0))
-            discount = Decimal(str(clean_data.get('discount', 0) or 0))
-            tax = Decimal(str(clean_data.get('tax', 0) or 0))
-            clean_data['amount'] = cls.calculate_line_amount(qty, price, discount, tax)
+            is_note = clean_data.get('row_type') == 'note' or (not clean_data.get('product') and clean_data.get('description'))
+            if is_note:
+                clean_data['row_type'] = 'note'
+                clean_data['product'] = None
+                clean_data['quantity'] = 0
+                clean_data['price'] = Decimal('0.00')
+                clean_data['discount'] = Decimal('0.00')
+                clean_data['tax'] = Decimal('0.00')
+                clean_data['amount'] = Decimal('0.00')
+            else:
+                qty = clean_data.get('quantity', 1) or 1
+                price = Decimal(str(clean_data.get('price', 0) or 0))
+                discount = Decimal(str(clean_data.get('discount', 0) or 0))
+                tax = Decimal(str(clean_data.get('tax', 0) or 0))
+                clean_data['amount'] = cls.calculate_line_amount(qty, price, discount, tax)
 
             # Determine FK field name for document (order, challan, sales_invoice, etc.)
             fk_field = None
@@ -460,7 +470,10 @@ class DocumentSyncService:
                     already_exists = any(getattr(ti, 'source_item_id', None) == str(item.id) for ti in target_items)
 
                 if not already_exists:
+                    is_note = getattr(item, 'row_type', 'item') == 'note' or not item.product
                     if isinstance(target_doc, PurchaseOrder):
+                        if is_note:
+                            continue
                         cost_price = getattr(item.product, 'price', None) or getattr(item.product, 'cost_price', None) or item.price
                         item_price = cost_price
                         item_discount = Decimal('0.00')
@@ -470,11 +483,11 @@ class DocumentSyncService:
 
                     item_data = {
                         'product': item.product,
-                        'quantity': item.quantity,
-                        'price': item_price,
-                        'discount': item_discount,
-                        'tax': item.tax,
-                        'amount': cls.calculate_line_amount(item.quantity, item_price, item_discount, item.tax),
+                        'quantity': 0 if is_note else item.quantity,
+                        'price': Decimal('0.00') if is_note else item_price,
+                        'discount': Decimal('0.00') if is_note else item_discount,
+                        'tax': Decimal('0.00') if is_note else item.tax,
+                        'amount': Decimal('0.00') if is_note else cls.calculate_line_amount(item.quantity, item_price, item_discount, item.tax),
                         'unit': getattr(item, 'unit', 'pcs') or 'pcs',
                         'description': getattr(item, 'description', '') or '',
                     }

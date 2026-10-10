@@ -123,9 +123,9 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     description = serializers.CharField(required=False, allow_blank=True, default='')
     
     # Batch fields (Virtual fields, not mapped directly to model until to_internal_value)
-    batch_number = serializers.CharField(required=False, write_only=True)
-    expiry_date = serializers.DateField(required=False, write_only=True, allow_null=True)
-    mrp = serializers.DecimalField(required=False, write_only=True, max_digits=10, decimal_places=2)
+    batch_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    expiry_date = serializers.DateField(required=False, allow_null=True)
+    mrp = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=2)
 
     class Meta:
         model = PurchaseBillItem
@@ -138,6 +138,18 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         ret['product_description'] = instance.description or (instance.product.description if instance.product else '') or ''
+        ret['purchase_price'] = instance.price
+        ret['price'] = instance.price
+        ret['hsn_code'] = instance.hsn_sac_code or (instance.product.hsn_sac_code if instance.product else '')
+        ret['product_name'] = instance.product.name if instance.product else ''
+        if instance.batch:
+            ret['batch_number'] = instance.batch.batch_number or ''
+            ret['expiry_date'] = instance.batch.expiry_date
+            ret['mrp'] = instance.batch.mrp
+        else:
+            ret['batch_number'] = ''
+            ret['expiry_date'] = None
+            ret['mrp'] = None
         return ret
 
     def get_product_detail(self, obj):

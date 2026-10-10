@@ -363,6 +363,10 @@ def delivery_challan_list_create(request):
 
         challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch')
         
+        customer_filter = request.GET.get('customer')
+        if customer_filter:
+            challans = challans.filter(Q(customer_id=customer_filter) | Q(customer__id=customer_filter))
+
         if search:
             challans = challans.filter(
                 Q(challan_number__icontains=search) | 

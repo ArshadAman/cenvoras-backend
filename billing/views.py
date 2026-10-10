@@ -47,6 +47,11 @@ def purchase_bill_list_create(request):
             .order_by('-bill_date', '-created_at')
             .prefetch_related('items__product')
         )
+        vendor_filter = request.GET.get('vendor')
+        if vendor_filter:
+            from django.db.models import Q
+            bills = bills.filter(Q(vendor_id=vendor_filter) | Q(vendor__id=vendor_filter))
+
         serializer = PurchaseBillSerializer(bills, many=True)
         return Response({'success': True, 'data': serializer.data})
 

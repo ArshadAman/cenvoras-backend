@@ -125,7 +125,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             # Try UUID first
             product_uuid = UUID(str(product_value))
             product_obj = Product.objects.filter(id=product_uuid, created_by=user).first()
-            if product_obj:
+            if product_obj and (data.get('sync_to_inventory') or data.get('update_inventory')):
                 product_name_input = data.get('product_name') or data.get('name')
                 if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
                     product_obj.name = str(product_name_input).strip()
@@ -333,26 +333,28 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
             product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
             if not product_obj:
                 raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
-            product_name_input = mutable.get('product_name') or mutable.get('name')
-            if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
-                product_obj.name = str(product_name_input).strip()
-                product_obj.save(update_fields=['name'])
+            if mutable.get('sync_to_inventory') or mutable.get('update_inventory'):
+                product_name_input = mutable.get('product_name') or mutable.get('name')
+                if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
+                    product_obj.name = str(product_name_input).strip()
+                    product_obj.save(update_fields=['name'])
         except (ValueError, TypeError):
             product_name = str(product_value).strip()
             product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
 
             if product_obj:
-                updated_fields = []
-                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
-                    field_value = mutable.get(field)
-                    if field_value is None:
-                        continue
-                    if isinstance(field_value, str) and not field_value.strip():
-                        continue
-                    setattr(product_obj, field, field_value)
-                    updated_fields.append(field)
-                if updated_fields:
-                    product_obj.save(update_fields=updated_fields)
+                if mutable.get('sync_to_inventory') or mutable.get('update_inventory'):
+                    updated_fields = []
+                    for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                        field_value = mutable.get(field)
+                        if field_value is None:
+                            continue
+                        if isinstance(field_value, str) and not field_value.strip():
+                            continue
+                        setattr(product_obj, field, field_value)
+                        updated_fields.append(field)
+                    if updated_fields:
+                        product_obj.save(update_fields=updated_fields)
             else:
                 if not can_auto_create:
                     raise serializers.ValidationError({
@@ -692,26 +694,28 @@ class QuotationItemSerializer(serializers.ModelSerializer):
             product_obj = Product.objects.filter(id=product_uuid, created_by=tenant).first()
             if not product_obj:
                 raise serializers.ValidationError({'product': f'Product with ID {product_uuid} does not exist.'})
-            product_name_input = mutable.get('product_name') or mutable.get('name')
-            if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
-                product_obj.name = str(product_name_input).strip()
-                product_obj.save(update_fields=['name'])
+            if mutable.get('sync_to_inventory') or mutable.get('update_inventory'):
+                product_name_input = mutable.get('product_name') or mutable.get('name')
+                if product_name_input and str(product_name_input).strip() and product_obj.name != str(product_name_input).strip():
+                    product_obj.name = str(product_name_input).strip()
+                    product_obj.save(update_fields=['name'])
         except (ValueError, TypeError):
             product_name = str(product_value).strip()
             product_obj = Product.objects.filter(name__iexact=product_name, created_by=tenant).first()
 
             if product_obj:
-                updated_fields = []
-                for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
-                    field_value = mutable.get(field)
-                    if field_value is None:
-                        continue
-                    if isinstance(field_value, str) and not field_value.strip():
-                        continue
-                    setattr(product_obj, field, field_value)
-                    updated_fields.append(field)
-                if updated_fields:
-                    product_obj.save(update_fields=updated_fields)
+                if mutable.get('sync_to_inventory') or mutable.get('update_inventory'):
+                    updated_fields = []
+                    for field in ['hsn_sac_code', 'unit', 'price', 'tax']:
+                        field_value = mutable.get(field)
+                        if field_value is None:
+                            continue
+                        if isinstance(field_value, str) and not field_value.strip():
+                            continue
+                        setattr(product_obj, field, field_value)
+                        updated_fields.append(field)
+                    if updated_fields:
+                        product_obj.save(update_fields=updated_fields)
             else:
                 if not can_auto_create_inventory:
                     raise serializers.ValidationError({

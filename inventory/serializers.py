@@ -16,9 +16,9 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'item_code', 'name', 'hsn_sac_code', 'description', 'manufacturer', 'internal_reference', 'tax', 'stock', 'current_stock', 'unit',
             'secondary_unit', 'conversion_factor',
             'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'is_active', 'created_by',
-            'meta'
+            'created_at', 'updated_at', 'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'price', 'current_stock']
+        read_only_fields = ['id', 'created_by', 'price', 'current_stock', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         sale_price = attrs.get('sale_price')

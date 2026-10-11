@@ -47,6 +47,8 @@ class Product(models.Model):
     stock = models.IntegerField(default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
     low_stock_alert = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
 
     class Meta:
@@ -62,6 +64,7 @@ class Product(models.Model):
             models.Index(fields=['created_by', 'item_code'], name='idx_prod_tenant_itemcode'),
             models.Index(fields=['created_by', 'internal_reference'], name='idx_prod_tenant_intref'),
             models.Index(fields=['created_by', 'manufacturer'], name='idx_prod_tenant_mfr'),
+            models.Index(fields=['created_by', 'updated_at'], name='idx_prod_tenant_updated'),
         ]
 
     def __str__(self):

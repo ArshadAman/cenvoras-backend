@@ -42,8 +42,8 @@ CASHFREE_WEBHOOK_URL=https://api.cenvora.app/subscription/webhooks/cashfree/
 
 # Email Configuration (already configured)
 TRANSACTIONAL_EMAIL_API_KEY=your_ahasend_api_key
-TRANSACTIONAL_EMAIL_SENDER_EMAIL=noreply@cenvora.app
-TRANSACTIONAL_EMAIL_SENDER_NAME=Cenvora
+TRANSACTIONAL_EMAIL_SENDER_EMAIL=noreply@cenvora.co.in
+TRANSACTIONAL_EMAIL_SENDER_NAME=Cenvora App
 TRANSACTIONAL_EMAIL_API_URL=https://api.ahasend.com/v1
 
 # Celery Configuration (if not already set)
@@ -84,7 +84,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/1
   - Queues email notifications
 
 - **send_payment_confirmation_email()** - Async email task
-  - Sends confirmation email from noreply@cenvora.app
+  - Sends confirmation email from noreply@cenvora.co.in
   - Includes plan, amount, order ID, action taken
 
 - **send_payment_failure_email()** - Async email task
@@ -168,7 +168,7 @@ verify_cashfree_signature(payload_str, signature)
 
 ### 6. Email Notification
 - `send_async_email_notification()` queues email
-- Email sent from `noreply@cenvora.app`
+- Email sent from `noreply@cenvora.co.in`
 - Uses TRANSACTIONAL_EMAIL_API_KEY
 
 ## Subscription State Transitions

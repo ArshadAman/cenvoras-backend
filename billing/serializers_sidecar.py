@@ -29,7 +29,7 @@ class TransactionMetaSerializer(serializers.ModelSerializer):
 class PartyMetaSerializer(serializers.ModelSerializer):
     class Meta:
         model = PartyMeta
-        fields = ['loyalty_points', 'party_category', 'credit_days', 'gst_type', 'whatsapp_number', 'preview_templates']
+        fields = ['loyalty_points', 'party_category', 'credit_days', 'gst_type', 'whatsapp_number', 'preview_templates', 'shipping_addresses']
 
 class InvoiceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -51,6 +51,7 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
             'show_item_manufacturer',
             'show_item_storage_condition',
             'show_item_internal_reference',
+            'show_item_purchase_price',
         ]
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):

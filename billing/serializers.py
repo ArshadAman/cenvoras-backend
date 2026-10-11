@@ -1361,6 +1361,7 @@ class CustomerSerializer(serializers.ModelSerializer):
         ret = super().to_representation(instance)
         meta = getattr(instance, 'meta', None)
         ret['preview_templates'] = getattr(meta, 'preview_templates', {}) or {}
+        ret['shipping_addresses'] = getattr(meta, 'shipping_addresses', []) or []
         return ret
 
 class PaymentSerializer(serializers.ModelSerializer):

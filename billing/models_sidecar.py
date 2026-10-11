@@ -50,6 +50,13 @@ class PartyMeta(models.Model):
         help_text="Customer-specific preview template format per section, e.g. {'sales_invoice': 'classic', 'quotation': 'service'}"
     )
     
+    # Multiple saved shipping addresses for customer
+    shipping_addresses = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of saved shipping addresses for this customer"
+    )
+
     def __str__(self):
         return f"Meta for {self.customer.name}"
 
@@ -121,6 +128,7 @@ class InvoiceSettings(models.Model):
     show_item_manufacturer = models.BooleanField(default=True)
     show_item_storage_condition = models.BooleanField(default=False)
     show_item_internal_reference = models.BooleanField(default=False)
+    show_item_purchase_price = models.BooleanField(default=False)
     
     def __str__(self):
         return f"Invoice Settings for {self.user}"

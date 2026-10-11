@@ -204,7 +204,7 @@ def _cleanup_old_cloudinary_backups(keep_count):
 def _send_ahasend_alert(subject, body):
     api_key = getattr(settings, "TRANSACTIONAL_EMAIL_API_KEY", "")
     base_url = (getattr(settings, "TRANSACTIONAL_EMAIL_API_URL", "") or "https://api.ahasend.com/v1").rstrip("/")
-    sender_email = getattr(settings, "TRANSACTIONAL_EMAIL_SENDER_EMAIL", "noreply@cenvora.app")
+    sender_email = getattr(settings, "TRANSACTIONAL_EMAIL_SENDER_EMAIL", "noreply@cenvora.co.in")
     sender_name = getattr(settings, "TRANSACTIONAL_EMAIL_SENDER_NAME", "Cenvora App")
     alert_to = getattr(settings, "BACKUP_ALERT_EMAIL", "support@cenvora.app")
     send_endpoint = getattr(settings, "TRANSACTIONAL_EMAIL_SEND_ENDPOINT", "/email/send")
@@ -266,7 +266,7 @@ def send_async_email(subject, message, recipient_list, force_cenvora_branding=Fa
         send_endpoint = getattr(settings, 'TRANSACTIONAL_EMAIL_SEND_ENDPOINT', '/email/send')
         timeout_seconds = int(getattr(settings, 'TRANSACTIONAL_EMAIL_TIMEOUT_SECONDS', 20))
 
-        from_email = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.app')
+        from_email = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_EMAIL', 'noreply@cenvora.co.in')
         default_from_name = getattr(settings, 'TRANSACTIONAL_EMAIL_SENDER_NAME', 'Cenvora App')
         from_name = 'Cenvora App' if force_cenvora_branding else default_from_name
 

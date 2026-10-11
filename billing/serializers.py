@@ -332,7 +332,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         return purchase_bill
 
     def update(self, instance, validated_data):
-        items_data = validated_data.pop('items', [])
+        items_data = validated_data.pop('items', None)
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         
         # Smart Feature: Auto-create/sync vendor details
@@ -367,7 +367,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         instance.save()
 
         # Delete existing items and create new ones
-        if items_data:
+        if items_data is not None:
             instance.items.all().delete()
             for item_data in items_data:
                 item_data['amount'] = self._calculate_line_amount(item_data)
@@ -1107,7 +1107,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             raise
 
     def update(self, instance, validated_data):
-        items_data = validated_data.pop('items', [])
+        items_data = validated_data.pop('items', None)
         validated_data.pop('total_amount', None)
         meta_data = validated_data.pop('meta', None)
         bank_account_id = validated_data.pop('bank_account_id', None)
@@ -1154,7 +1154,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
 
-        # Sync items and propagate bidirectionally
+        # Sync items and propagate bidirectionally only if items are explicitly provided
         if items_data is not None:
             bonus_items = []
             try:
@@ -1190,11 +1190,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             instance.round_off = round_off
             DocumentSyncService.recalculate_document_total(instance)
 
-        if instance.amount_paid > instance.total_amount:
-            instance.amount_paid = instance.total_amount
+            if instance.amount_paid > instance.total_amount:
+                instance.amount_paid = instance.total_amount
 
-        instance.refresh_payment_status(save=False)
-        instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+            instance.refresh_payment_status(save=False)
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
         
         if meta_data or bank_account_id is not None or template_id is not None:
             meta, created = TransactionMeta.objects.get_or_create(invoice=instance)
@@ -1206,6 +1206,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 for attr, value in meta_data.items():
                     setattr(meta, attr, value)
             meta.save()
+            instance.meta = meta
 
         new_total_amount = Decimal(str(instance.total_amount or 0))
         new_status = instance.status
@@ -1235,7 +1236,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     current_balance=F('current_balance') - old_total_amount
                 )
 
-        transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
+        if items_data is not None or old_customer_id != instance.customer_id or old_status != new_status:
+            transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
 
         return instance
 

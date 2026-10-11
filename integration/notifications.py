@@ -10,13 +10,13 @@ logger = logging.getLogger(__name__)
 
 from .tasks import send_async_email_notification
 
-def send_email(user, to_email, subject, body, related_model='', related_id=''):
+def send_email(user, to_email, subject, body, related_model='', related_id='', html_body=None):
     """
     Dispatches email to Celery worker.
     """
     user_id = user.id if user else None
     # Dispatch asynchronously
-    send_async_email_notification.delay(user_id, to_email, subject, body, related_model, related_id)
+    send_async_email_notification.delay(user_id, to_email, subject, body, related_model, related_id, html_body=html_body)
     return {'status': 'queued'}
 
 

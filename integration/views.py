@@ -158,12 +158,16 @@ class SendCustomEmailView(APIView):
         recipient = request.data.get('recipient', '')
         subject = request.data.get('subject', '').strip() or 'Message from Cenvora'
         body = request.data.get('body', '')
+        html_body = request.data.get('html_body')
+        related_id = request.data.get('invoice_id') or request.data.get('related_id') or ''
+        related_model = request.data.get('related_model') or ('SalesInvoice' if related_id else 'custom')
         if not recipient or not body:
             return Response({'error': 'recipient and body are required'}, status=status.HTTP_400_BAD_REQUEST)
         tenant = getattr(request.user, 'active_tenant', request.user)
         result = send_email(
             tenant, recipient, subject, body,
-            related_model='custom', related_id=''
+            related_model=related_model, related_id=related_id,
+            html_body=html_body
         )
         return Response({'message': 'Email queued', 'result': result})
 

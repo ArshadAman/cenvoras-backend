@@ -137,8 +137,35 @@ class ProductListCreateView(generics.ListCreateAPIView):
                 qs = qs.filter(is_active=True)
             elif str(is_active_param).lower() in ('false', '0'):
                 qs = qs.filter(is_active=False)
-        elif not include_archived:
+        if not include_archived:
             qs = qs.filter(is_active=True)
+
+        manufacturer = self.request.query_params.get('manufacturer')
+        if manufacturer and str(manufacturer).strip():
+            qs = qs.filter(manufacturer__iexact=str(manufacturer).strip())
+
+        ordering = self.request.query_params.get('ordering')
+        if ordering:
+            field_map = {
+                'current_stock': 'stock',
+                '-current_stock': '-stock',
+                'unit_price': 'price',
+                '-unit_price': '-price',
+                'cost_price': 'price',
+                '-cost_price': '-price',
+            }
+            order_field = field_map.get(ordering, ordering)
+            valid_fields = [
+                'name', '-name',
+                'stock', '-stock',
+                'sale_price', '-sale_price',
+                'price', '-price',
+                'created_at', '-created_at',
+                'updated_at', '-updated_at',
+                'item_code', '-item_code'
+            ]
+            if order_field in valid_fields:
+                return qs.order_by(order_field)
 
         return qs.order_by('name')
 
@@ -922,5 +949,5 @@ def expiry_dashboard_summary(request):
 
     return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_summary))
 
-from .bulk_delete import bulk_delete_products
+from .bulk_delete import bulk_delete_products, bulk_restore_products
 

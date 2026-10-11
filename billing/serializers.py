@@ -502,36 +502,38 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 product = Product.objects.get(id=uuid_obj, created_by=user)
                 print("DEBUG SalesInvoiceItemSerializer: Found existing product by UUID:", product.name)
                 # Update product fields if present in data
-                updated = False
-                for field in ['hsn_sac_code', 'unit', 'tax']:
-                    if field in data and data[field] is not None:
-                        setattr(product, field, data[field])
+                # Only update master product catalog if explicitly requested by user
+                sync_to_inventory = data.get('sync_to_inventory') or data.get('update_inventory') or False
+                if sync_to_inventory:
+                    updated = False
+                    for field in ['hsn_sac_code', 'unit', 'tax']:
+                        if field in data and data[field] is not None:
+                            setattr(product, field, data[field])
+                            updated = True
+                    for field in ['manufacturer', 'internal_reference']:
+                        if field in data and data[field] is not None and str(data[field]).strip():
+                            setattr(product, field, str(data[field]).strip())
+                            updated = True
+                    # For sales invoice, price field is sale_price, not cost price
+                    if 'price' in data and data['price'] is not None:
+                        product.sale_price = data['price']
                         updated = True
-                for field in ['manufacturer', 'internal_reference']:
-                    if field in data and data[field] is not None and str(data[field]).strip():
-                        setattr(product, field, str(data[field]).strip())
+                    product_name_input = data.get('product_name') or data.get('name')
+                    if product_name_input and str(product_name_input).strip() and product.name != str(product_name_input).strip():
+                        product.name = str(product_name_input).strip()
                         updated = True
-                # For sales invoice, price field is sale_price, not cost price
-                if 'price' in data and data['price'] is not None:
-                    product.sale_price = data['price']
-                    updated = True
-                product_name_input = data.get('product_name') or data.get('name')
-                if product_name_input and str(product_name_input).strip() and product.name != str(product_name_input).strip():
-                    product.name = str(product_name_input).strip()
-                    updated = True
-                if updated:
-                    print("DEBUG SalesInvoiceItemSerializer: Updating product fields")
-                    product.save()
+                    if updated:
+                        product.save()
 
-                storage_cond = data.get('storage_condition')
-                if storage_cond and str(storage_cond).strip():
-                    try:
-                        from inventory.models_sidecar import ProductMeta
-                        p_meta, _ = ProductMeta.objects.get_or_create(product=product)
-                        p_meta.storage_condition = str(storage_cond).strip()
-                        p_meta.save()
-                    except Exception:
-                        pass
+                    storage_cond = data.get('storage_condition')
+                    if storage_cond and str(storage_cond).strip():
+                        try:
+                            from inventory.models_sidecar import ProductMeta
+                            p_meta, _ = ProductMeta.objects.get_or_create(product=product)
+                            p_meta.storage_condition = str(storage_cond).strip()
+                            p_meta.save()
+                        except Exception:
+                            pass
             except Product.DoesNotExist:
                 error_msg = f'Product with UUID {uuid_obj} does not exist.'
                 print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)

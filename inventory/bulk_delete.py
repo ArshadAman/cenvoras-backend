@@ -68,3 +68,33 @@ def bulk_delete_products(request):
         'archived_count': archived_count,
         'protected': protected_products
     }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def bulk_restore_products(request):
+    ids = request.data.get('ids', [])
+    if not ids or not isinstance(ids, list):
+        return Response({'error': 'A list of product IDs is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    products = Product.objects.filter(
+        id__in=ids,
+        created_by=tenant
+    )
+
+    if not products.exists():
+        return Response({'error': 'No matching products found to restore.'}, status=status.HTTP_404_NOT_FOUND)
+
+    restored_count = products.update(is_active=True)
+
+    from inventory.views import invalidate_tenant_catalog
+    tenant_id = getattr(tenant, 'id', request.user.id)
+    invalidate_tenant_catalog(tenant_id)
+
+    return Response({
+        'success': True,
+        'restored_count': restored_count,
+        'message': f"Successfully restored {restored_count} product(s) to active inventory."
+    }, status=status.HTTP_200_OK)
+

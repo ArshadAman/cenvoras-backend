@@ -8,6 +8,7 @@ urlpatterns = [
     path('products/', views.ProductListCreateView.as_view(), name='product-list-create'),
     path('products/<uuid:pk>/', views.ProductDetailView.as_view(), name='product-detail'),
     path('products/bulk-delete/', views.bulk_delete_products, name='product-bulk-delete'),
+    path('products/bulk-restore/', views.bulk_restore_products, name='product-bulk-restore'),
     path('products/template/csv/', views.download_product_csv_template, name='product-csv-template'),
     path('products/bulk-upload/csv/', views.bulk_upload_products, name='product-bulk-upload-csv'),
     path('products/csv-jobs/<str:task_id>/', views.inventory_csv_job_status, name='inventory-csv-job-status'),

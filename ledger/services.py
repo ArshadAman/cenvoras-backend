@@ -135,13 +135,19 @@ class AccountingService:
         sr_account = sales_revenue_account or accounts['sales_revenue']
 
         from billing.models import SalesInvoiceItem
-        line_items = list(SalesInvoiceItem.objects.filter(sales_invoice=sales_invoice).select_related('product'))
+        all_items = list(SalesInvoiceItem.objects.filter(sales_invoice=sales_invoice).select_related('product'))
+        # Only product items participate in double-entry sales revenue and tax split
+        line_items = [
+            item for item in all_items 
+            if getattr(item, 'row_type', 'item') != 'note' and item.product is not None
+        ]
 
         # Build detailed description with line items
         if line_items:
             item_details = []
             for item in line_items:
-                item_desc = f"{item.product.name} (Qty: {item.quantity}"
+                product_name = item.product.name if item.product else (item.description or 'Item')
+                item_desc = f"{product_name} (Qty: {item.quantity}"
                 if item.unit:
                     item_desc += f" {item.unit}"
                 item_desc += f" @ ₹{item.price} = ₹{item.amount})"
@@ -181,7 +187,8 @@ class AccountingService:
                 taxable_amount, tax_amount = cls._calculate_item_tax_split(item)
                 total_tax += tax_amount
 
-                item_description = f"Sale of {item.product.name}"
+                product_name = item.product.name if item.product else (item.description or 'Item')
+                item_description = f"Sale of {product_name}"
                 if item.quantity > 1:
                     item_description += f" (Qty: {item.quantity}"
                     if item.unit:

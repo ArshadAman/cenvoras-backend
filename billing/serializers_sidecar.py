@@ -948,6 +948,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
 
+        if new_status == 'approved':
+            instance.items.filter(approval_status='pending').update(approval_status='approved')
 
         if items_data is not None:
             from billing.sync_service import DocumentSyncService

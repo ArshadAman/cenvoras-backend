@@ -31,7 +31,7 @@ def scan_payroll_exceptions(payroll_run_id):
     active_employees = Employee.objects.filter(
         tenant=tenant,
         date_of_joining__lte=end_date,
-    ).exclude(status__in=['resigned', 'terminated'])
+    ).exclude(status__in=['resigned', 'terminated']).exclude(employment_type='contract')
 
     exceptions_to_create = []
 

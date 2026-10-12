@@ -200,6 +200,17 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             else:
                 send_employee_account_creation_email(instance.personal_email, instance.full_name, password, tenant.business_name or "Cenvoras")
 
+        # Automatic branded offer letter dispatch if enabled in HRMSSettings
+        settings_obj = getattr(tenant, 'hrms_settings', None)
+        if settings_obj and getattr(settings_obj, 'auto_send_offer_letter', False) and instance.personal_email:
+            from hr.tasks import send_employee_offer_letter_email
+            from django.conf import settings
+            use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+            if use_celery:
+                send_employee_offer_letter_email.delay(str(instance.id))
+            else:
+                send_employee_offer_letter_email(str(instance.id))
+
         audit_service.log_create(
             self.request,
             instance,
@@ -209,6 +220,20 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 'status': instance.status,
             },
         )
+
+    @action(detail=True, methods=['post'])
+    def send_offer_letter(self, request, pk=None):
+        instance = self.get_object()
+        if not instance.personal_email:
+            return Response({'error': 'Employee does not have a personal email address configured.'}, status=status.HTTP_400_BAD_REQUEST)
+        from hr.tasks import send_employee_offer_letter_email
+        from django.conf import settings
+        use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+        if use_celery:
+            send_employee_offer_letter_email.delay(str(instance.id))
+        else:
+            send_employee_offer_letter_email(str(instance.id))
+        return Response({'message': f'Official offer letter queued for dispatch to {instance.full_name} ({instance.personal_email}).'}, status=status.HTTP_200_OK)
 
     def perform_update(self, serializer):
         instance = serializer.instance
@@ -495,12 +520,25 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 }
             })
 
-        basic_pct = Decimal(str(data.get('basic_pct', '50.0')))
-        hra_pct_of_basic = Decimal(str(data.get('hra_pct', '50.0')))
+        basic_pct_val = data.get('basic_pct')
+        hra_pct_val = data.get('hra_pct')
+        basic_pct = Decimal(str(basic_pct_val if basic_pct_val is not None and str(basic_pct_val).strip() != '' else '50.0'))
+        hra_pct_of_basic = Decimal(str(hra_pct_val if hra_pct_val is not None and str(hra_pct_val).strip() != '' else '50.0'))
 
-        basic = Decimal(str(custom_components.get('basic') or custom_components.get('Basic') or (ctc * (basic_pct / Decimal('100.0'))))).quantize(Decimal('0.01'))
-        hra = Decimal(str(custom_components.get('hra') or custom_components.get('HRA') or (basic * (hra_pct_of_basic / Decimal('100.0'))))).quantize(Decimal('0.01'))
-        da = Decimal(str(custom_components.get('da') or custom_components.get('DA') or '0.00')).quantize(Decimal('0.01'))
+        comp_basic = custom_components.get('basic') if 'basic' in custom_components else custom_components.get('Basic')
+        if comp_basic is not None and str(comp_basic).strip() != '':
+            basic = Decimal(str(comp_basic)).quantize(Decimal('0.01'))
+        else:
+            basic = (ctc * (basic_pct / Decimal('100.0'))).quantize(Decimal('0.01'))
+
+        comp_hra = custom_components.get('hra') if 'hra' in custom_components else custom_components.get('HRA')
+        if comp_hra is not None and str(comp_hra).strip() != '':
+            hra = Decimal(str(comp_hra)).quantize(Decimal('0.01'))
+        else:
+            hra = (basic * (hra_pct_of_basic / Decimal('100.0'))).quantize(Decimal('0.01'))
+
+        comp_da = custom_components.get('da') if 'da' in custom_components else custom_components.get('DA')
+        da = Decimal(str(comp_da)).quantize(Decimal('0.01')) if comp_da is not None and str(comp_da).strip() != '' else Decimal('0.00')
 
         # Fixed recurring allowances (part of Contracted CTC)
         fixed_allowances_dict = {}
@@ -671,9 +709,179 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role == 'employee':
-            return AttendanceRecord.objects.filter(employee__user=user).select_related('employee').order_by('-date')
-        tenant = getattr(user, 'active_tenant', user)
-        return AttendanceRecord.objects.filter(tenant=tenant).select_related('employee').order_by('-date')
+            qs = AttendanceRecord.objects.filter(employee__user=user).select_related('employee')
+        else:
+            tenant = getattr(user, 'active_tenant', user)
+            qs = AttendanceRecord.objects.filter(tenant=tenant).select_related('employee')
+
+        employee_id = self.request.query_params.get('employee') or self.request.query_params.get('employee_id')
+        if employee_id:
+            qs = qs.filter(employee_id=employee_id)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(employee__full_name__icontains=search) |
+                Q(employee__employee_code__icontains=search)
+            )
+
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param != 'all':
+            qs = qs.filter(status=status_param)
+
+        year = self.request.query_params.get('year')
+        if year:
+            try:
+                qs = qs.filter(date__year=int(year))
+            except (ValueError, TypeError):
+                pass
+
+        month = self.request.query_params.get('month')
+        if month:
+            try:
+                qs = qs.filter(date__month=int(month))
+            except (ValueError, TypeError):
+                pass
+
+        start_date = self.request.query_params.get('start_date')
+        if start_date:
+            qs = qs.filter(date__gte=start_date)
+
+        end_date = self.request.query_params.get('end_date')
+        if end_date:
+            qs = qs.filter(date__lte=end_date)
+
+        return qs.order_by('-date')
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        import csv
+        from django.http import HttpResponse
+
+        qs = self.filter_queryset(self.get_queryset())
+        
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="attendance_export.csv"'
+        
+        writer = csv.writer(response)
+        writer.writerow([
+            'Employee Code',
+            'Employee Name',
+            'Department',
+            'Designation',
+            'Date',
+            'Day',
+            'Status',
+            'Check In',
+            'Check Out',
+            'Notes'
+        ])
+        
+        for rec in qs[:3000]:
+            emp = rec.employee
+            writer.writerow([
+                emp.employee_code if emp else '',
+                emp.full_name if emp else '',
+                emp.department.name if emp and emp.department else '',
+                emp.designation.name if emp and emp.designation else '',
+                rec.date.isoformat(),
+                rec.date.strftime('%A'),
+                rec.get_status_display() if hasattr(rec, 'get_status_display') else rec.status,
+                rec.check_in.strftime('%H:%M') if rec.check_in else '',
+                rec.check_out.strftime('%H:%M') if rec.check_out else '',
+                rec.notes or ''
+            ])
+            
+        return response
+
+    @action(detail=False, methods=['get'])
+    def employee_summary(self, request):
+        employee_id = request.query_params.get('employee_id') or request.query_params.get('employee')
+        if not employee_id:
+            return Response({'error': 'employee_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        try:
+            emp = Employee.objects.select_related('department', 'designation').get(id=employee_id, tenant=tenant)
+        except Employee.DoesNotExist:
+            return Response({'error': 'Employee not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        import calendar, datetime
+        today = timezone.now().date()
+        year = int(request.query_params.get('year', today.year))
+        month = int(request.query_params.get('month', today.month))
+
+        _, num_days = calendar.monthrange(year, month)
+        start_date = datetime.date(year, month, 1)
+        end_date = datetime.date(year, month, num_days)
+
+        records = AttendanceRecord.objects.filter(
+            employee=emp,
+            date__range=(start_date, end_date)
+        ).order_by('date')
+
+        rec_map = {r.date: r for r in records}
+
+        days_list = []
+        present_count = 0
+        half_day_count = 0
+        leave_count = 0
+        absent_count = 0
+        holiday_count = 0
+
+        for d in range(1, num_days + 1):
+            cur_date = datetime.date(year, month, d)
+            is_weekend = cur_date.isoweekday() in [7]
+            rec = rec_map.get(cur_date)
+            
+            day_status = rec.status if rec else ('weekend' if is_weekend else 'unmarked')
+            if rec:
+                if rec.status == 'present':
+                    present_count += 1
+                elif rec.status == 'half_day':
+                    half_day_count += 1
+                elif rec.status == 'leave':
+                    leave_count += 1
+                elif rec.status == 'absent':
+                    absent_count += 1
+            elif is_weekend:
+                holiday_count += 1
+
+            days_list.append({
+                'date': cur_date.isoformat(),
+                'day': cur_date.strftime('%a'),
+                'day_number': d,
+                'status': day_status,
+                'check_in': rec.check_in.strftime('%H:%M') if rec and rec.check_in else None,
+                'check_out': rec.check_out.strftime('%H:%M') if rec and rec.check_out else None,
+                'notes': rec.notes if rec else '',
+                'is_weekend': is_weekend,
+            })
+
+        effective_present = Decimal(str(present_count)) + (Decimal(str(half_day_count)) * Decimal('0.5'))
+
+        return Response({
+            'employee': {
+                'id': str(emp.id),
+                'name': emp.full_name,
+                'code': emp.employee_code,
+                'department': emp.department.name if emp.department else '',
+                'designation': emp.designation.name if emp.designation else '',
+                'employment_type': emp.get_employment_type_display(),
+            },
+            'month': month,
+            'year': year,
+            'month_name': calendar.month_name[month],
+            'total_calendar_days': num_days,
+            'present_days': present_count,
+            'half_days': half_day_count,
+            'leave_days': leave_count,
+            'absent_days': absent_count,
+            'weekends_holidays': holiday_count,
+            'effective_present_days': str(effective_present),
+            'attendance_rate': f"{(float(effective_present) / max(1, num_days - holiday_count) * 100):.1f}%",
+            'days': days_list
+        }, status=status.HTTP_200_OK)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -1479,41 +1687,78 @@ class HRDashboardView(APIView):
             })
 
         # Check critical payroll exceptions
-        critical_exceptions = PayrollException.objects.filter(
+        critical_exceptions_qs = PayrollException.objects.filter(
             tenant=tenant,
             severity='critical',
             is_resolved=False
-        ).count()
-        if critical_exceptions > 0:
+        ).select_related('employee')
+        critical_count = critical_exceptions_qs.count()
+        if critical_count > 0:
             alerts.append({
                 "type": "danger",
                 "title": "Critical Payroll Exceptions",
-                "message": f"{critical_exceptions} critical exception(s) blocking payroll approval.",
-                "action_url": "/hr/payroll"
+                "message": f"{critical_count} critical exception(s) blocking payroll approval.",
+                "action_url": "/hr/payroll",
+                "items": [
+                    {
+                        "id": str(ex.id),
+                        "employee_id": str(ex.employee.id) if ex.employee else None,
+                        "employee_name": ex.employee.full_name if ex.employee else "General",
+                        "employee_code": ex.employee.employee_code if ex.employee else "",
+                        "code": ex.code,
+                        "message": ex.message,
+                    }
+                    for ex in critical_exceptions_qs[:25]
+                ]
             })
 
         # Check employees without bank details
-        missing_bank = Employee.objects.filter(
+        missing_bank_qs = Employee.objects.filter(
             tenant=tenant,
             status='active'
-        ).filter(Q(bank_account_number='') | Q(bank_ifsc='')).count()
-        if missing_bank > 0:
+        ).filter(
+            Q(bank_account_number='') | Q(bank_ifsc='') | Q(bank_account_number__isnull=True) | Q(bank_ifsc__isnull=True)
+        ).select_related('department')
+        missing_bank_count = missing_bank_qs.count()
+        if missing_bank_count > 0:
             alerts.append({
                 "type": "warning",
                 "title": "Missing Bank Details",
-                "message": f"{missing_bank} active employee(s) have incomplete bank or IFSC information.",
-                "action_url": "/hr/employees"
+                "message": f"{missing_bank_count} active employee(s) have incomplete bank or IFSC information.",
+                "action_url": "/hr/employees",
+                "items": [
+                    {
+                        "id": str(emp.id),
+                        "employee_name": emp.full_name,
+                        "employee_code": emp.employee_code,
+                        "department": emp.department.name if emp.department else "",
+                        "bank_name": emp.bank_name or "",
+                        "bank_ifsc": emp.bank_ifsc or "",
+                        "bank_account_number": emp.bank_account_number or "",
+                    }
+                    for emp in missing_bank_qs[:25]
+                ]
             })
 
-        # Check employees without salary structure
+        # Check employees without salary structure (exclude contract employees!)
         assigned_emp_ids = EmployeeSalaryAssignment.objects.filter(tenant=tenant).values_list('employee_id', flat=True)
-        missing_salary = Employee.objects.filter(tenant=tenant, status='active').exclude(id__in=assigned_emp_ids).count()
-        if missing_salary > 0:
+        missing_salary_qs = Employee.objects.filter(tenant=tenant, status='active').exclude(employment_type='contract').exclude(id__in=assigned_emp_ids).select_related('department')
+        missing_salary_count = missing_salary_qs.count()
+        if missing_salary_count > 0:
             alerts.append({
                 "type": "warning",
                 "title": "Missing Salary Structures",
-                "message": f"{missing_salary} active employee(s) do not have an assigned salary structure.",
-                "action_url": "/hr/employees"
+                "message": f"{missing_salary_count} active employee(s) do not have an assigned salary structure.",
+                "action_url": "/hr/employees",
+                "items": [
+                    {
+                        "id": str(emp.id),
+                        "employee_name": emp.full_name,
+                        "employee_code": emp.employee_code,
+                        "department": emp.department.name if emp.department else "",
+                    }
+                    for emp in missing_salary_qs[:25]
+                ]
             })
 
         current_payroll_data = None
@@ -1991,6 +2236,27 @@ class HRDocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         tenant = getattr(user, 'active_tenant', user)
         serializer.save(tenant=tenant, uploaded_by=user)
+
+    @action(detail=True, methods=['get'])
+    def download(self, request, pk=None):
+        """
+        Secure authenticated streaming download compliant with DPDPA 2023.
+        Only tenant HR/Admin or the owner employee can access the document.
+        """
+        doc = self.get_object()
+        if not doc.file:
+            if doc.file_url:
+                from django.shortcuts import redirect
+                return redirect(doc.file_url)
+            return Response({'error': 'No file attached to this document record.'}, status=status.HTTP_404_NOT_FOUND)
+
+        from django.http import FileResponse
+        try:
+            response = FileResponse(doc.file.open('rb'))
+            response['Content-Disposition'] = f'inline; filename="{doc.file.name.split("/")[-1]}"'
+            return response
+        except Exception as e:
+            return Response({'error': f'Failed to retrieve file: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class HRMSSettingsView(APIView):

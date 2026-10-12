@@ -388,6 +388,9 @@ def compute_payslip_for_employee(employee, payroll_run):
     tenant = payroll_run.tenant
     settings = get_hrms_settings(tenant)
 
+    if employee.employment_type == 'contract':
+        return None
+
     working_days = get_total_working_days(month, year, settings.lop_calculation_rule)
     breakdown = get_attendance_breakdown(employee, month, year, working_days)
 
@@ -406,7 +409,19 @@ def compute_payslip_for_employee(employee, payroll_run):
     ).filter(
         Q(is_recurring=True) | Q(effective_date__year=year, effective_date__month=month)
     )
-    total_ab_amount = sum((Decimal(str(ab.amount)) for ab in allowances_bonuses), Decimal('0.00'))
+    
+    total_ab_amount = Decimal('0.00')
+    ab_breakdown = []
+    for ab in allowances_bonuses:
+        if getattr(ab, 'calculation_mode', 'fixed') == 'per_day':
+            days_count = Decimal(str(breakdown['present_days']))
+            calc_amt = (Decimal(str(ab.amount)) * days_count).quantize(Decimal('0.01'))
+            label = f"{ab.get_record_type_display()}: {ab.title} (₹{ab.amount}/day × {days_count} days)"
+        else:
+            calc_amt = Decimal(str(ab.amount)).quantize(Decimal('0.01'))
+            label = f"{ab.get_record_type_display()}: {ab.title}"
+        total_ab_amount += calc_amt
+        ab_breakdown.append((label, calc_amt))
 
     gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
 
@@ -461,9 +476,8 @@ def compute_payslip_for_employee(employee, payroll_run):
     if ot_amount > 0:
         earnings['Overtime'] = str(ot_amount)
 
-    for ab in allowances_bonuses:
-        key_label = f"{ab.get_record_type_display()}: {ab.title}"
-        earnings[key_label] = str(Decimal(str(ab.amount)).quantize(Decimal('0.01')))
+    for key_label, calc_amt in ab_breakdown:
+        earnings[key_label] = str(calc_amt)
 
     deductions = {}
     deduction_reasons = {}
@@ -596,6 +610,8 @@ def run_payroll(payroll_run_id):
         employees = Employee.objects.filter(
             tenant=run.tenant,
             date_of_joining__lte=end_date,
+        ).exclude(
+            employment_type='contract'
         ).filter(
             Q(status__in=['active', 'probation', 'notice_period']) |
             Q(attendance_records__date__range=(start_date, end_date))

@@ -76,8 +76,16 @@ def sales_order_detail(request, pk):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
     elif request.method == 'DELETE':
+        has_challans = DeliveryChallan.objects.filter(sales_order=order).exists()
+        has_invoices = SalesInvoice.objects.filter(
+            Q(source_sales_order=order) | Q(po_number=order.order_number, created_by=tenant)
+        ).exists()
+        if has_challans or has_invoices:
+            return Response(
+                {"message": "Cannot delete Sales Order because a Delivery Challan or Sales Invoice has already been generated from it."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         with transaction.atomic():
-            DeliveryChallan.objects.filter(sales_order=order).update(sales_order=None)
             source_quotation = getattr(order, 'source_quotation', None)
             if source_quotation:
                 other_orders = SalesOrder.objects.filter(source_quotation=source_quotation).exclude(pk=order.pk).exists()
@@ -100,14 +108,22 @@ def convert_order_to_invoice(request, pk):
         return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
     # Check if an invoice was already generated for this sales order
-    existing_invoice = SalesInvoice.objects.filter(created_by=tenant, po_number=order.order_number).first()
+    existing_invoice = SalesInvoice.objects.filter(
+        created_by=tenant
+    ).filter(
+        Q(source_sales_order=order) | Q(po_number=order.order_number)
+    ).first()
     if existing_invoice:
         return Response({"message": f"Order has already been converted to an invoice (#{existing_invoice.invoice_number})."}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
         # Lock order row for update
         order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
-        existing_invoice = SalesInvoice.objects.filter(created_by=tenant, po_number=order.order_number).first()
+        existing_invoice = SalesInvoice.objects.filter(
+            created_by=tenant
+        ).filter(
+            Q(source_sales_order=order) | Q(po_number=order.order_number)
+        ).first()
         if existing_invoice:
             return Response({"message": f"Order has already been converted to an invoice (#{existing_invoice.invoice_number})."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -124,6 +140,8 @@ def convert_order_to_invoice(request, pk):
         
         items_to_invoice = []
         is_post_delivery_invoicing = False
+        linked_challans = list(DeliveryChallan.objects.filter(sales_order=order, created_by=tenant).order_by('date', 'created_at'))
+        has_linked_challans = len(linked_challans) > 0
         all_dispatched = all((item.dispatched_quantity or 0) >= item.quantity for item in order.items.all())
 
         if items_payload and isinstance(items_payload, list) and len(items_payload) > 0:
@@ -149,7 +167,7 @@ def convert_order_to_invoice(request, pk):
                     continue
                 
                 pending_qty = order_item.pending_quantity
-                if pending_qty <= 0 and all_dispatched:
+                if pending_qty <= 0 and (all_dispatched or has_linked_challans or (order_item.dispatched_quantity or 0) > 0):
                     # Items were already dispatched via Delivery Challan; invoicing delivered quantity
                     is_post_delivery_invoicing = True
                     items_to_invoice.append((order_item, min(qty, order_item.quantity)))
@@ -165,7 +183,7 @@ def convert_order_to_invoice(request, pk):
             for item in order.items.all():
                 if item.pending_quantity > 0:
                     items_to_invoice.append((item, item.pending_quantity))
-                elif all_dispatched:
+                elif all_dispatched or has_linked_challans or (item.dispatched_quantity or 0) > 0:
                     # All items were delivered via Challan; invoice full order
                     is_post_delivery_invoicing = True
                     items_to_invoice.append((item, item.quantity))
@@ -196,24 +214,28 @@ def convert_order_to_invoice(request, pk):
 
         invoice = SalesInvoice(
             customer=order.customer,
-            customer_name=order.customer.name if order.customer else '',
-            customer_address=order.customer.address if order.customer else '',
-            place_of_supply=order.customer.state if order.customer and order.customer.state else None,
+            customer_name=order.customer_name or (order.customer.name if order.customer else ''),
+            customer_address=order.customer_address or (order.customer.address if order.customer else ''),
+            place_of_supply=order.place_of_supply or (order.customer.state if order.customer and order.customer.state else None),
+            delivery_address=order.delivery_address or None,
+            due_date=order.due_date or None,
+            round_off=order.round_off or Decimal('0.00'),
             invoice_number=next_invoice_number,
             invoice_date=date.today(),
             po_number=order.po_number or order.order_number,
             po_date=order.po_date,
             source_sales_order=order,
+            bank_account_id=order.bank_account_id,
+            template_id=order.template_id,
             created_by=tenant,
             total_amount=Decimal('0.00'),
             status='final',
         )
-        if is_post_delivery_invoicing:
+        if is_post_delivery_invoicing or has_linked_challans:
             invoice._skip_stock_deduction = True
 
-        linked_challans = list(DeliveryChallan.objects.filter(sales_order=order, created_by=tenant))
         if linked_challans:
-            invoice.challan_number = ", ".join(c.challan_number for c in linked_challans)
+            invoice.challan_number = ", ".join(dict.fromkeys(c.challan_number for c in linked_challans if c.challan_number))
             invoice.challan_date = max(c.date for c in linked_challans)
 
         invoice.save()
@@ -333,13 +355,33 @@ def convert_order_to_invoice(request, pk):
         all_fulfilled = all(item.is_fulfilled for item in all_order_items)
         any_dispatched = any((item.dispatched_quantity or 0) > 0 for item in all_order_items)
 
-        if all_fulfilled:
-            order.stage = 'completed'
-        elif any_dispatched:
-            order.stage = 'shipped'
+        order.stage = 'completed'
         order.save(update_fields=['stage'])
 
     return Response({"message": "Converted successfully", "invoice_id": invoice.id, "invoice_number": invoice.invoice_number})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def sales_order_next_number(request):
+    from billing.sequence_service import preview_next_number
+
+    tenant = request.user.active_tenant
+    prefix = request.GET.get('prefix') or getattr(tenant, 'sales_order_prefix', 'SO-') or 'SO-'
+    is_draft = request.GET.get('is_draft', 'false').lower() in ('true', '1')
+
+    next_number, suffix = preview_next_number(
+        tenant=tenant,
+        document_type='sales_order',
+        prefix=prefix,
+        is_draft=is_draft,
+    )
+
+    return Response({
+        'success': True,
+        'next_number': next_number,
+        'suffix': suffix,
+    })
 
 # =============================================================================
 # DELIVERY CHALLAN VIEWS

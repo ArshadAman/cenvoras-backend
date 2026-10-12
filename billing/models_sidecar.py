@@ -146,7 +146,13 @@ class SalesOrder(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order_number = models.CharField(max_length=100)
     date = models.DateField()
-    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True)
+    customer_name = models.CharField(max_length=255, null=True, blank=True)
+    customer_address = models.TextField(blank=True, null=True)
+    due_date = models.DateField(null=True, blank=True)
+    delivery_address = models.TextField(blank=True, null=True)
+    place_of_supply = models.CharField(max_length=50, blank=True, null=True)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     # Feature 78: Stages
     stage = models.CharField(
@@ -175,8 +181,15 @@ class SalesOrder(models.Model):
 
     def delete(self, *args, **kwargs):
         from billing.models_sidecar import DeliveryChallan
-        # Decouple any linked delivery challans so sales order deletion is never blocked
-        DeliveryChallan.objects.filter(sales_order=self).update(sales_order=None)
+        from billing.models import SalesInvoice
+        from django.core.exceptions import ValidationError
+        has_challans = DeliveryChallan.objects.filter(sales_order=self).exists()
+        has_invoices = SalesInvoice.objects.filter(
+            models.Q(source_sales_order=self) | models.Q(po_number=self.order_number, created_by=self.created_by)
+        ).exists()
+        if has_challans or has_invoices:
+            raise ValidationError("Cannot delete Sales Order because a Delivery Challan or Sales Invoice has already been generated from it.")
+
         if self.source_quotation:
             try:
                 q = self.source_quotation
@@ -191,7 +204,8 @@ class SalesOrder(models.Model):
         return super().delete(*args, **kwargs)
 
     def __str__(self):
-        return f"SO: {self.order_number} ({self.customer.name})"
+        cust_display = self.customer_name or (self.customer.name if self.customer else 'Unknown')
+        return f"SO: {self.order_number} ({cust_display})"
 
 class SalesOrderItem(models.Model):
     order = models.ForeignKey(SalesOrder, related_name='items', on_delete=models.CASCADE)
@@ -238,7 +252,7 @@ class DeliveryChallan(models.Model):
     po_number = models.CharField(max_length=100, blank=True, null=True)
     po_date = models.DateField(null=True, blank=True)
     
-    sales_order = models.ForeignKey(SalesOrder, on_delete=models.SET_NULL, null=True, blank=True)
+    sales_order = models.ForeignKey(SalesOrder, on_delete=models.SET_NULL, null=True, blank=True, related_name='delivery_challans')
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where goods are dispatched")
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)

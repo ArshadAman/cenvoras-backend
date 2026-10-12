@@ -707,15 +707,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def get_tax_type(self, instance):
         """
         Returns 'igst' if inter-state, 'cgst_sgst' if intra-state.
-        Logic: compare seller state (created_by.state) vs place_of_supply (or customer state).
+        CA AUDIT: Extract seller state code from seller GSTIN first 2 digits,
+        and compare with place of supply.
         """
-        seller_state = getattr(instance.created_by, 'state', None)
+        from billing.gst_utils import get_seller_state_code, get_pos_state_code
+        seller_state_code = get_seller_state_code(instance.created_by)
         pos = instance.place_of_supply
         if not pos and instance.customer:
             pos = getattr(instance.customer, 'state', None)
-        if not seller_state or not pos:
-            return 'cgst_sgst'
-        return 'igst' if seller_state.upper() != pos.upper() else 'cgst_sgst'
+        pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
+        return 'igst' if seller_state_code != pos_code else 'cgst_sgst'
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

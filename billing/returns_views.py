@@ -37,12 +37,18 @@ class CreditNoteSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
+        from decimal import Decimal
         items_data = validated_data.pop('items')
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = user
         
-        # Auto-generate credit note number if not provided (scoped strictly to tenant)
-        if not validated_data.get('credit_note_number'):
+        # Clean existing credit note number if provided (prevent double prefix)
+        if validated_data.get('credit_note_number'):
+            raw_num = validated_data['credit_note_number'].strip()
+            while raw_num.startswith('CN-CN-'):
+                raw_num = 'CN-' + raw_num[6:]
+            validated_data['credit_note_number'] = raw_num
+        else:
             existing_numbers = CreditNote.objects.filter(
                 created_by=user, credit_note_number__startswith='CN-'
             ).values_list('credit_note_number', flat=True)
@@ -56,13 +62,35 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                     continue
             validated_data['credit_note_number'] = f"CN-{max_num + 1:04d}"
             
+        # Calculate item line totals and total_amount including GST
+        total_gross = Decimal('0.00')
+        processed_items = []
+        for item_data in items_data:
+            qty = Decimal(str(item_data.get('quantity', 0) or 0))
+            price = Decimal(str(item_data.get('price', 0) or 0))
+            discount = Decimal(str(item_data.get('discount', 0) or 0))
+            tax_rate = Decimal(str(item_data.get('tax', 0) or 0))
+
+            base = qty * price
+            disc_amt = ((base * discount) / Decimal('100')).quantize(Decimal('0.01'))
+            taxable = (base - disc_amt).quantize(Decimal('0.01'))
+            tax_amt = ((taxable * tax_rate) / Decimal('100')).quantize(Decimal('0.01')) if tax_rate > 0 else Decimal('0.00')
+            line_gross = taxable + tax_amt
+
+            item_data['amount'] = line_gross
+            total_gross += line_gross
+            processed_items.append(item_data)
+
+        if not validated_data.get('total_amount') or Decimal(str(validated_data['total_amount'])) < total_gross:
+            validated_data['total_amount'] = total_gross
+
         credit_note = CreditNote.objects.create(**validated_data)
 
         target_warehouse = credit_note.warehouse
         if not target_warehouse:
             target_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
 
-        for item_data in items_data:
+        for item_data in processed_items:
             CreditNoteItem.objects.create(credit_note=credit_note, **item_data)
 
             # Restore stock (returned goods come back in)
@@ -76,13 +104,13 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 )
                 StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') + qty)
 
-        # Reduce customer balance
+        # Reduce customer balance by full credit note amount (including GST reversal)
         if credit_note.customer:
             Customer.objects.filter(pk=credit_note.customer.pk).update(
                 current_balance=F('current_balance') - credit_note.total_amount
             )
 
-        # Create Ledger Entries
+        # Create Ledger Entries (Dr Sales Return, Dr Output GST, Cr AR)
         from ledger.services import AccountingService
         AccountingService.create_credit_note_entries(credit_note)
 
@@ -110,12 +138,18 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
+        from decimal import Decimal
         items_data = validated_data.pop('items')
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = user
         
-        # Auto-generate debit note number if not provided (scoped strictly to tenant)
-        if not validated_data.get('debit_note_number'):
+        # Clean existing debit note number if provided (prevent double prefix)
+        if validated_data.get('debit_note_number'):
+            raw_num = validated_data['debit_note_number'].strip()
+            while raw_num.startswith('DN-DN-'):
+                raw_num = 'DN-' + raw_num[6:]
+            validated_data['debit_note_number'] = raw_num
+        else:
             existing_numbers = DebitNote.objects.filter(
                 created_by=user, debit_note_number__startswith='DN-'
             ).values_list('debit_note_number', flat=True)
@@ -129,13 +163,35 @@ class DebitNoteSerializer(serializers.ModelSerializer):
                     continue
             validated_data['debit_note_number'] = f"DN-{max_num + 1:04d}"
             
+        # Calculate item line totals and total_amount including GST
+        total_gross = Decimal('0.00')
+        processed_items = []
+        for item_data in items_data:
+            qty = Decimal(str(item_data.get('quantity', 0) or 0))
+            price = Decimal(str(item_data.get('price', 0) or 0))
+            discount = Decimal(str(item_data.get('discount', 0) or 0))
+            tax_rate = Decimal(str(item_data.get('tax', 0) or 0))
+
+            base = qty * price
+            disc_amt = ((base * discount) / Decimal('100')).quantize(Decimal('0.01'))
+            taxable = (base - disc_amt).quantize(Decimal('0.01'))
+            tax_amt = ((taxable * tax_rate) / Decimal('100')).quantize(Decimal('0.01')) if tax_rate > 0 else Decimal('0.00')
+            line_gross = taxable + tax_amt
+
+            item_data['amount'] = line_gross
+            total_gross += line_gross
+            processed_items.append(item_data)
+
+        if not validated_data.get('total_amount') or Decimal(str(validated_data['total_amount'])) < total_gross:
+            validated_data['total_amount'] = total_gross
+
         debit_note = DebitNote.objects.create(**validated_data)
 
         source_warehouse = debit_note.warehouse
         if not source_warehouse:
             source_warehouse = Warehouse.objects.filter(created_by=user, is_active=True).first()
 
-        for item_data in items_data:
+        for item_data in processed_items:
             DebitNoteItem.objects.create(debit_note=debit_note, **item_data)
 
             # Decrease stock (goods being returned to vendor)
@@ -151,7 +207,7 @@ class DebitNoteSerializer(serializers.ModelSerializer):
                 )
                 StockPoint.objects.filter(pk=sp.pk).update(quantity=F('quantity') - qty)
 
-        # Create Ledger Entries
+        # Create Ledger Entries (Dr AP, Cr Purchases/Purchase Return, Cr Input GST)
         from ledger.services import AccountingService
         AccountingService.create_debit_note_entries(debit_note)
 

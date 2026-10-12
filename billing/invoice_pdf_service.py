@@ -582,10 +582,12 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     round_off = Decimal(str(getattr(invoice_obj, 'round_off', 0) or 0))
     grand_total = Decimal(str(getattr(invoice_obj, 'total_amount', subtotal + total_tax + round_off)))
 
-    # Determine Intra-state vs Inter-state
-    seller_state = getattr(tenant, 'state', None)
+    # Determine Intra-state vs Inter-state (CA Audit: state extracted from seller GSTIN)
+    from billing.gst_utils import get_seller_state_code, get_pos_state_code
+    seller_state_code = get_seller_state_code(tenant)
     customer_state = getattr(invoice_obj, 'place_of_supply', None) or (invoice_obj.customer.state if getattr(invoice_obj, 'customer', None) else None)
-    is_interstate = bool(seller_state and customer_state and seller_state.strip().upper() != customer_state.strip().upper())
+    pos_code = get_pos_state_code(customer_state, fallback_state=seller_state_code)
+    is_interstate = (seller_state_code != pos_code)
 
     summary_rows = [
         [Paragraph("Taxable Subtotal:", body_style), Paragraph(f"Rs. {subtotal:,.2f}", td_style_right)],

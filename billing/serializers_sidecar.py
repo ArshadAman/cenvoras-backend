@@ -157,36 +157,90 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
 
 class SalesOrderSerializer(serializers.ModelSerializer):
     items = SalesOrderItemSerializer(many=True)
-    customer_name = serializers.CharField(write_only=True, required=True)
+    customer_name = serializers.CharField(required=False, allow_blank=True)
     customer_display_name = serializers.CharField(source='customer.name', read_only=True)
     customer_email = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    order_number = serializers.CharField(required=False, allow_blank=True)
+    date = serializers.DateField(required=False, allow_null=True)
+    invoice_number = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    invoice_date = serializers.DateField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name', 'customer_email', 'customer_phone', 'stage', 'total_amount', 'notes', 'po_number', 'po_date', 'source_quotation', 'bank_account_id', 'template_id', 'items', 'created_by', 'created_at']
+        fields = [
+            'id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name',
+            'customer_email', 'customer_phone', 'customer_address', 'due_date', 'delivery_address',
+            'place_of_supply', 'round_off', 'stage', 'total_amount', 'notes', 'po_number', 'po_date',
+            'source_quotation', 'bank_account_id', 'template_id', 'items', 'created_by', 'created_at',
+            'invoice_number', 'invoice_date'
+        ]
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if not data.get('order_number') and data.get('invoice_number'):
+            data['order_number'] = data.get('invoice_number')
+        if not data.get('date') and data.get('invoice_date'):
+            data['date'] = data.get('invoice_date')
+        if 'total_amount' in data and data['total_amount'] is not None and str(data['total_amount']).strip():
+            try:
+                data['total_amount'] = f"{Decimal(str(data['total_amount'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
+        if 'round_off' in data and data['round_off'] is not None and str(data['round_off']).strip():
+            try:
+                data['round_off'] = f"{Decimal(str(data['round_off'])).quantize(Decimal('0.01')):.2f}"
+            except Exception:
+                pass
+        return super().to_internal_value(data)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         from billing.sequence_service import display_document_number
+        from billing.models_sidecar import DeliveryChallan
+        from billing.models import SalesInvoice
         ret['display_number'] = display_document_number(instance.order_number)
-        ret['customer_name'] = instance.customer.name if instance.customer else ''
+        ret['customer_name'] = instance.customer_name or (instance.customer.name if instance.customer else '')
         ret['invoice_number'] = instance.order_number
         ret['invoice_date'] = str(instance.date) if instance.date else ''
+        ret['delivery_address'] = instance.delivery_address or ''
+        ret['place_of_supply'] = instance.place_of_supply or ''
+        ret['due_date'] = str(instance.due_date) if instance.due_date else None
+        ret['round_off'] = str(instance.round_off or 0)
+
+        # Linked challans info
+        linked_challans = list(DeliveryChallan.objects.filter(sales_order=instance).values_list('challan_number', flat=True))
+        # Linked invoices info
+        linked_invoices = list(SalesInvoice.objects.filter(
+            models.Q(source_sales_order=instance) | models.Q(po_number=instance.order_number, created_by=instance.created_by)
+        ).values_list('invoice_number', flat=True))
+
+        ret['has_challans'] = len(linked_challans) > 0
+        ret['challan_numbers'] = linked_challans
+        ret['challan_number'] = ", ".join(linked_challans) if linked_challans else None
+        ret['has_invoices'] = len(linked_invoices) > 0
+        ret['is_invoiced'] = len(linked_invoices) > 0
+        ret['invoice_numbers'] = linked_invoices
         return ret
 
     def _resolve_customer(self, validated_data):
         """Find or create a Customer from the customer_name field."""
         from .models import Customer
-        customer_name = validated_data.pop('customer_name', None)
+        customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None) or ''
         customer_phone = validated_data.pop('customer_phone', None) or ''
+        customer_address = validated_data.get('customer_address') or ''
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
         if not customer_name:
-            raise serializers.ValidationError({'customer_name': 'Customer name is required.'})
+            return None
 
         # Try to find existing customer by name for this user
         customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
@@ -195,21 +249,34 @@ class SalesOrderSerializer(serializers.ModelSerializer):
                 name=customer_name,
                 email=customer_email if customer_email else None,
                 phone=customer_phone if customer_phone else None,
+                address=customer_address if customer_address else None,
                 created_by=user,
             )
             PartyMeta.objects.get_or_create(customer=customer)
+        elif customer_address and not customer.address:
+            customer.address = customer_address
+            customer.save(update_fields=['address'])
         return customer
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         customer = self._resolve_customer(validated_data)
-        validated_data['customer'] = customer
+        if customer:
+            validated_data['customer'] = customer
+            if not validated_data.get('customer_name'):
+                validated_data['customer_name'] = customer.name
+            if not validated_data.get('customer_address') and customer.address:
+                validated_data['customer_address'] = customer.address
         tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = tenant
         
         if not validated_data.get('order_number'):
             from billing.sequence_service import allocate_next_number
             validated_data['order_number'] = allocate_next_number(tenant, document_type='sales_order')
+
+        # Pop leftover write-only fields
+        validated_data.pop('invoice_number', None)
+        validated_data.pop('invoice_date', None)
 
         order = SalesOrder.objects.create(**validated_data)
         
@@ -218,17 +285,21 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             
         return order
 
-
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         
         # Handle customer name change
         if 'customer_name' in validated_data:
             customer = self._resolve_customer(validated_data)
-            instance.customer = customer
+            if customer:
+                instance.customer = customer
+                if not validated_data.get('customer_name'):
+                    validated_data['customer_name'] = customer.name
         # Pop leftover write-only fields
         validated_data.pop('customer_email', None)
         validated_data.pop('customer_phone', None)
+        validated_data.pop('invoice_number', None)
+        validated_data.pop('invoice_date', None)
 
         # Update scalar fields
         for attr, value in validated_data.items():

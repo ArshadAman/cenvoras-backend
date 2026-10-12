@@ -64,6 +64,7 @@ urlpatterns = [
     path('quotations/<uuid:pk>/convert-to-sales-order/', views_sidecar.quotation_convert_to_sales_order, name='quotation_convert_to_sales_order'),
 
     path('sales-orders/', views_sidecar.sales_order_list_create, name='sales_order_list_create'),
+    path('sales-orders/next-number/', views_sidecar.sales_order_next_number, name='sales_order_next_number'),
     path('sales-orders/<uuid:pk>/', views_sidecar.sales_order_detail, name='sales_order_detail'),
     path('sales-orders/<uuid:pk>/pdf/', views_sidecar.sales_order_pdf_download, name='sales_order_pdf_download'),
     path('sales-orders/<uuid:pk>/convert_to_invoice/', views_sidecar.convert_order_to_invoice, name='convert_order_to_invoice'),

@@ -16,12 +16,12 @@ class HRAccountingService:
     HR_ACCOUNTS = [
         ('5300', 'Salaries & Wages Expense', AccountType.EXPENSE),
         ('5302', 'Employer Statutory Contributions', AccountType.EXPENSE),
-        ('2200', 'Salaries Payable', AccountType.LIABILITY),
-        ('2201', 'PF Payable', AccountType.LIABILITY),
-        ('2202', 'ESI Payable', AccountType.LIABILITY),
-        ('2203', 'TDS Payable', AccountType.LIABILITY),
-        ('2204', 'Professional Tax Payable', AccountType.LIABILITY),
-        ('2205', 'Other Payroll Deductions Payable', AccountType.LIABILITY),
+        ('2250', 'Salaries Payable', AccountType.LIABILITY),
+        ('2251', 'PF Payable', AccountType.LIABILITY),
+        ('2252', 'ESI Payable', AccountType.LIABILITY),
+        ('2253', 'TDS Payable', AccountType.LIABILITY),
+        ('2254', 'Professional Tax Payable', AccountType.LIABILITY),
+        ('2255', 'Other Payroll Deductions Payable', AccountType.LIABILITY),
         ('1250', 'Employee Advances & Loans', AccountType.ASSET),
     ]
 
@@ -30,16 +30,37 @@ class HRAccountingService:
         """Ensure standard HR/payroll chart of accounts exist for this tenant."""
         accounts = {}
         for code, name, acc_type in cls.HR_ACCOUNTS:
-            account, _ = Account.objects.get_or_create(
-                code=code,
-                created_by=tenant,
-                defaults={
-                    'name': name,
-                    'account_type': acc_type,
-                    'description': f"HRMS {name} account",
-                    'is_active': True,
-                }
-            )
+            account = Account.objects.filter(created_by=tenant, name__iexact=name).first()
+            if account:
+                if account.code != code:
+                    account.code = code
+                    account.save(update_fields=['code'])
+            else:
+                account = Account.objects.filter(created_by=tenant, code=code).first()
+                if account:
+                    if account.name.strip().lower() != name.strip().lower():
+                        # Another account is using this code; create with unique name
+                        account, _ = Account.objects.get_or_create(
+                            name=name,
+                            created_by=tenant,
+                            defaults={
+                                'code': code,
+                                'account_type': acc_type,
+                                'description': f"HRMS {name} account",
+                                'is_active': True,
+                            }
+                        )
+                else:
+                    account, _ = Account.objects.get_or_create(
+                        code=code,
+                        created_by=tenant,
+                        defaults={
+                            'name': name,
+                            'account_type': acc_type,
+                            'description': f"HRMS {name} account",
+                            'is_active': True,
+                        }
+                    )
             accounts[code] = account
         return accounts
 
@@ -110,7 +131,7 @@ class HRAccountingService:
         if total_net > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2200'],
+                account=accounts['2250'],
                 debit=Decimal('0.00'),
                 credit=total_net,
                 description=f"Net Salaries Payable for {period_label}",
@@ -123,7 +144,7 @@ class HRAccountingService:
         if combined_pf > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2201'],
+                account=accounts['2251'],
                 debit=Decimal('0.00'),
                 credit=combined_pf,
                 description=f"PF Payable (Employee ₹{total_emp_pf} + Employer ₹{total_empr_pf}) for {period_label}",
@@ -136,7 +157,7 @@ class HRAccountingService:
         if combined_esi > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2202'],
+                account=accounts['2252'],
                 debit=Decimal('0.00'),
                 credit=combined_esi,
                 description=f"ESI Payable (Employee ₹{total_emp_esi} + Employer ₹{total_empr_esi}) for {period_label}",
@@ -148,7 +169,7 @@ class HRAccountingService:
         if total_tds > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2203'],
+                account=accounts['2253'],
                 debit=Decimal('0.00'),
                 credit=total_tds,
                 description=f"TDS Payable deducted for {period_label}",
@@ -160,7 +181,7 @@ class HRAccountingService:
         if total_pt > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2204'],
+                account=accounts['2254'],
                 debit=Decimal('0.00'),
                 credit=total_pt,
                 description=f"Professional Tax Payable for {period_label}",
@@ -185,7 +206,7 @@ class HRAccountingService:
         if total_other_deductions > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
-                account=accounts['2205'],
+                account=accounts['2255'],
                 debit=Decimal('0.00'),
                 credit=total_other_deductions,
                 description=f"Other Payroll Deductions for {period_label}",
@@ -218,13 +239,13 @@ class HRAccountingService:
         if not payment_account:
             from ledger.services import AccountingService
             default_accs = AccountingService.get_or_create_default_accounts(tenant)
-            payment_account = default_accs.get('1001') or accounts['2200']
+            payment_account = default_accs.get('1001') or accounts['2250']
 
         if total_net > 0:
             # 1. Dr. Salaries Payable
             GeneralLedgerEntry.objects.create(
                 date=payment_date,
-                account=accounts['2200'],
+                account=accounts['2250'],
                 debit=total_net,
                 credit=Decimal('0.00'),
                 description=f"Disbursement of Net Salaries for {period_label}",

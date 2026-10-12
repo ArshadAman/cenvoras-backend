@@ -50,6 +50,7 @@ urlpatterns = [
     # Payments
     path('payments/', payment_views.payment_list_create, name='payment_list_create'),
     path('payments/<uuid:pk>/', payment_views.payment_detail, name='payment_detail'),
+    path('payments/<uuid:pk>/allocate/', payment_views.allocate_existing_payment, name='allocate_existing_payment'),
     
     # Reports
     path('reports/overdue-bills/', report_views.overdue_bills_report, name='overdue_bills_report'),
@@ -87,6 +88,8 @@ urlpatterns = [
     path('gst/tax-register/', gst_views.tax_register, name='tax_register'),
     path('gst/tax-register/<uuid:invoice_id>/', gst_views.tax_register_invoice_detail, name='tax_register_invoice_detail'),
     path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
+    path('gst/gstr3b/', gst_views.gstr3b_summary, name='gstr3b_summary'),
+    path('gst/gstr-3b/', gst_views.gstr3b_summary, name='gstr3b_summary_alias'),
     path('gst/e-invoice/', gst_views.generate_einvoice, name='generate_einvoice'),
     path('gst/e-way-bill/', gst_views.generate_eway_bill, name='generate_eway_bill'),
     

@@ -151,14 +151,14 @@ def balance_sheet(request):
     Balance Sheet: Assets = Liabilities + Equity
     Query Params: ?as_of=YYYY-MM-DD (defaults to today)
     """
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     as_of = request.query_params.get('as_of')
 
     # Ensure default accounts exist
-    AccountingService.get_or_create_default_accounts(user)
+    AccountingService.get_or_create_default_accounts(tenant)
 
     def get_balance(account):
-        entries = GeneralLedgerEntry.objects.filter(account=account, created_by=user)
+        entries = GeneralLedgerEntry.objects.filter(account=account, created_by=tenant)
         if as_of:
             entries = entries.filter(date__lte=as_of)
         totals = entries.aggregate(
@@ -173,7 +173,7 @@ def balance_sheet(request):
 
     # Assets
     asset_accounts = Account.objects.filter(
-        created_by=user, account_type=AccountType.ASSET, is_active=True
+        created_by=tenant, account_type=AccountType.ASSET, is_active=True
     ).order_by('code', 'name')
     asset_items = []
     total_assets = Decimal('0')
@@ -190,7 +190,7 @@ def balance_sheet(request):
 
     # Liabilities
     liability_accounts = Account.objects.filter(
-        created_by=user, account_type=AccountType.LIABILITY, is_active=True
+        created_by=tenant, account_type=AccountType.LIABILITY, is_active=True
     ).order_by('code', 'name')
     liability_items = []
     total_liabilities = Decimal('0')
@@ -207,7 +207,7 @@ def balance_sheet(request):
 
     # Equity
     equity_accounts = Account.objects.filter(
-        created_by=user, account_type=AccountType.EQUITY, is_active=True
+        created_by=tenant, account_type=AccountType.EQUITY, is_active=True
     ).order_by('code', 'name')
     equity_items = []
     total_equity = Decimal('0')
@@ -225,11 +225,11 @@ def balance_sheet(request):
     # Retained Earnings (Net Profit carried forward)
     # Revenue - Expenses
     revenue_total = Decimal('0')
-    for acc in Account.objects.filter(created_by=user, account_type=AccountType.REVENUE):
+    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.REVENUE):
         revenue_total += get_balance(acc)
 
     expense_total = Decimal('0')
-    for acc in Account.objects.filter(created_by=user, account_type=AccountType.EXPENSE):
+    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.EXPENSE):
         expense_total += get_balance(acc)
 
     retained_earnings = revenue_total - expense_total
@@ -415,10 +415,10 @@ def cashbook(request):
 @permission_classes([IsAuthenticated])
 def balance_sheet_diagnostics(request):
     """Detailed diagnostics to trace balance-sheet and trial-balance differences."""
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     as_of = request.query_params.get('as_of')
 
-    trial_data = AccountingService.get_trial_balance(user)
+    trial_data = AccountingService.get_trial_balance(tenant, date_to=as_of)
     total_debits = Decimal(str(trial_data.get('total_debits', 0) or 0))
     total_credits = Decimal(str(trial_data.get('total_credits', 0) or 0))
     trial_difference = total_debits - total_credits

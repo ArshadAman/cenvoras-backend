@@ -31,6 +31,7 @@ class AccountingService:
             ('2001', 'Accounts Payable', AccountType.LIABILITY),
             ('2100', 'Accrued Expenses', AccountType.LIABILITY),
             ('2101', 'Customer Advances', AccountType.LIABILITY),
+            ('2200', 'GST Payable', AccountType.LIABILITY),
             ('2201', 'Output CGST', AccountType.LIABILITY),
             ('2202', 'Output SGST', AccountType.LIABILITY),
             ('2203', 'Output IGST', AccountType.LIABILITY),
@@ -51,14 +52,38 @@ class AccountingService:
             ('6001', 'Purchases', AccountType.EXPENSE),
         ]
         
-        existing_accounts = Account.objects.filter(
-            created_by=user,
-            code__in=[code for code, _name, _type in default_accounts],
-        )
+        existing_accounts = Account.objects.filter(created_by=user)
         accounts_by_code = {account.code: account for account in existing_accounts}
+        accounts_by_name = {account.name.strip().lower(): account for account in existing_accounts}
+
+        # Known HR collision mappings: if an HR account was initialized with codes 2200-2205, migrate its code to 2250-2255
+        hr_collision_map = {
+            'salaries payable': '2250',
+            'pf payable': '2251',
+            'esi payable': '2252',
+            'tds payable': '2253',
+            'professional tax payable': '2254',
+            'other payroll deductions payable': '2255',
+        }
 
         for code, name, account_type in default_accounts:
-            account = accounts_by_code.get(code)
+            account = accounts_by_name.get(name.strip().lower())
+            
+            # If account not found by name, check by code
+            if account is None:
+                acc_by_code = accounts_by_code.get(code)
+                if acc_by_code:
+                    clean_other = acc_by_code.name.strip().lower()
+                    if clean_other == name.strip().lower():
+                        account = acc_by_code
+                    elif clean_other in hr_collision_map:
+                        # Collision: re-assign HR account code to 225x range
+                        new_hr_code = hr_collision_map[clean_other]
+                        acc_by_code.code = new_hr_code
+                        acc_by_code.save(update_fields=['code'])
+                        accounts_by_code[new_hr_code] = acc_by_code
+                        accounts_by_code.pop(code, None)
+
             if account is None:
                 account, _ = Account.objects.get_or_create(
                     code=code,
@@ -70,6 +95,14 @@ class AccountingService:
                     }
                 )
                 accounts_by_code[code] = account
+                accounts_by_name[name.strip().lower()] = account
+            elif account.code != code:
+                # If found by name but with a non-standard code, and standard code is free, sync it
+                if code not in accounts_by_code:
+                    accounts_by_code.pop(account.code, None)
+                    account.code = code
+                    account.save(update_fields=['code'])
+                    accounts_by_code[code] = account
 
             # Store by both code and clean name for easy access
             clean_name = name.lower().replace(' ', '_').replace('\'', '')
@@ -180,11 +213,13 @@ class AccountingService:
         if seller_state and pos:
             is_interstate = (seller_state.strip().upper() != pos.strip().upper())
 
+        total_taxable = Decimal('0.00')
         total_tax = Decimal('0.00')
 
         if line_items:
             for item in line_items:
                 taxable_amount, tax_amount = cls._calculate_item_tax_split(item)
+                total_taxable += taxable_amount
                 total_tax += tax_amount
 
                 product_name = item.product.name if item.product else (item.description or 'Item')
@@ -218,6 +253,7 @@ class AccountingService:
         else:
             round_off = getattr(sales_invoice, 'round_off', Decimal('0.00')) or Decimal('0.00')
             taxable_amount = sales_invoice.total_amount - round_off
+            total_taxable = taxable_amount
             GeneralLedgerEntry.objects.create(
                 date=sales_invoice.invoice_date,
                 account=sr_account,
@@ -272,9 +308,12 @@ class AccountingService:
                         created_by=user
                     )
 
-        # Credit/Debit: Rounding Off (handle difference to keep Balance Sheet balanced)
-        round_off = getattr(sales_invoice, 'round_off', Decimal('0.00')) or Decimal('0.00')
-        if round_off != 0:
+        # Credit/Debit: Rounding Off (guarantee Debits == Credits down to the exact cent)
+        total_credited = total_taxable + total_tax
+        total_debited = Decimal(str(sales_invoice.total_amount or '0.00'))
+        round_off_diff = (total_debited - total_credited).quantize(Decimal('0.01'))
+
+        if round_off_diff != Decimal('0.00'):
             rounding_off_account = accounts.get('rounding_off')
             if rounding_off_account is None:
                 rounding_off_account, _ = Account.objects.get_or_create(
@@ -292,8 +331,8 @@ class AccountingService:
             GeneralLedgerEntry.objects.create(
                 date=sales_invoice.invoice_date,
                 account=rounding_off_account,
-                debit=abs(round_off) if round_off < 0 else 0,
-                credit=round_off if round_off > 0 else 0,
+                debit=abs(round_off_diff) if round_off_diff < 0 else 0,
+                credit=round_off_diff if round_off_diff > 0 else 0,
                 description=f"Rounding off adjustment for Invoice {sales_invoice.invoice_number}",
                 reference=sales_invoice.invoice_number,
                 sales_invoice=sales_invoice,
@@ -340,6 +379,7 @@ class AccountingService:
         if buyer_state and vendor_state:
             is_interstate = (buyer_state.strip().upper() != vendor_state.strip().upper())
 
+        total_taxable = Decimal('0.00')
         total_tax = Decimal('0.00')
 
         vendor_obj = getattr(purchase_bill, 'vendor', None)
@@ -347,6 +387,7 @@ class AccountingService:
         if line_items:
             for item in line_items:
                 taxable_amount, tax_amount = cls._calculate_item_tax_split(item)
+                total_taxable += taxable_amount
                 total_tax += tax_amount
 
                 item_description = f"Purchase of {item.product.name}"
@@ -379,6 +420,7 @@ class AccountingService:
         else:
             round_off = getattr(purchase_bill, 'round_off', Decimal('0.00')) or Decimal('0.00')
             taxable_amount = purchase_bill.total_amount - round_off
+            total_taxable = taxable_amount
             GeneralLedgerEntry.objects.create(
                 date=purchase_bill.bill_date,
                 account=pur_account,
@@ -459,9 +501,12 @@ class AccountingService:
             created_by=user
         )
 
-        # Debit/Credit: Rounding Off adjustment for purchase bill
-        round_off = getattr(purchase_bill, 'round_off', Decimal('0.00')) or Decimal('0.00')
-        if round_off != 0:
+        # Debit/Credit: Rounding Off adjustment (guarantee Debits == Credits down to the exact cent)
+        total_debited = total_taxable + total_tax
+        total_credited = Decimal(str(purchase_bill.total_amount or '0.00'))
+        round_off_diff = (total_credited - total_debited).quantize(Decimal('0.01'))
+
+        if round_off_diff != Decimal('0.00'):
             rounding_off_account = accounts.get('rounding_off')
             if rounding_off_account is None:
                 rounding_off_account, _ = Account.objects.get_or_create(
@@ -479,8 +524,8 @@ class AccountingService:
             GeneralLedgerEntry.objects.create(
                 date=purchase_bill.bill_date,
                 account=rounding_off_account,
-                debit=round_off if round_off > 0 else 0,
-                credit=abs(round_off) if round_off < 0 else 0,
+                debit=round_off_diff if round_off_diff > 0 else 0,
+                credit=abs(round_off_diff) if round_off_diff < 0 else 0,
                 description=f"Rounding off adjustment for Bill {purchase_bill.bill_number}",
                 reference=purchase_bill.bill_number,
                 purchase_bill=purchase_bill,

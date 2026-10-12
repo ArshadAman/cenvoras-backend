@@ -50,7 +50,12 @@ def purchase_bill_list_create(request):
         vendor_filter = request.GET.get('vendor')
         if vendor_filter:
             from django.db.models import Q
-            bills = bills.filter(Q(vendor_id=vendor_filter) | Q(vendor__id=vendor_filter))
+            from .models import Vendor
+            vend_obj = Vendor.objects.filter(id=vendor_filter).first()
+            if vend_obj and vend_obj.name:
+                bills = bills.filter(Q(vendor_id=vendor_filter) | Q(vendor__id=vendor_filter) | Q(vendor_name__iexact=vend_obj.name))
+            else:
+                bills = bills.filter(Q(vendor_id=vendor_filter) | Q(vendor__id=vendor_filter))
 
         serializer = PurchaseBillSerializer(bills, many=True)
         return Response({'success': True, 'data': serializer.data})
@@ -155,6 +160,15 @@ def purchase_order_list_create(request):
             .order_by('-created_at')
             .prefetch_related('items__product')
         )
+        vendor_filter = request.GET.get('vendor')
+        if vendor_filter:
+            from django.db.models import Q
+            from .models import Vendor
+            vend_obj = Vendor.objects.filter(id=vendor_filter).first()
+            if vend_obj and vend_obj.name:
+                orders = orders.filter(Q(vendor_id=vendor_filter) | Q(vendor__id=vendor_filter))
+            else:
+                orders = orders.filter(vendor_id=vendor_filter)
         serializer = PurchaseOrderSerializer(orders, many=True)
         return Response({'success': True, 'data': serializer.data})
 
@@ -278,7 +292,12 @@ def sales_invoice_list_create(request):
             )
             customer_id = request.GET.get('customer')
             if customer_id:
-                invoices = invoices.filter(customer_id=customer_id)
+                from .models import Customer
+                cust_obj = Customer.objects.filter(id=customer_id).first()
+                if cust_obj and cust_obj.name:
+                    invoices = invoices.filter(Q(customer_id=customer_id) | Q(customer__id=customer_id) | Q(customer_name__iexact=cust_obj.name))
+                else:
+                    invoices = invoices.filter(Q(customer_id=customer_id) | Q(customer__id=customer_id))
 
             status_filter = request.GET.get('status')
             if status_filter and status_filter != 'all':

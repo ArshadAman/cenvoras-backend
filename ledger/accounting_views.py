@@ -270,24 +270,40 @@ def general_ledger(request, account_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def trial_balance(request):
-    """Get trial balance for all accounts"""
-    trial_balance_data = AccountingService.get_trial_balance(request.user)
+    """Get trial balance for all accounts with as_of date filtering."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    as_of = request.query_params.get('as_of') or request.query_params.get('to_date')
+
+    AccountingService.get_or_create_default_accounts(tenant)
+    trial_balance_data = AccountingService.get_trial_balance(tenant, date_to=as_of)
     
-    # Serialize the accounts data
     accounts_data = []
     for account_info in trial_balance_data['accounts']:
+        dr = Decimal(str(account_info['debit_total'] or 0))
+        cr = Decimal(str(account_info['credit_total'] or 0))
+        net_dr = dr - cr if dr > cr else Decimal('0.00')
+        net_cr = cr - dr if cr > dr else Decimal('0.00')
+
         accounts_data.append({
             'account': AccountSerializer(account_info['account']).data,
-            'debit_total': account_info['debit_total'],
-            'credit_total': account_info['credit_total'], 
-            'balance': account_info['balance']
+            'debit_total': float(dr),
+            'credit_total': float(cr),
+            'net_debit': float(net_dr),
+            'net_credit': float(net_cr),
+            'balance': float(account_info['balance']),
         })
     
+    total_dr = Decimal(str(trial_balance_data['total_debits'] or 0))
+    total_cr = Decimal(str(trial_balance_data['total_credits'] or 0))
+    difference = total_dr - total_cr
+    
     return Response({
+        'as_of': as_of,
         'accounts': accounts_data,
-        'total_debits': trial_balance_data['total_debits'],
-        'total_credits': trial_balance_data['total_credits'],
-        'is_balanced': trial_balance_data['is_balanced']
+        'total_debits': float(total_dr),
+        'total_credits': float(total_cr),
+        'difference': float(difference),
+        'is_balanced': abs(difference) < Decimal('0.01'),
     })
 
 
@@ -1288,29 +1304,79 @@ def create_manual_journal_entry(request):
 @permission_classes([IsAuthenticated])
 def repair_round_off_entries(request):
     """
-    Rebuild ledger entries for all invoices/bills that have a round_off value
-    but are missing the corresponding Rounding Off journal entry.
-    This fixes the balance sheet imbalance caused by missing round-off entries.
+    Rebuild ledger entries for all invoices/bills that have an imbalance or missing round-off entry.
+    Also repairs account collisions between HR accounts (2250-2255) and GST accounts (2201-2203).
     """
     from billing.models import SalesInvoice, PurchaseBill
     from django.db import transaction as db_transaction
     from decimal import Decimal
+    from ledger.models import GeneralLedgerEntry, Account
 
-    user = request.user
+    tenant = getattr(request.user, 'active_tenant', request.user)
     repaired_invoices = []
     repaired_bills = []
+    repaired_accounts = []
     errors = []
 
-    # Find sales invoices with round_off != 0
-    invoices = SalesInvoice.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    # 1. Repair Account Code collisions between HR and GST accounts
+    hr_collision_map = {
+        'salaries payable': '2250',
+        'pf payable': '2251',
+        'esi payable': '2252',
+        'tds payable': '2253',
+        'professional tax payable': '2254',
+        'other payroll deductions payable': '2255',
+    }
+    for acc in Account.objects.filter(created_by=tenant):
+        clean_name = acc.name.strip().lower()
+        if clean_name in hr_collision_map:
+            expected_code = hr_collision_map[clean_name]
+            if acc.code != expected_code:
+                acc.code = expected_code
+                acc.save(update_fields=['code'])
+                repaired_accounts.append(f"{acc.name} -> {expected_code}")
+
+    # Ensure default GST and HR accounts exist
+    AccountingService.get_or_create_default_accounts(tenant)
+    from hr.services.hr_accounting_service import HRAccountingService
+    HRAccountingService.get_or_create_hr_accounts(tenant)
+
+    # 2. Re-link historical Sales Invoice Output GST entries that might have been posted to PF/ESI
+    output_cgst = Account.objects.filter(created_by=tenant, code='2201', name__icontains='CGST').first()
+    output_sgst = Account.objects.filter(created_by=tenant, code='2202', name__icontains='SGST').first()
+    output_igst = Account.objects.filter(created_by=tenant, code='2203', name__icontains='IGST').first()
+
+    if output_cgst:
+        GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            sales_invoice__isnull=False,
+            description__icontains='Output CGST'
+        ).exclude(account=output_cgst).update(account=output_cgst)
+    if output_sgst:
+        GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            sales_invoice__isnull=False,
+            description__icontains='Output SGST'
+        ).exclude(account=output_sgst).update(account=output_sgst)
+    if output_igst:
+        GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            sales_invoice__isnull=False,
+            description__icontains='Output IGST'
+        ).exclude(account=output_igst).update(account=output_igst)
+
+    # 3. Check and repair sales invoices with imbalance or missing round off
+    invoices = SalesInvoice.objects.filter(created_by=tenant, status='final')
     for invoice in invoices:
-        # Check if a rounding_off entry exists for this invoice
-        has_round_off_entry = GeneralLedgerEntry.objects.filter(
-            sales_invoice=invoice,
-            created_by=user,
-            account__code='4200',
-        ).exists()
-        if not has_round_off_entry:
+        entries = GeneralLedgerEntry.objects.filter(sales_invoice=invoice, created_by=tenant)
+        if not entries.exists():
+            continue
+        tot_dr = sum((e.debit for e in entries), Decimal('0'))
+        tot_cr = sum((e.credit for e in entries), Decimal('0'))
+        has_imbalance = abs(tot_dr - tot_cr) >= Decimal('0.01')
+        missing_round_off = bool(invoice.round_off and invoice.round_off != 0 and not entries.filter(account__code='4200').exists())
+        
+        if has_imbalance or missing_round_off:
             try:
                 with db_transaction.atomic():
                     GeneralLedgerEntry.objects.filter(sales_invoice=invoice).delete()
@@ -1319,15 +1385,18 @@ def repair_round_off_entries(request):
             except Exception as e:
                 errors.append(f"Invoice {invoice.invoice_number}: {str(e)}")
 
-    # Find purchase bills with round_off != 0
-    bills = PurchaseBill.objects.filter(created_by=user).exclude(round_off=0).exclude(round_off=None)
+    # 4. Check and repair purchase bills with imbalance or missing round off
+    bills = PurchaseBill.objects.filter(created_by=tenant)
     for bill in bills:
-        has_round_off_entry = GeneralLedgerEntry.objects.filter(
-            purchase_bill=bill,
-            created_by=user,
-            account__code='4200',
-        ).exists()
-        if not has_round_off_entry:
+        entries = GeneralLedgerEntry.objects.filter(purchase_bill=bill, created_by=tenant)
+        if not entries.exists():
+            continue
+        tot_dr = sum((e.debit for e in entries), Decimal('0'))
+        tot_cr = sum((e.credit for e in entries), Decimal('0'))
+        has_imbalance = abs(tot_dr - tot_cr) >= Decimal('0.01')
+        missing_round_off = bool(bill.round_off and bill.round_off != 0 and not entries.filter(account__code='4200').exists())
+        
+        if has_imbalance or missing_round_off:
             try:
                 with db_transaction.atomic():
                     GeneralLedgerEntry.objects.filter(purchase_bill=bill).delete()
@@ -1338,8 +1407,9 @@ def repair_round_off_entries(request):
 
     return Response({
         'success': True,
+        'repaired_accounts': repaired_accounts,
         'repaired_invoices': repaired_invoices,
         'repaired_bills': repaired_bills,
         'errors': errors,
-        'message': f"Repaired {len(repaired_invoices)} invoice(s) and {len(repaired_bills)} bill(s).",
+        'message': f"Repaired {len(repaired_accounts)} account(s), {len(repaired_invoices)} invoice(s), and {len(repaired_bills)} bill(s).",
     })

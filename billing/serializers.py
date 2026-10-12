@@ -1369,14 +1369,15 @@ class CustomerSerializer(serializers.ModelSerializer):
 class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default='')
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'customer', 'customer_name', 'invoice', 'date', 'amount',
+            'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
             'mode', 'reference', 'notes', 'created_by', 'created_at'
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number']
 
     def validate(self, attrs):
         customer = attrs.get('customer') or getattr(self.instance, 'customer', None)

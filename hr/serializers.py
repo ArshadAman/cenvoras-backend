@@ -57,6 +57,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     reporting_manager_name = serializers.CharField(source='reporting_manager.full_name', read_only=True, default='')
     current_ctc = serializers.SerializerMethodField()
     salary_details = serializers.SerializerMethodField()
+    kyc_documents = serializers.SerializerMethodField()
 
     personal_phone = serializers.CharField(
         required=True,
@@ -103,7 +104,31 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("Employee must be at least 13 years old.")
         return value
 
+    def validate_personal_phone(self, value):
+        if value:
+            import re
+            cleaned = re.sub(r'[\s\-+]', '', str(value))
+            if not (10 <= len(cleaned) <= 15 and cleaned.isdigit()):
+                raise serializers.ValidationError("Please enter a valid phone number (10 to 11 digits, e.g., 9876543210 or 09876543210).")
+        return value
+
+    def get_kyc_documents(self, obj):
+        docs = obj.documents.filter(document_type__in=['aadhaar', 'pan', 'marksheet_10th'])
+        return [
+            {
+                'id': str(d.id),
+                'document_type': d.document_type,
+                'title': d.title,
+                'file_name': d.file.name.split('/')[-1] if d.file else '',
+                'file_url': d.file.url if d.file else (d.file_url or ''),
+                'created_at': d.created_at,
+            }
+            for d in docs
+        ]
+
     def get_current_ctc(self, obj):
+        if obj.employment_type == 'contract':
+            return str(obj.contract_fee or '0.00')
         latest = obj.salary_assignments.order_by('-effective_from').first()
         if latest:
             return str(latest.monthly_ctc)
@@ -113,6 +138,28 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return '0.00'
 
     def get_salary_details(self, obj):
+        if obj.employment_type == 'contract':
+            fee = obj.contract_fee or Decimal('0.00')
+            return {
+                'is_contract': True,
+                'contract_fee': str(fee),
+                'monthly_ctc': str(fee),
+                'annual_ctc': str((fee * Decimal('12')).quantize(Decimal('0.01'))),
+                'gross_salary': str(fee),
+                'monthly_gross': str(fee),
+                'annual_gross': str((fee * Decimal('12')).quantize(Decimal('0.01'))),
+                'estimated_net_salary': str(fee),
+                'monthly_net_take_home': str(fee),
+                'net_take_home_monthly': str(fee),
+                'annual_net_take_home': str((fee * Decimal('12')).quantize(Decimal('0.01'))),
+                'net_take_home_annual': str((fee * Decimal('12')).quantize(Decimal('0.01'))),
+                'components': {'Contract Fee': str(fee)},
+                'earnings': {'Contract Fee': str(fee)},
+                'employee_deductions': {'total_deductions': '0.00'},
+                'statutory_estimates': {'total_deductions': '0.00'},
+                'employer_contributions': {'total_employer_cost': '0.00'},
+                'employer_estimates': {'total_employer_cost': '0.00'},
+            }
         latest = obj.salary_assignments.order_by('-effective_from', '-id').first()
         if not latest or latest.monthly_ctc <= 0:
             return None
@@ -252,21 +299,51 @@ class EmployeeSerializer(serializers.ModelSerializer):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
         employee = super().create(validated_data)
-        self._handle_salary_assignment(employee, salary_data)
-        self._handle_tax_declaration(employee, declaration_data)
+        if employee.employment_type != 'contract':
+            self._handle_salary_assignment(employee, salary_data)
+            self._handle_tax_declaration(employee, declaration_data)
+        self._handle_kyc_documents(employee)
         return employee
 
     def update(self, instance, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
         employee = super().update(instance, validated_data)
-        if salary_data is not None:
-            self._handle_salary_assignment(employee, salary_data)
-        if declaration_data is not None:
-            self._handle_tax_declaration(employee, declaration_data)
+        if employee.employment_type != 'contract':
+            if salary_data is not None:
+                self._handle_salary_assignment(employee, salary_data)
+            if declaration_data is not None:
+                self._handle_tax_declaration(employee, declaration_data)
+        self._handle_kyc_documents(employee)
         return employee
 
+    def _handle_kyc_documents(self, employee):
+        request = self.context.get('request')
+        if not request or not hasattr(request, 'FILES'):
+            return
+        files = request.FILES
+        kyc_mappings = [
+            ('aadhaar_file', 'aadhaar', 'Aadhaar Card (KYC)'),
+            ('pan_file', 'pan', 'PAN Card (KYC)'),
+            ('marksheet_file', 'marksheet_10th', '10th Marksheet / Education Certificate (KYC)'),
+        ]
+        from hr.models import HRDocument
+        for field_name, doc_type, default_title in kyc_mappings:
+            uploaded_file = files.get(field_name)
+            if uploaded_file:
+                HRDocument.objects.filter(employee=employee, document_type=doc_type).delete()
+                HRDocument.objects.create(
+                    tenant=employee.tenant,
+                    employee=employee,
+                    title=default_title,
+                    document_type=doc_type,
+                    file=uploaded_file,
+                    uploaded_by=request.user if hasattr(request, 'user') and request.user.is_authenticated else None,
+                )
+
     def _handle_salary_assignment(self, employee, salary_data):
+        if employee.employment_type == 'contract':
+            return
         if not salary_data or not isinstance(salary_data, dict):
             return
         monthly_ctc = salary_data.get('monthly_ctc')

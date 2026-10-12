@@ -357,3 +357,195 @@ def send_leave_status_email(employee_email, name, leave_type, start_date, end_da
         footer_text="Sent securely on behalf of the HR Team."
     )
     send_via_integration(employee_email, subject, message, html_body=html_body)
+
+
+@shared_task
+def send_employee_offer_letter_email(employee_id):
+    """
+    Sends an executive corporate offer letter email to a newly onboarded employee.
+    Branded strictly with the employer's business name (no Cenvora branding, no AI slop).
+    """
+    import logging
+    from decimal import Decimal
+    from hr.models import Employee
+    from integration.tasks import send_async_email_notification
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        emp = Employee.objects.select_related('tenant', 'department', 'designation', 'reporting_manager').get(id=employee_id)
+    except Employee.DoesNotExist:
+        logger.error("send_employee_offer_letter_email failed: Employee %s does not exist", employee_id)
+        return
+
+    if not emp.personal_email:
+        logger.info("send_employee_offer_letter_email skipped: Employee %s has no personal email", employee_id)
+        return
+
+    tenant = emp.tenant
+    business_name = getattr(tenant, 'business_name', '') or "The Management"
+    candidate_name = emp.full_name
+    designation = emp.designation.name if emp.designation else "Team Member"
+    department = emp.department.name if emp.department else "General"
+    employment_type_display = emp.get_employment_type_display() if hasattr(emp, 'get_employment_type_display') else "Full-Time"
+    doj_str = emp.date_of_joining.strftime("%d %B %Y") if emp.date_of_joining else "Mutually Agreed Date"
+    location = emp.work_state or "Company Office"
+    manager = emp.reporting_manager.full_name if emp.reporting_manager else "Department Head / Management"
+
+    # Compensation details
+    if emp.employment_type == 'contract':
+        fee = emp.contract_fee or Decimal('0.00')
+        comp_summary_html = f"""
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 40%;">Compensation Type</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">Professional Contract Fee</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Monthly Contract Fee</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 700;">₹{fee:,.2f} / month</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Annual Value</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">₹{(fee * 12):,.2f} / annum</td>
+        </tr>
+        """
+    else:
+        latest = emp.salary_assignments.order_by('-effective_from', '-id').first()
+        ctc = latest.monthly_ctc if latest else Decimal('0.00')
+        components = dict(latest.computed_components or {}) if latest else {}
+        basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))
+        hra = Decimal(str(components.get('HRA') or components.get('hra') or '0.00')).quantize(Decimal('0.01'))
+        annual_ctc = (ctc * Decimal('12')).quantize(Decimal('0.01'))
+        comp_summary_html = f"""
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 40%;">Annual CTC</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 700;">₹{annual_ctc:,.2f} / annum</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Monthly Gross CTC</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 700;">₹{ctc:,.2f} / month</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Basic Salary</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">₹{basic:,.2f} / month</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">House Rent Allowance (HRA)</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">₹{hra:,.2f} / month</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Statutory Benefits</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">Provident Fund (EPF) &amp; ESI as per statutory regulations</td>
+        </tr>
+        """
+
+    subject = f"Official Offer of Employment: {designation} at {business_name}"
+    plain_text = f"""Dear {candidate_name},
+
+On behalf of {business_name}, we are pleased to offer you the position of {designation}.
+
+Position: {designation}
+Department: {department}
+Employment Type: {employment_type_display}
+Date of Joining: {doj_str}
+Work Location: {location}
+Reporting Authority: {manager}
+
+Please review the offer details and confirm your acceptance.
+
+Sincerely,
+HR Department
+{business_name}"""
+
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Offer of Employment</title>
+    </head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 24px 0;">
+        <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 640px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); overflow: hidden;">
+            <tr>
+                <td style="padding: 32px 32px 24px; background-color: #0f172a; color: #ffffff; text-align: left;">
+                    <div style="font-size: 22px; font-weight: 800; letter-spacing: -0.02em; color: #ffffff;">{business_name}</div>
+                    <div style="font-size: 13px; color: #94a3b8; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Formal Offer of Employment</div>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 32px 32px 16px;">
+                    <p style="font-size: 16px; line-height: 24px; margin: 0 0 16px; color: #0f172a; font-weight: 600;">Dear {candidate_name},</p>
+                    <p style="font-size: 14px; line-height: 22px; margin: 0 0 20px; color: #334155;">
+                        On behalf of <strong>{business_name}</strong>, we are delighted to offer you the position of <strong>{designation}</strong>. We were thoroughly impressed by your credentials and look forward to the leadership and value you will bring to our team.
+                    </p>
+                    <p style="font-size: 14px; line-height: 22px; margin: 0 0 20px; color: #334155;">
+                        A summary of your key terms of employment is set out below:
+                    </p>
+
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse; margin-bottom: 24px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; font-size: 13px;">
+                        <tr style="background-color: #f1f5f9;">
+                            <th colspan="2" style="padding: 10px 14px; text-align: left; font-size: 13px; font-weight: 700; color: #1e293b; border-bottom: 1px solid #cbd5e1;">Employment Specifications</th>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 40%;">Designation / Role</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 600;">{designation}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Department</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">{department}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Employment Category</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">{employment_type_display}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Commencement Date</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 600;">{doj_str}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Work Location</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">{location}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Reporting Authority</td>
+                            <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">{manager}</td>
+                        </tr>
+                        <tr style="background-color: #f1f5f9;">
+                            <th colspan="2" style="padding: 10px 14px; text-align: left; font-size: 13px; font-weight: 700; color: #1e293b; border-top: 1px solid #cbd5e1; border-bottom: 1px solid #cbd5e1;">Compensation &amp; Remuneration Terms</th>
+                        </tr>
+                        {comp_summary_html}
+                    </table>
+
+                    <p style="font-size: 14px; line-height: 22px; margin: 0 0 16px; color: #334155;">
+                        Please confirm your formal acceptance of this offer by replying directly to this email with your written consent and proposed joining date.
+                    </p>
+                    <p style="font-size: 14px; line-height: 22px; margin: 0 0 24px; color: #334155;">
+                        We look forward to welcoming you aboard and partnering in our mutual growth and success.
+                    </p>
+
+                    <div style="margin-top: 28px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+                        <p style="font-size: 14px; line-height: 20px; margin: 0; color: #0f172a; font-weight: 600;">Sincerely,</p>
+                        <p style="font-size: 13px; line-height: 18px; margin: 4px 0 0; color: #475569;">Human Resources &amp; Talent Acquisition</p>
+                        <p style="font-size: 13px; line-height: 18px; margin: 2px 0 0; color: #0f172a; font-weight: 700;">{business_name}</p>
+                    </div>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 16px 32px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
+                    This communication is strictly confidential and intended solely for {candidate_name}. &copy; {business_name}. All rights reserved.
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
+
+    send_async_email_notification.delay(
+        str(tenant.id),
+        emp.personal_email,
+        subject,
+        plain_text,
+        'Employee',
+        str(emp.id),
+        html_body=html_body
+    )

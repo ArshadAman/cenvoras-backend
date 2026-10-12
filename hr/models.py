@@ -135,6 +135,13 @@ class Employee(models.Model):
     upi_id = models.CharField(max_length=100, blank=True, null=True)
     uan = models.CharField(max_length=12, blank=True, null=True)
     esi_ip_number = models.CharField(max_length=20, blank=True, null=True)
+    contract_fee = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Agreed fee/remuneration for contract personnel (exempt from standard statutory payroll).'
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -749,6 +756,16 @@ class EmployeeAllowanceBonus(models.Model):
     record_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='allowance')
     title = models.CharField(max_length=150, help_text="e.g. Travel Allowance, Performance Bonus, Festive Bonus")
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    CALCULATION_MODE_CHOICES = [
+        ('fixed', 'Fixed Flat Amount'),
+        ('per_day', 'Daily Rate (Per Day × Days Present)'),
+    ]
+    calculation_mode = models.CharField(
+        max_length=20,
+        choices=CALCULATION_MODE_CHOICES,
+        default='fixed',
+        help_text="Determines whether this allowance is paid flat or multiplied by attendance days present."
+    )
     is_recurring = models.BooleanField(default=False, help_text="If true, applies every monthly payroll run")
     effective_date = models.DateField(default=timezone.now)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='approved')
@@ -1050,11 +1067,23 @@ class PayrollException(models.Model):
         return f"[{self.severity.upper()}] {self.code}: {self.message}"
 
 
+def tenant_kyc_upload_path(instance, filename):
+    import os
+    ext = os.path.splitext(filename)[1]
+    # Tenant-partitioned private storage compliant with DPDPA 2023 & Aadhaar Act
+    tenant_id = getattr(instance, 'tenant_id', 'common')
+    employee_id = getattr(instance, 'employee_id', 'general')
+    return f"tenants/{tenant_id}/employees/{employee_id}/kyc/{uuid.uuid4().hex}{ext}"
+
+
 class HRDocument(models.Model):
     DOC_TYPES = [
         ('offer_letter', 'Offer Letter'),
         ('appointment_letter', 'Appointment Letter'),
-        ('id_proof', 'ID Proof'),
+        ('aadhaar', 'Aadhaar Card (KYC)'),
+        ('pan', 'PAN Card (KYC)'),
+        ('marksheet_10th', '10th Marksheet / Education Certificate (KYC)'),
+        ('id_proof', 'Other ID Proof'),
         ('tax_form', 'Tax Declaration Form'),
         ('resignation', 'Resignation Letter'),
         ('appraisal', 'Appraisal Letter'),
@@ -1074,7 +1103,7 @@ class HRDocument(models.Model):
     )
     title = models.CharField(max_length=255)
     document_type = models.CharField(max_length=30, choices=DOC_TYPES, default='other')
-    file = models.FileField(upload_to='hr_documents/', null=True, blank=True)
+    file = models.FileField(upload_to=tenant_kyc_upload_path, null=True, blank=True)
     file_url = models.URLField(max_length=500, blank=True, null=True)
     notes = models.TextField(blank=True)
     uploaded_by = models.ForeignKey(
@@ -1137,6 +1166,11 @@ class HRMSSettings(models.Model):
     esi_employee_rate = models.DecimalField(max_digits=5, decimal_places=3, default=0.75)
     esi_employer_rate = models.DecimalField(max_digits=5, decimal_places=3, default=3.25)
     esi_wage_ceiling = models.DecimalField(max_digits=10, decimal_places=2, default=21000.0)
+
+    auto_send_offer_letter = models.BooleanField(
+        default=False,
+        help_text="Automatically email an official offer letter to newly onboarded employees from the company."
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

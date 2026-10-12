@@ -35,7 +35,10 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
     elif document_type == 'debit_note':
         base = (prefix or 'DN').strip().upper()
     elif document_type == 'delivery_challan':
-        base = (prefix or getattr(tenant, 'delivery_challan_prefix', 'DC') or 'DC').strip().upper()
+        raw = (prefix or getattr(tenant, 'delivery_challan_prefix', 'DC-') or 'DC-').strip().upper()
+        if not raw.endswith('-') and not raw.endswith('/'):
+            raw = f"{raw}-"
+        base = raw
     elif document_type == 'sales_order':
         base = (prefix or 'SO').strip().upper()
     elif document_type == 'purchase_bill':
@@ -104,33 +107,42 @@ def _number_exists(tenant, document_type, candidate_number):
 
 def _get_existing_max_number(tenant, document_type, full_prefix):
     """
-    Efficiently scan only the string column for existing records matching prefix
-    without loading Django model instances into Python memory.
-    Handles both clean (INV-001) and legacy (INV-ABBA-001) number formats.
+    Efficiently scan string column for existing records.
+    Handles clean (INV-001), legacy (INV-ABBA-001), hyphenated, and custom formats.
+    For delivery_challan, guarantees sequence is highest existing challan number + 1.
     """
     model, field_name = _get_model_and_field(document_type)
-    filter_kwargs = {
-        'created_by': tenant,
-        f"{field_name}__startswith": full_prefix,
-    }
-    existing_numbers = model.objects.filter(**filter_kwargs).values_list(field_name, flat=True)
+    if document_type == 'delivery_challan':
+        existing_numbers = model.objects.filter(created_by=tenant).values_list(field_name, flat=True)
+    else:
+        filter_kwargs = {
+            'created_by': tenant,
+            f"{field_name}__startswith": full_prefix,
+        }
+        existing_numbers = model.objects.filter(**filter_kwargs).values_list(field_name, flat=True)
     
     max_num = 0
     for num_str in existing_numbers:
-        suffix = str(num_str)[len(full_prefix):]
-        try:
-            val = int(suffix)
-            if val > max_num:
-                max_num = val
-        except (ValueError, TypeError):
-            match = re.search(r'(\d+)$', str(num_str))
-            if match:
-                try:
-                    val = int(match.group(1))
-                    if val > max_num:
-                        max_num = val
-                except (ValueError, TypeError):
-                    continue
+        if not num_str:
+            continue
+        s = str(num_str).strip()
+        # 1. If prefix matches, strip prefix and any delimiters like '-'
+        if s.startswith(full_prefix):
+            raw_suffix = s[len(full_prefix):].lstrip('-/_ ')
+            if raw_suffix.isdigit():
+                val = int(raw_suffix)
+                if val > max_num:
+                    max_num = val
+                continue
+        # 2. Extract trailing integer digits
+        match = re.search(r'(\d+)$', s)
+        if match:
+            try:
+                val = int(match.group(1))
+                if val > max_num:
+                    max_num = val
+            except (ValueError, TypeError):
+                continue
     return max_num
 
 

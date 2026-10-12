@@ -361,7 +361,7 @@ def delivery_challan_list_create(request):
             is_billed=True
         ).update(is_billed=False, status='open')
 
-        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch')
+        challans = DeliveryChallan.objects.filter(created_by=tenant).select_related('customer', 'warehouse', 'sales_order', 'converted_invoice', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch')
         
         customer_filter = request.GET.get('customer')
         if customer_filter:

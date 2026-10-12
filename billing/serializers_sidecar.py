@@ -383,6 +383,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     sales_order_details = serializers.SerializerMethodField(read_only=True)
     challan_number = serializers.CharField(required=False, allow_blank=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    converted_invoice_number = serializers.CharField(source='converted_invoice.invoice_number', read_only=True, default='')
 
     class Meta:
         model = DeliveryChallan
@@ -410,6 +411,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             'status',
             'is_billed',
             'converted_invoice',
+            'converted_invoice_number',
             'notes',
             'bank_account_id',
             'template_id',
@@ -417,7 +419,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             'created_by',
             'created_at',
         ]
-        read_only_fields = ['id', 'created_at', 'created_by', 'is_billed', 'converted_invoice']
+        read_only_fields = ['id', 'created_at', 'created_by', 'is_billed', 'converted_invoice', 'converted_invoice_number']
 
     def get_customer_details(self, obj):
         if obj.customer:

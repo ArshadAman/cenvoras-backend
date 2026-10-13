@@ -127,8 +127,8 @@ def convert_order_to_invoice(request, pk):
 
     try:
         with transaction.atomic():
-            # Lock order row for update
-            order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+            # Lock order row only — customer is nullable, so FOR UPDATE + OUTER JOIN fails on Postgres
+            order = SalesOrder.objects.select_for_update(of=('self',)).select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
             existing_invoice = SalesInvoice.objects.filter(
                 created_by=tenant
             ).filter(
@@ -738,7 +738,7 @@ def convert_order_to_challan(request, pk):
         return Response({"message": f"Order has stage '{order.stage}' and cannot be converted."}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
-        order = SalesOrder.objects.select_for_update().select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
+        order = SalesOrder.objects.select_for_update(of=('self',)).select_related('customer').prefetch_related('items__product').get(pk=pk, created_by=tenant)
         if order.stage in ['completed', 'cancelled']:
             return Response({"message": f"Order has stage '{order.stage}' and cannot be converted."}, status=status.HTTP_400_BAD_REQUEST)
 

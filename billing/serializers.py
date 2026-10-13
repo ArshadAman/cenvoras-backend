@@ -644,6 +644,15 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
                     print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
                     raise serializers.ValidationError({'product': error_msg})
+                # Require explicit confirm — never silently create catalog products from bare names
+                confirm_create = data.get('confirm_create_product') in (True, 'true', 'True', '1', 1)
+                if not confirm_create:
+                    raise serializers.ValidationError({
+                        'product': (
+                            f'Product "{product_value}" was not found. '
+                            'Confirm catalog create (confirm_create_product=true) or pass a product UUID.'
+                        )
+                    })
                 # Validate HSN before any DB write so failed invoices cannot create orphan products
                 hsn_preview = str(data.get('hsn_sac_code') or '').strip()
                 if not hsn_preview or hsn_preview.upper() == 'N/A':

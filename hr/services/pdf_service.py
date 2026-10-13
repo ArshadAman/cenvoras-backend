@@ -199,13 +199,9 @@ def generate_payslip_pdf(payslip):
         raw_deductions['Salary Advance Recovery'] = payslip.advance_recovery
     if float(payslip.loan_recovery or 0) > 0 and 'Loan Recovery' not in raw_deductions:
         raw_deductions['Loan Recovery'] = payslip.loan_recovery
-    if float(payslip.lop_days or 0) > 0 and 'Loss of Pay (LOP)' not in raw_deductions:
-        working_days = Decimal(str(payslip.total_working_days or 26))
-        present_days = Decimal(str(payslip.present_days or 0))
-        daily_rate = Decimal(str(payslip.gross_salary)) / (present_days if present_days > 0 else working_days)
-        lop_amt = (Decimal(str(payslip.lop_days)) * daily_rate).quantize(Decimal('0.01'))
-        if lop_amt > 0:
-            raw_deductions['Loss of Pay (LOP)'] = str(lop_amt)
+    # LOP is via gross proration — never inject synthetic LOP into deductions
+    raw_deductions.pop('Loss of Pay (LOP)', None)
+    raw_deductions.pop('LOP', None)
     if not raw_deductions and float(payslip.total_deductions or 0) > 0:
         raw_deductions['Statutory & Other Deductions'] = str(payslip.total_deductions)
 

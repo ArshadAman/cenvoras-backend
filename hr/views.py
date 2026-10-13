@@ -221,6 +221,12 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             },
         )
 
+        # Seed leave balances for current year so Leave Balances UI is never empty
+        try:
+            leave_service.ensure_employee_leave_balances(instance)
+        except Exception:
+            logger.exception('Failed to init leave balances for employee %s', instance.id)
+
     @action(detail=True, methods=['post'])
     def send_offer_letter(self, request, pk=None):
         instance = self.get_object()
@@ -572,8 +578,13 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         # Realized gross salary for this pay cycle (Contracted Gross + Ad-hoc Additions)
         gross_salary = contracted_gross_salary + ad_hoc_monthly_total
 
-        employee_pf = (basic * Decimal('0.12')).quantize(Decimal('0.01'))
-        employee_esi = (gross_salary * Decimal('0.0075')).quantize(Decimal('0.01')) if gross_salary <= Decimal('21000.00') else Decimal('0.00')
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        hrms_settings = get_hrms_settings(tenant)
+        from hr.services.payroll_engine import compute_pf, compute_esi
+        pf_parts = compute_pf(basic, hrms_settings)
+        esi_parts = compute_esi(gross_salary, hrms_settings)
+        employee_pf = pf_parts['employee_pf']
+        employee_esi = esi_parts['employee_esi']
         pt = compute_pt(gross_salary, work_state)
 
         decl = data.get('declarations') or {}
@@ -604,9 +615,9 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         total_deductions = employee_pf + employee_esi + pt + monthly_tds
         net_take_home = max(Decimal('0.00'), gross_salary - total_deductions)
 
-        employer_epf = (basic * Decimal('0.0367')).quantize(Decimal('0.01'))
-        employer_eps = min(basic * Decimal('0.0833'), Decimal('1250.00')).quantize(Decimal('0.01'))
-        employer_esi = (gross_salary * Decimal('0.0325')).quantize(Decimal('0.01')) if gross_salary <= Decimal('21000.00') else Decimal('0.00')
+        employer_epf = pf_parts['employer_epf']
+        employer_eps = pf_parts['employer_eps']
+        employer_esi = esi_parts['employer_esi']
         total_employer_cost = ctc + employer_epf + employer_eps + employer_esi
 
         regime_label = "New Regime (Sec 115BAC)" if regime == 'new' else "Old Tax Regime"
@@ -979,6 +990,10 @@ class LeaveTypeViewSet(viewsets.ModelViewSet):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)
         instance = serializer.save(tenant=tenant)
         audit_service.log_create(self.request, instance, changes={'name': instance.name})
+        try:
+            leave_service.ensure_leave_type_balances(instance)
+        except Exception:
+            logger.exception('Failed to init leave balances for leave type %s', instance.id)
 
     def perform_update(self, serializer):
         instance = serializer.instance
@@ -1008,6 +1023,19 @@ class LeaveBalanceViewSet(viewsets.ModelViewSet):
             return LeaveBalance.objects.filter(employee__user=user)
         tenant = getattr(user, 'active_tenant', user)
         return LeaveBalance.objects.filter(employee__tenant=tenant)
+
+    def list(self, request, *args, **kwargs):
+        # Lazily seed missing balances so UI shows zero rows with leave type names
+        user = request.user
+        if getattr(user, 'role', None) != 'employee':
+            tenant = getattr(user, 'active_tenant', user)
+            year = timezone.now().year
+            for emp in Employee.objects.filter(tenant=tenant, status='active'):
+                try:
+                    leave_service.ensure_employee_leave_balances(emp, year=year)
+                except Exception:
+                    logger.exception('Failed to seed leave balances for employee %s', emp.id)
+        return super().list(request, *args, **kwargs)
 
     def check_permissions(self, request):
         super().check_permissions(request)

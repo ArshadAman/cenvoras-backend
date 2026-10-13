@@ -216,10 +216,12 @@ def convert_order_to_invoice(request, pk):
 
             # Check credit limit if allow_credit is disabled
             if order.customer and not order.customer.allow_credit:
-                new_balance = order.customer.current_balance + est_total
-                if new_balance > order.customer.credit_limit:
+                curr_balance = order.customer.current_balance or Decimal('0.00')
+                cred_limit = order.customer.credit_limit or Decimal('0.00')
+                new_balance = curr_balance + est_total
+                if new_balance > cred_limit:
                     return Response(
-                        {"message": f"Credit limit exceeded. Current: {order.customer.current_balance}, Limit: {order.customer.credit_limit}"},
+                        {"message": f"Credit limit exceeded. Current: {curr_balance}, Limit: {cred_limit}"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -1038,6 +1040,7 @@ def convert_challan_to_invoice(request, pk):
             "invoice_number": invoice.invoice_number,
         })
     except Exception as e:
+        transaction.set_rollback(True)
         logger.error(f"Error converting delivery challan {pk} to invoice: {e}", exc_info=True)
         return Response({"message": f"Failed to convert: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1214,6 +1217,7 @@ def bulk_convert_challans_to_invoice(request):
             "invoice_number": invoice.invoice_number,
         })
     except Exception as e:
+        transaction.set_rollback(True)
         logger.error(f"Error bulk converting challans to invoice: {e}", exc_info=True)
         return Response({"message": f"Failed to convert: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 

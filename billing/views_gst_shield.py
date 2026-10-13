@@ -214,10 +214,39 @@ def get_reconciliation_summary(request):
         for imp in recent_imports
     ]
 
+    has_2b_import = len(imports_list) > 0
+    is_fully_reconciled = (
+        has_2b_import
+        and len(unmatched_bills) == 0
+        and len(probable_bills) == 0
+        and len(matched_bills) > 0
+    )
+
+    # Optional ledger Input GST balance for comparison with Shield safe_itc
+    ledger_net_itc = None
+    try:
+        from ledger.models import Account, AccountType, GeneralLedgerEntry
+        from django.db.models import Sum as DjSum
+        itc_accounts = Account.objects.filter(
+            created_by=tenant,
+            account_type=AccountType.ASSET,
+            name__icontains='Input GST',
+        )
+        if itc_accounts.exists():
+            totals = GeneralLedgerEntry.objects.filter(
+                account__in=itc_accounts, created_by=tenant
+            ).aggregate(d=DjSum('debit'), c=DjSum('credit'))
+            ledger_net_itc = float((totals['d'] or Decimal('0')) - (totals['c'] or Decimal('0')))
+    except Exception:
+        ledger_net_itc = None
+
     return Response({
         'safe_itc': float(safe_itc),
         'at_risk_itc': float(at_risk_itc),
         'withheld_pool': float(withheld_pool),
+        'has_2b_import': has_2b_import,
+        'is_fully_reconciled': is_fully_reconciled,
+        'ledger_net_itc': ledger_net_itc,
         'counts': {
             'total_bills': len(bills),
             'matched': len(matched_bills),
@@ -225,6 +254,7 @@ def get_reconciliation_summary(request):
             'probable': len(probable_bills),
             'missing_in_books': missing_in_books_qs.count()
         },
+        'matched_bills': matched_bills,
         'unmatched_bills': unmatched_bills,
         'probable_bills': probable_bills,
         'missing_in_books': missing_in_books,

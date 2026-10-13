@@ -194,8 +194,11 @@ def compute_pf(basic_salary, hrms_settings=None):
     Supports statutory ₹15,000 wage ceiling and ₹1,250 statutory EPS cap.
     """
     basic = Decimal(str(basic_salary))
-    if hrms_settings and hrms_settings.pf_apply_ceiling:
-        pf_wage = min(basic, Decimal(str(hrms_settings.pf_wage_ceiling)))
+    # Default ON (statutory ₹15k ceiling); tenant may opt out via HRMS settings
+    apply_ceiling = True if hrms_settings is None else bool(hrms_settings.pf_apply_ceiling)
+    if apply_ceiling:
+        ceiling = Decimal(str(getattr(hrms_settings, 'pf_wage_ceiling', None) or 15000))
+        pf_wage = min(basic, ceiling)
     else:
         pf_wage = basic
 

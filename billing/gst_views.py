@@ -842,7 +842,12 @@ def gstr3b_summary(request):
         pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state_code
         pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
         is_inter = (seller_state_code != pos_code)
-        has_gstin = bool(inv.customer and inv.customer.gstin and len(inv.customer.gstin.strip()) == 15)
+        # Invoice-level GSTIN fallback so true B2B never enters table 3.2
+        inv_gstin = (
+            (getattr(inv, 'customer_gstin', None) or '').strip()
+            or ((inv.customer.gstin or '').strip() if inv.customer else '')
+        )
+        has_gstin = len(inv_gstin) == 15
 
         for item in items:
             taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
@@ -853,9 +858,16 @@ def gstr3b_summary(request):
 
             if is_inter and not has_gstin:
                 if pos_code not in table32_dict:
-                    table32_dict[pos_code] = {'pos': pos_code, 'txval': Decimal('0.00'), 'iamt': Decimal('0.00')}
+                    table32_dict[pos_code] = {
+                        'pos': pos_code,
+                        'txval': Decimal('0.00'),
+                        'iamt': Decimal('0.00'),
+                        'invoice_ids': set(),
+                        'b2c': True,
+                    }
                 table32_dict[pos_code]['txval'] += taxable
                 table32_dict[pos_code]['iamt'] += igst
+                table32_dict[pos_code]['invoice_ids'].add(str(inv.id))
 
     # Less Credit Notes (Sales Returns)
     credit_notes = CreditNote.objects.filter(
@@ -869,7 +881,11 @@ def gstr3b_summary(request):
         pos_raw = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
         pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
         is_inter = (seller_state_code != pos_code)
-        has_gstin = bool(cn.customer and cn.customer.gstin and len(cn.customer.gstin.strip()) == 15)
+        cn_gstin = (
+            (getattr(cn, 'customer_gstin', None) or '').strip()
+            or ((cn.customer.gstin or '').strip() if cn.customer else '')
+        )
+        has_gstin = len(cn_gstin) == 15
 
         for item in cn.items.all():
             taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
@@ -1017,7 +1033,13 @@ def gstr3b_summary(request):
             },
         },
         'table_3_2': [
-            {'pos': row['pos'], 'txval': float(row['txval']), 'iamt': float(row['iamt'])}
+            {
+                'pos': row['pos'],
+                'txval': float(row['txval']),
+                'iamt': float(row['iamt']),
+                'invoice_count': len(row.get('invoice_ids') or []),
+                'b2c': True,
+            }
             for row in table32_dict.values() if row['txval'] > 0
         ],
         'table_4_itc': {

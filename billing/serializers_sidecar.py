@@ -59,6 +59,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     row_type = serializers.CharField(required=False, default='item')
     product_name = serializers.CharField(source='product.name', read_only=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
@@ -71,8 +72,8 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalesOrderItem
         fields = [
-            'id', 'row_type', 'product', 'product_name', 'description', 'quantity', 'dispatched_quantity', 
-            'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit', 
+            'id', 'row_type', 'product', 'product_name', 'description', 'hsn_sac_code', 'quantity',
+            'dispatched_quantity', 'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit',
             'price', 'discount', 'tax', 'amount', 'source_item_id'
         ]
 
@@ -81,6 +82,11 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
         ret['row_type'] = getattr(instance, 'row_type', 'item') or 'item'
         ret['product_name'] = instance.product.name if instance.product else (instance.description or 'Note')
         ret['product_description'] = instance.description or ((instance.product.description if instance.product else '') or '')
+        ret['hsn_sac_code'] = (
+            getattr(instance, 'hsn_sac_code', None)
+            or (getattr(instance.product, 'hsn_sac_code', None) if instance.product else None)
+            or ''
+        )
         return ret
 
     def get_fulfillment_status(self, obj):
@@ -143,6 +149,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
                 if can_auto_create:
                     product_obj = Product.objects.create(
                         name=str(product_value).strip(),
+                        hsn_sac_code=data.get('hsn_sac_code') or '',
                         price=data.get('price', 0),
                         unit=data.get('unit') or 'pcs',
                         created_by=user
@@ -153,6 +160,8 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
         data['product'] = product_obj.id
         if not data.get('unit') and product_obj and product_obj.unit:
             data['unit'] = product_obj.unit
+        if not data.get('hsn_sac_code') and product_obj and getattr(product_obj, 'hsn_sac_code', None):
+            data['hsn_sac_code'] = product_obj.hsn_sac_code
         return super().to_internal_value(data)
 
 class SalesOrderSerializer(serializers.ModelSerializer):
@@ -162,6 +171,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
     customer_email = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_gstin = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     order_number = serializers.CharField(required=False, allow_blank=True)
@@ -173,10 +183,10 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         model = SalesOrder
         fields = [
             'id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name',
-            'customer_email', 'customer_phone', 'customer_address', 'due_date', 'delivery_address',
-            'place_of_supply', 'round_off', 'stage', 'total_amount', 'notes', 'po_number', 'po_date',
-            'source_quotation', 'bank_account_id', 'template_id', 'items', 'created_by', 'created_at',
-            'invoice_number', 'invoice_date'
+            'customer_email', 'customer_phone', 'customer_address', 'customer_gstin', 'due_date',
+            'delivery_address', 'place_of_supply', 'round_off', 'stage', 'total_amount', 'notes',
+            'po_number', 'po_date', 'source_quotation', 'bank_account_id', 'template_id', 'items',
+            'created_by', 'created_at', 'invoice_number', 'invoice_date'
         ]
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
 
@@ -208,6 +218,11 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         from billing.models import SalesInvoice
         ret['display_number'] = display_document_number(instance.order_number)
         ret['customer_name'] = instance.customer_name or (instance.customer.name if instance.customer else '')
+        ret['customer_gstin'] = (
+            instance.customer_gstin
+            or (instance.customer.gstin if instance.customer else None)
+            or ''
+        )
         ret['invoice_number'] = instance.order_number
         ret['invoice_date'] = str(instance.date) if instance.date else ''
         ret['delivery_address'] = instance.delivery_address or ''
@@ -237,6 +252,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         customer_email = validated_data.pop('customer_email', None) or ''
         customer_phone = validated_data.pop('customer_phone', None) or ''
         customer_address = validated_data.get('customer_address') or ''
+        customer_gstin = validated_data.get('customer_gstin') or ''
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
         if not customer_name:
@@ -250,12 +266,20 @@ class SalesOrderSerializer(serializers.ModelSerializer):
                 email=customer_email if customer_email else None,
                 phone=customer_phone if customer_phone else None,
                 address=customer_address if customer_address else None,
+                gstin=customer_gstin if customer_gstin else None,
                 created_by=user,
             )
             PartyMeta.objects.get_or_create(customer=customer)
-        elif customer_address and not customer.address:
-            customer.address = customer_address
-            customer.save(update_fields=['address'])
+        else:
+            update_fields = []
+            if customer_address and not customer.address:
+                customer.address = customer_address
+                update_fields.append('address')
+            if customer_gstin and not customer.gstin:
+                customer.gstin = customer_gstin
+                update_fields.append('gstin')
+            if update_fields:
+                customer.save(update_fields=update_fields)
         return customer
 
     def create(self, validated_data):
@@ -267,6 +291,8 @@ class SalesOrderSerializer(serializers.ModelSerializer):
                 validated_data['customer_name'] = customer.name
             if not validated_data.get('customer_address') and customer.address:
                 validated_data['customer_address'] = customer.address
+            if not validated_data.get('customer_gstin') and customer.gstin:
+                validated_data['customer_gstin'] = customer.gstin
         tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = tenant
         
@@ -289,12 +315,14 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', None)
         
         # Handle customer name change
-        if 'customer_name' in validated_data:
+        if 'customer_name' in validated_data or 'customer_gstin' in validated_data:
             customer = self._resolve_customer(validated_data)
             if customer:
                 instance.customer = customer
                 if not validated_data.get('customer_name'):
                     validated_data['customer_name'] = customer.name
+                if not validated_data.get('customer_gstin') and customer.gstin:
+                    validated_data['customer_gstin'] = customer.gstin
         # Pop leftover write-only fields
         validated_data.pop('customer_email', None)
         validated_data.pop('customer_phone', None)

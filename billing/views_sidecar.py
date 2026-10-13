@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.db import transaction
 from django.db.models import Q, F
+from django.core.exceptions import ValidationError
 from .models_sidecar import SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, InvoiceSettings, Quotation, QuotationItem, TransactionMeta
 from .serializers_sidecar import SalesOrderSerializer, DeliveryChallanSerializer, InvoiceSettingsSerializer, QuotationSerializer
 from .models import SalesInvoice, SalesInvoiceItem, Customer
@@ -67,13 +68,18 @@ def sales_order_detail(request, pk):
         
     elif request.method in ['PUT', 'PATCH']:
         serializer = SalesOrderSerializer(order, data=request.data, partial=(request.method == 'PATCH'), context={'request': request})
-        if serializer.is_valid():
-            serializer.save()
-            if hasattr(order, '_prefetched_objects_cache'):
-                order._prefetched_objects_cache.clear()
-            order.refresh_from_db()
-            return Response(SalesOrderSerializer(order).data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                serializer.save()
+                if hasattr(order, '_prefetched_objects_cache'):
+                    order._prefetched_objects_cache.clear()
+                order.refresh_from_db()
+                return Response(SalesOrderSerializer(order).data)
+        except (ValidationError, ValueError, TypeError) as e:
+            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            return Response({"message": msg or "Invalid sales order update."}, status=status.HTTP_400_BAD_REQUEST)
         
     elif request.method == 'DELETE':
         has_challans = DeliveryChallan.objects.filter(sales_order=order).exists()
@@ -212,153 +218,178 @@ def convert_order_to_invoice(request, pk):
         from billing.sequence_service import allocate_next_number
         next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
 
-        invoice = SalesInvoice(
-            customer=order.customer,
-            customer_name=order.customer_name or (order.customer.name if order.customer else ''),
-            customer_address=order.customer_address or (order.customer.address if order.customer else ''),
-            place_of_supply=order.place_of_supply or (order.customer.state if order.customer and order.customer.state else None),
-            delivery_address=order.delivery_address or None,
-            due_date=order.due_date or None,
-            round_off=order.round_off or Decimal('0.00'),
-            invoice_number=next_invoice_number,
-            invoice_date=date.today(),
-            po_number=order.po_number or order.order_number,
-            po_date=order.po_date,
-            source_sales_order=order,
-            bank_account_id=order.bank_account_id,
-            template_id=order.template_id,
-            created_by=tenant,
-            total_amount=Decimal('0.00'),
-            status='final',
-        )
-        if is_post_delivery_invoicing or has_linked_challans:
-            invoice._skip_stock_deduction = True
-
-        if linked_challans:
-            invoice.challan_number = ", ".join(dict.fromkeys(c.challan_number for c in linked_challans if c.challan_number))
-            invoice.challan_date = max(c.date for c in linked_challans)
-
-        invoice.save()
-
-        if linked_challans:
-            for c in linked_challans:
-                c.is_billed = True
-                c.status = 'billed'
-                c.converted_invoice = invoice
-                c.save(update_fields=['is_billed', 'status', 'converted_invoice'])
-
-        raw_items = []
-        for order_item, inv_qty in items_to_invoice:
-            item_unit = getattr(order_item, 'unit', None) or (order_item.product.unit if order_item.product else 'pcs') or 'pcs'
-            item_tax = getattr(order_item, 'tax', None) if getattr(order_item, 'tax', None) is not None else (order_item.product.tax if order_item.product else Decimal('0.00'))
-            item_discount = getattr(order_item, 'discount', Decimal('0.00')) or Decimal('0.00')
-            
-            b_amt = Decimal(str(inv_qty)) * Decimal(str(order_item.price))
-            d_amt = (b_amt * Decimal(str(item_discount))) / Decimal('100')
-            taxable = b_amt - d_amt
-            tax_amt = (taxable * Decimal(str(item_tax))) / Decimal('100')
-            line_amount = (taxable + tax_amt).quantize(Decimal('0.01'))
-
-            raw_items.append({
-                'product': order_item.product,
-                'quantity': inv_qty,
-                'price': order_item.price,
-                'amount': line_amount,
-                'unit': item_unit,
-                'tax': item_tax,
-                'discount': item_discount,
-                'free_quantity': 0,
-                'order_item': order_item,
-            })
-
-        # Evaluate active schemes if any items have free_quantity == 0
-        bonus_items = []
         try:
-            from billing.scheme_service import evaluate_schemes_for_items
-            scheme_res = evaluate_schemes_for_items(tenant=tenant, items=raw_items, evaluation_date=invoice.invoice_date)
-            raw_items = scheme_res.get('items', raw_items)
-            bonus_items = scheme_res.get('additional_free_items', [])
-        except Exception:
-            pass
-
-        for r_item in raw_items:
-            inv_item = SalesInvoiceItem(
-                sales_invoice=invoice,
-                product=r_item['product'],
-                quantity=r_item['quantity'],
-                free_quantity=r_item.get('free_quantity', 0),
-                price=r_item['price'],
-                amount=r_item['amount'],
-                unit=r_item['unit'],
-                tax=r_item['tax'],
-                discount=r_item['discount'],
-                source_item_id=str(r_item['order_item'].id) if r_item.get('order_item') else None,
+            customer_gstin = (
+                getattr(order, 'customer_gstin', None)
+                or (order.customer.gstin if order.customer else None)
+                or ''
             )
-            if is_post_delivery_invoicing:
-                inv_item._skip_stock_deduction = True
-            inv_item.save()
+            invoice = SalesInvoice(
+                customer=order.customer,
+                customer_name=order.customer_name or (order.customer.name if order.customer else ''),
+                customer_address=order.customer_address or (order.customer.address if order.customer else ''),
+                place_of_supply=order.place_of_supply or (order.customer.state if order.customer and order.customer.state else None),
+                delivery_address=order.delivery_address or None,
+                due_date=order.due_date or None,
+                round_off=order.round_off or Decimal('0.00'),
+                invoice_number=next_invoice_number,
+                invoice_date=date.today(),
+                po_number=order.po_number or order.order_number,
+                po_date=order.po_date,
+                source_sales_order=order,
+                created_by=tenant,
+                total_amount=Decimal('0.00'),
+                status='final',
+            )
+            if is_post_delivery_invoicing or has_linked_challans:
+                invoice._skip_stock_deduction = True
 
-            # Update order_item dispatched_quantity if not already dispatched
-            o_item = r_item.get('order_item')
-            if o_item and not is_post_delivery_invoicing:
-                o_item.dispatched_quantity = (o_item.dispatched_quantity or 0) + r_item['quantity']
-                o_item.save(update_fields=['dispatched_quantity'])
+            if linked_challans:
+                invoice.challan_number = ", ".join(dict.fromkeys(c.challan_number for c in linked_challans if c.challan_number))
+                invoice.challan_date = max(c.date for c in linked_challans)
 
-        for b_item in bonus_items:
-            b_prod = b_item.get('product')
-            if b_prod:
-                SalesInvoiceItem.objects.create(
-                    sales_invoice=invoice,
-                    product=b_prod,
-                    quantity=b_item.get('quantity', 0),
-                    free_quantity=b_item.get('free_quantity', 0),
-                    price=Decimal('0.00'),
-                    amount=Decimal('0.00'),
-                    unit=b_item.get('unit') or 'pcs',
-                    tax=Decimal('0.00'),
-                    discount=Decimal('0.00'),
+            invoice.save()
+
+            if linked_challans:
+                for c in linked_challans:
+                    c.is_billed = True
+                    c.status = 'billed'
+                    c.converted_invoice = invoice
+                    c.save(update_fields=['is_billed', 'status', 'converted_invoice'])
+
+            raw_items = []
+            for order_item, inv_qty in items_to_invoice:
+                if not order_item.product:
+                    raise ValidationError("Cannot convert a sales order line without a product.")
+                item_unit = getattr(order_item, 'unit', None) or (order_item.product.unit if order_item.product else 'pcs') or 'pcs'
+                item_tax = getattr(order_item, 'tax', None) if getattr(order_item, 'tax', None) is not None else (order_item.product.tax if order_item.product else Decimal('0.00'))
+                item_discount = getattr(order_item, 'discount', Decimal('0.00')) or Decimal('0.00')
+                hsn_sac_code = (
+                    getattr(order_item, 'hsn_sac_code', None)
+                    or getattr(order_item.product, 'hsn_sac_code', None)
+                    or ''
                 )
 
-        invoice.refresh_from_db()
+                b_amt = Decimal(str(inv_qty)) * Decimal(str(order_item.price))
+                d_amt = (b_amt * Decimal(str(item_discount))) / Decimal('100')
+                taxable = b_amt - d_amt
+                tax_amt = (taxable * Decimal(str(item_tax))) / Decimal('100')
+                line_amount = (taxable + tax_amt).quantize(Decimal('0.01'))
 
-        # Ensure TransactionMeta exists
-        TransactionMeta.objects.get_or_create(invoice=invoice)
+                raw_items.append({
+                    'product': order_item.product,
+                    'quantity': inv_qty,
+                    'price': order_item.price,
+                    'amount': line_amount,
+                    'unit': item_unit,
+                    'tax': item_tax,
+                    'discount': item_discount,
+                    'hsn_sac_code': hsn_sac_code,
+                    'free_quantity': 0,
+                    'order_item': order_item,
+                })
 
-        # Accrue loyalty points (1 point per ₹100)
-        if order.customer and hasattr(order.customer, 'meta'):
+            # Evaluate active schemes if any items have free_quantity == 0
+            bonus_items = []
             try:
-                points_earned = int(invoice.total_amount / 100)
-                if points_earned > 0:
-                    order.customer.meta.loyalty_points += points_earned
-                    order.customer.meta.save(update_fields=['loyalty_points'])
+                from billing.scheme_service import evaluate_schemes_for_items
+                scheme_res = evaluate_schemes_for_items(tenant=tenant, items=raw_items, evaluation_date=invoice.invoice_date)
+                raw_items = scheme_res.get('items', raw_items)
+                bonus_items = scheme_res.get('additional_free_items', [])
             except Exception:
                 pass
 
-        # Update customer balance
-        if invoice.status == 'final' and invoice.customer_id:
-            Customer.objects.filter(pk=invoice.customer_id).update(
-                current_balance=F('current_balance') + invoice.total_amount
-            )
+            for r_item in raw_items:
+                inv_item = SalesInvoiceItem(
+                    sales_invoice=invoice,
+                    product=r_item['product'],
+                    quantity=r_item['quantity'],
+                    free_quantity=r_item.get('free_quantity', 0),
+                    price=r_item['price'],
+                    amount=r_item['amount'],
+                    unit=r_item['unit'],
+                    tax=r_item['tax'],
+                    discount=r_item['discount'],
+                    hsn_sac_code=r_item.get('hsn_sac_code') or '',
+                    source_item_id=str(r_item['order_item'].id) if r_item.get('order_item') else None,
+                )
+                if is_post_delivery_invoicing:
+                    inv_item._skip_stock_deduction = True
+                inv_item.save()
 
-        # Rebuild general ledger entries
-        from .serializers import _rebuild_sales_invoice_ledger
-        _rebuild_sales_invoice_ledger(invoice.id)
+                # Update order_item dispatched_quantity if not already dispatched
+                o_item = r_item.get('order_item')
+                if o_item and not is_post_delivery_invoicing:
+                    o_item.dispatched_quantity = (o_item.dispatched_quantity or 0) + r_item['quantity']
+                    o_item.save(update_fields=['dispatched_quantity'])
 
+            for b_item in bonus_items:
+                b_prod = b_item.get('product')
+                if b_prod:
+                    SalesInvoiceItem.objects.create(
+                        sales_invoice=invoice,
+                        product=b_prod,
+                        quantity=b_item.get('quantity', 0),
+                        free_quantity=b_item.get('free_quantity', 0),
+                        price=Decimal('0.00'),
+                        amount=Decimal('0.00'),
+                        unit=b_item.get('unit') or 'pcs',
+                        tax=Decimal('0.00'),
+                        discount=Decimal('0.00'),
+                        hsn_sac_code=getattr(b_prod, 'hsn_sac_code', None) or '',
+                    )
 
-        from billing.sequence_service import sync_sequence_after_creation, get_tenant_full_prefix
-        full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
-        sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice.invoice_number)
+            invoice.refresh_from_db()
 
+            # Persist bank/template on TransactionMeta (not on SalesInvoice)
+            meta, _ = TransactionMeta.objects.get_or_create(invoice=invoice)
+            meta_updates = []
+            if order.bank_account_id and not meta.bank_account_id:
+                meta.bank_account_id = order.bank_account_id
+                meta_updates.append('bank_account_id')
+            if order.template_id and not meta.template_id:
+                meta.template_id = order.template_id
+                meta_updates.append('template_id')
+            if meta_updates:
+                meta.save(update_fields=meta_updates)
 
-        # Update Order Stage based on fulfillment of all items
-        all_order_items = list(SalesOrderItem.objects.filter(order=order))
-        all_fulfilled = all(item.is_fulfilled for item in all_order_items)
-        any_dispatched = any((item.dispatched_quantity or 0) > 0 for item in all_order_items)
+            # Accrue loyalty points (1 point per ₹100)
+            if order.customer and hasattr(order.customer, 'meta'):
+                try:
+                    points_earned = int(invoice.total_amount / 100)
+                    if points_earned > 0:
+                        order.customer.meta.loyalty_points += points_earned
+                        order.customer.meta.save(update_fields=['loyalty_points'])
+                except Exception:
+                    pass
 
-        order.stage = 'completed'
-        order.save(update_fields=['stage'])
+            # Update customer balance
+            if invoice.status == 'final' and invoice.customer_id:
+                Customer.objects.filter(pk=invoice.customer_id).update(
+                    current_balance=F('current_balance') + invoice.total_amount
+                )
 
-    return Response({"message": "Converted successfully", "invoice_id": invoice.id, "invoice_number": invoice.invoice_number})
+            # Rebuild general ledger entries
+            from .serializers import _rebuild_sales_invoice_ledger
+            _rebuild_sales_invoice_ledger(invoice.id)
+
+            from billing.sequence_service import sync_sequence_after_creation, get_tenant_full_prefix
+            full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice')
+            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice.invoice_number)
+
+            order.stage = 'completed'
+            order.save(update_fields=['stage'])
+        except (ValidationError, ValueError, TypeError) as e:
+            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            return Response({"message": msg or "Invalid conversion request."}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        "message": "Converted successfully",
+        "invoice_id": invoice.id,
+        "invoice_number": invoice.invoice_number,
+        "customer_gstin": customer_gstin,
+        "place_of_supply": invoice.place_of_supply,
+    })
 
 
 @api_view(['GET'])

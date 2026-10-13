@@ -598,12 +598,25 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
                     print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
                     raise serializers.ValidationError({'product': error_msg})
+                # Validate HSN before any DB write so failed invoices cannot create orphan products
+                hsn_preview = str(data.get('hsn_sac_code') or '').strip()
+                if not hsn_preview or hsn_preview.upper() == 'N/A':
+                    raise serializers.ValidationError({
+                        'hsn_sac_code': 'HSN/SAC code is mandatory for each invoice item.'
+                    })
+                clean_digits = re.sub(r'\D', '', hsn_preview)
+                from billing.gst_utils import get_required_hsn_digits
+                min_digits = get_required_hsn_digits(user) if user else 4
+                if len(clean_digits) < min_digits:
+                    raise serializers.ValidationError({
+                        'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'
+                    })
                 # Create new product (stock starts at 0; skip initial sale deduction)
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)
                 try:
                     product = Product.objects.create(
                         name=product_value,
-                        hsn_sac_code=data.get('hsn_sac_code', ''),
+                        hsn_sac_code=hsn_preview,
                         unit=data.get('unit', 'pcs'),
                         sale_price=data.get('price', 0),
                         tax=data.get('tax', 0),

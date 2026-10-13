@@ -358,6 +358,9 @@ def sales_invoice_list_create(request):
                 sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+        # is_valid() does not raise — mark the atomic block for rollback so any
+        # side effects during validation (e.g. product auto-create) are undone.
+        transaction.set_rollback(True)
         return Response({'error': 'Validation failed', 'details': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -451,16 +454,21 @@ def sales_invoice_update_delete(request, pk):
         if invoice.payment_status == 'paid':
             return Response({'error': 'Paid sales invoices cannot be edited.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = SalesInvoiceSerializer(
-            invoice,
-            data=request.data,
-            partial=(request.method == 'PATCH'),
-            context={'request': request},
-        )
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            serializer = SalesInvoiceSerializer(
+                invoice,
+                data=request.data,
+                partial=(request.method == 'PATCH'),
+                context={'request': request},
+            )
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data)
+            transaction.set_rollback(True)
+            return Response(
+                {'error': 'Validation failed', 'details': serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     if invoice.payment_status != 'pending':
         return Response({'error': 'Only pending sales invoices can be deleted.'}, status=status.HTTP_400_BAD_REQUEST)

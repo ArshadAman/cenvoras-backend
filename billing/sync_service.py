@@ -102,8 +102,8 @@ class DocumentSyncService:
             if getattr(document, 'source_quotation', None):
                 upstream.append(document.source_quotation)
 
-            # Downstream: Delivery Challans
-            challans = list(document.deliverychallan_set.all())
+            # Downstream: Delivery Challans (related_name='delivery_challans')
+            challans = list(document.delivery_challans.all())
             downstream.extend(challans)
 
             # Downstream: Invoices

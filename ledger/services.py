@@ -964,7 +964,11 @@ class AccountingService:
         if debit_note.reason:
             description += f" ({debit_note.get_reason_display()})"
 
-        from billing.gst_utils import get_seller_state_code, get_debit_note_supplier_state_code
+        from billing.gst_utils import (
+            get_seller_state_code,
+            get_debit_note_supplier_state_code,
+            calculate_item_tax_breakup,
+        )
         tenant = getattr(user, 'active_tenant', user)
         buyer_state_code = get_seller_state_code(tenant)
         vendor_pos_code = get_debit_note_supplier_state_code(debit_note, buyer_state_code)
@@ -978,16 +982,13 @@ class AccountingService:
 
         if items:
             for item in items:
-                taxable, tax = cls._calculate_item_tax_split(item)
+                taxable, _tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_interstate)
                 total_taxable += taxable
-                if is_interstate:
-                    total_igst += tax
-                else:
-                    line_cgst = (tax / Decimal('2')).quantize(Decimal('0.01'))
-                    line_sgst = tax - line_cgst
-                    total_cgst += line_cgst
-                    total_sgst += line_sgst
+                total_cgst += cgst
+                total_sgst += sgst
+                total_igst += igst
         else:
+            # Header-only note: treat total_amount as taxable (no GST split available)
             total_taxable = Decimal(str(debit_note.total_amount or '0.00'))
 
         total_parts = total_taxable + total_cgst + total_sgst + total_igst

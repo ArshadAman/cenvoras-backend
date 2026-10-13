@@ -323,17 +323,21 @@ def get_debit_note_supplier_state_code(debit_note, buyer_state_code):
     Must stay aligned with AccountingService.create_debit_note_entries so GSTR-3B
     Table 4(B) ITC reversals match Input IGST/CGST/SGST ledger credits.
 
-    Preference (same as ledger):
-      1. original_bill.vendor.state (when linked bill + vendor exist)
-      2. debit_note.vendor_gstin
-      3. buyer_state_code fallback (treat as intra-state)
+    Preference (GSTIN-first, same spirit as purchase bills):
+      1. debit_note.vendor_gstin
+      2. original_bill.vendor_gstin / vendor.gstin
+      3. original_bill.vendor.state
+      4. buyer_state_code fallback (treat as intra-state)
     """
-    vendor_state = None
     original_bill = getattr(debit_note, 'original_bill', None)
-    if original_bill is not None and getattr(original_bill, 'vendor', None) is not None:
-        vendor_state = getattr(original_bill.vendor, 'state', None)
-    vendor_gstin = getattr(debit_note, 'vendor_gstin', None)
-    return get_pos_state_code(vendor_state or vendor_gstin, fallback_state=buyer_state_code)
+    vendor = getattr(original_bill, 'vendor', None) if original_bill is not None else None
+    vendor_gstin = (
+        getattr(debit_note, 'vendor_gstin', None)
+        or (getattr(original_bill, 'vendor_gstin', None) if original_bill is not None else None)
+        or (getattr(vendor, 'gstin', None) if vendor is not None else None)
+    )
+    vendor_state = getattr(vendor, 'state', None) if vendor is not None else None
+    return get_pos_state_code(vendor_gstin or vendor_state, fallback_state=buyer_state_code)
 
 
 def get_purchase_supplier_state_code(bill, buyer_state_code):

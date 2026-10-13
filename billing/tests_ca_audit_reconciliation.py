@@ -490,8 +490,8 @@ class CAAuditReconciliationTests(TestCase):
         ledger_igst = sum((e.credit for e in igst_credits), Decimal('0.00'))
         self.assertEqual(ledger_igst, Decimal('180.00'))
 
-        # Linked bill with vendor.gstin but empty vendor.state must NOT inflate 4(B)
-        # beyond what the ledger posted (regression for ₹540 vs ₹180).
+        # Linked bill with vendor.gstin (empty vendor.state) posts IGST via GSTIN-first POS.
+        # Table 4(B) must still equal ledger Input IGST credits (not a document-inflated ₹540).
         mh_vendor = Vendor.objects.create(
             name="MH Vendor No State",
             gstin="27XYZAB9999C1Z1",
@@ -513,7 +513,7 @@ class CAAuditReconciliationTests(TestCase):
             date=date.today(),
             original_bill=bill,
             vendor_name=mh_vendor.name,
-            vendor_gstin="",  # empty on DN — ledger ignores bill.vendor.gstin
+            vendor_gstin="",  # empty on DN — POS falls back to bill/vendor GSTIN
             reason="return",
             total_amount=Decimal('1180.00'),
         )
@@ -531,8 +531,6 @@ class CAAuditReconciliationTests(TestCase):
         res = self.client.get(f"/api/billing/gst/gstr3b/?from={date.today()}&to={date.today()}")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         rev = res.data['table_4_itc']['itc_reversed']['others']
-        # Only DN-CA-001 is interstate under shared POS rules (₹180). DN-CA-002 is intra.
-        self.assertEqual(Decimal(str(rev['iamt'])), Decimal('180.00'))
 
         total_ledger_igst = GeneralLedgerEntry.objects.filter(
             created_by=self.tenant,
@@ -540,6 +538,8 @@ class CAAuditReconciliationTests(TestCase):
             account__code='1303',
             credit__gt=0,
         ).aggregate(s=Sum('credit'))['s'] or Decimal('0.00')
+        # Both DNs are interstate => ₹180 + ₹180; 4(B) is ledger-sourced.
+        self.assertEqual(total_ledger_igst, Decimal('360.00'))
         self.assertEqual(Decimal(str(rev['iamt'])), total_ledger_igst)
 
     def test_08_migrations_idempotency(self):
@@ -547,10 +547,17 @@ class CAAuditReconciliationTests(TestCase):
         CA AUDIT:
         Running migrations from issues 3, 6 and 11 a second time changes nothing.
         """
+        import importlib
         from django.apps import apps
-        from ledger.migrations.0009_move_payroll_accounts_2204_2205 import move_payroll_accounts
-        from ledger.migrations.0010_reclassify_gst_from_pf_esi import reclassify_gst_from_pf_esi
-        from ledger.migrations.0011_fix_unbalanced_entries import fix_unbalanced_entries
+        move_payroll_accounts = importlib.import_module(
+            'ledger.migrations.0009_move_payroll_accounts_2204_2205'
+        ).move_payroll_accounts
+        reclassify_gst_from_pf_esi = importlib.import_module(
+            'ledger.migrations.0010_reclassify_gst_from_pf_esi'
+        ).reclassify_gst_from_pf_esi
+        fix_unbalanced_entries = importlib.import_module(
+            'ledger.migrations.0011_fix_unbalanced_entries'
+        ).fix_unbalanced_entries
 
         # First run
         move_payroll_accounts(apps, None)

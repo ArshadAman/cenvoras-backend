@@ -888,51 +888,35 @@ def gstr3b_summary(request):
     outward_cgst = max(outward_cgst, Decimal('0.00'))
     outward_sgst = max(outward_sgst, Decimal('0.00'))
 
-    # 2. Inward Supplies / ITC Available (from Purchase Bills)
-    bills = PurchaseBill.objects.filter(
-        created_by=tenant,
-        bill_date__gte=from_date,
-        bill_date__lte=to_date,
-    ).select_related('vendor').prefetch_related('items__product')
+    # 2–3. ITC Available (4A) and ITC Reversed (4B) from the SAME ledger Input GST
+    # accounts that drive the balance sheet ITC, so 4(C) = 4(A) − 4(B) matches net ITC.
+    from ledger.models import GeneralLedgerEntry
 
-    itc_taxable = Decimal('0.00')
-    itc_igst = Decimal('0.00')
-    itc_cgst = Decimal('0.00')
-    itc_sgst = Decimal('0.00')
+    def _sum_input_gst(code, *, debit=False, credit=False, purchase_bill=False, debit_note=False):
+        qs = GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            date__gte=from_date,
+            date__lte=to_date,
+            account__code=code,
+        )
+        if purchase_bill:
+            qs = qs.filter(purchase_bill__isnull=False)
+        if debit_note:
+            qs = qs.filter(debit_note__isnull=False)
+        if debit:
+            return qs.filter(debit__gt=0).aggregate(s=Sum('debit'))['s'] or Decimal('0.00')
+        if credit:
+            return qs.filter(credit__gt=0).aggregate(s=Sum('credit'))['s'] or Decimal('0.00')
+        return Decimal('0.00')
 
-    for bill in bills:
-        vendor_pos_code = get_purchase_supplier_state_code(bill, seller_state_code)
-        is_inter = (seller_state_code != vendor_pos_code)
+    itc_igst = _sum_input_gst('1303', debit=True, purchase_bill=True)
+    itc_cgst = _sum_input_gst('1301', debit=True, purchase_bill=True)
+    itc_sgst = _sum_input_gst('1302', debit=True, purchase_bill=True)
+    itc_taxable = Decimal('0.00')  # not used for 4(A) net figures; kept for response shape
 
-        for item in bill.items.all():
-            taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
-            itc_taxable += taxable
-            itc_igst += igst
-            itc_cgst += cgst
-            itc_sgst += sgst
-
-    # 3. ITC Reversed (from Debit Notes / Purchase Returns)
-    # POS resolution MUST match AccountingService.create_debit_note_entries
-    # (see get_debit_note_supplier_state_code) so Table 4(B) ties to the ledger.
-    debit_notes = DebitNote.objects.filter(
-        created_by=tenant,
-        date__gte=from_date,
-        date__lte=to_date,
-    ).select_related('original_bill', 'original_bill__vendor').prefetch_related('items__product')
-
-    rev_igst = Decimal('0.00')
-    rev_cgst = Decimal('0.00')
-    rev_sgst = Decimal('0.00')
-
-    for dn in debit_notes:
-        vendor_pos_code = get_debit_note_supplier_state_code(dn, seller_state_code)
-        is_inter = (seller_state_code != vendor_pos_code)
-
-        for item in dn.items.all():
-            _taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
-            rev_igst += igst
-            rev_cgst += cgst
-            rev_sgst += sgst
+    rev_igst = _sum_input_gst('1303', credit=True, debit_note=True)
+    rev_cgst = _sum_input_gst('1301', credit=True, debit_note=True)
+    rev_sgst = _sum_input_gst('1302', credit=True, debit_note=True)
 
     # 4. Net ITC Available (Table 4.C = 4.A - 4.B)
     net_itc_igst = max(itc_igst - rev_igst, Decimal('0.00'))

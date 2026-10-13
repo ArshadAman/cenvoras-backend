@@ -15,6 +15,42 @@ from billing.models import SalesInvoiceItem
 from .models import Account, AccountType, GeneralLedgerEntry
 from .services import AccountingService
 
+RETAINED_EARNINGS_CODES = {'3100', 'RE', 'RETAINED_EARNINGS'}
+
+
+def _account_balance(account, tenant, from_date=None, to_date=None, as_of=None):
+    entries = GeneralLedgerEntry.objects.filter(account=account, created_by=tenant)
+    if as_of:
+        entries = entries.filter(date__lte=as_of)
+    else:
+        if from_date:
+            entries = entries.filter(date__gte=from_date)
+        if to_date:
+            entries = entries.filter(date__lte=to_date)
+    totals = entries.aggregate(
+        total_debit=Sum('debit'),
+        total_credit=Sum('credit'),
+    )
+    dr = totals['total_debit'] or Decimal('0')
+    cr = totals['total_credit'] or Decimal('0')
+    if account.account_type in [AccountType.ASSET, AccountType.EXPENSE]:
+        return dr - cr
+    return cr - dr
+
+
+def compute_gl_net_profit(tenant, from_date=None, to_date=None, as_of=None):
+    """Shared GL net profit for P&L and Balance Sheet retained earnings."""
+    revenue_total = Decimal('0')
+    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.REVENUE):
+        revenue_total += _account_balance(acc, tenant, from_date=from_date, to_date=to_date, as_of=as_of)
+
+    expense_total = Decimal('0')
+    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.EXPENSE):
+        expense_total += _account_balance(acc, tenant, from_date=from_date, to_date=to_date, as_of=as_of)
+
+    return revenue_total, expense_total, revenue_total - expense_total
+
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -24,7 +60,7 @@ def profit_loss_statement(request):
     Revenue - Expenses = Net Profit
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     """
-    user = request.user
+    user = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
 
@@ -92,40 +128,33 @@ def profit_loss_statement(request):
     if to_date:
         sales_items = sales_items.filter(sales_invoice__invoice_date__lte=to_date)
 
+    # Synthetic COGS only when GL has no COGS — never include GST (liability)
+    has_gl_cogs = any(
+        (item.get('code') or '') in {'5001', 'COGS'} or 'cost of goods' in (item.get('name') or '').lower()
+        for item in expense_items
+    )
     sales_cogs = Decimal('0')
-    sales_tax = Decimal('0')
-    for item in sales_items.select_related('product', 'batch'):
-        qty = Decimal(str(item.quantity or 0))
-        sale_price = Decimal(str(item.price or 0))
-        discount = Decimal(str(item.discount or 0))
-        tax_rate = Decimal(str(item.tax or 0))
+    if not has_gl_cogs:
+        for item in sales_items.select_related('product', 'batch'):
+            qty = Decimal(str(item.quantity or 0))
+            if item.batch and item.batch.cost_price:
+                cost_price = Decimal(str(item.batch.cost_price))
+            elif item.product and item.product.price:
+                cost_price = Decimal(str(item.product.price))
+            else:
+                cost_price = Decimal('0')
+            sales_cogs += qty * cost_price
 
-        base_amount = qty * sale_price
-        discount_amount = (base_amount * discount) / Decimal('100')
-        taxable_amount = base_amount - discount_amount
-        tax_amount = (taxable_amount * tax_rate) / Decimal('100')
+        if sales_cogs:
+            expense_items.append({
+                'id': 'sales-cogs',
+                'code': 'COGS',
+                'name': 'Cost of Goods Sold (Sales Invoices)',
+                'amount': float(sales_cogs),
+            })
+            # Informational only — net_profit uses GL so P&L matches Balance Sheet RE
 
-        if item.batch and item.batch.cost_price:
-            cost_price = Decimal(str(item.batch.cost_price))
-        elif item.product.price:
-            cost_price = Decimal(str(item.product.price))
-        else:
-            cost_price = Decimal('0')
-
-        sales_cogs += qty * cost_price
-        sales_tax += tax_amount
-
-    sales_based_expense = sales_cogs + sales_tax
-    if sales_based_expense:
-        expense_items.append({
-            'id': 'sales-cogs',
-            'code': 'COGS',
-            'name': 'Cost of Goods Sold (Sales Invoices)',
-            'amount': float(sales_based_expense),
-        })
-        total_expenses += sales_based_expense
-
-    net_profit = total_revenue - total_expenses
+    _rev, _exp, net_profit = compute_gl_net_profit(user, from_date=from_date, to_date=to_date)
     margin = (net_profit / total_revenue * 100) if total_revenue > 0 else Decimal('0')
 
     return Response({
@@ -207,13 +236,17 @@ def balance_sheet(request):
             })
             total_liabilities += bal
 
-    # Equity
+    # Equity (skip booked RE — computed RE added once below)
     equity_accounts = Account.objects.filter(
         created_by=tenant, account_type=AccountType.EQUITY, is_active=True
     ).order_by('code', 'name')
     equity_items = []
     total_equity = Decimal('0')
     for acc in equity_accounts:
+        code = (acc.code or '').strip().upper()
+        name_l = (acc.name or '').lower()
+        if code in RETAINED_EARNINGS_CODES or 'retained earning' in name_l:
+            continue
         bal = get_balance(acc)
         if bal != 0:
             equity_items.append({
@@ -224,17 +257,8 @@ def balance_sheet(request):
             })
             total_equity += bal
 
-    # Retained Earnings (Net Profit carried forward)
-    # Revenue - Expenses
-    revenue_total = Decimal('0')
-    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.REVENUE):
-        revenue_total += get_balance(acc)
-
-    expense_total = Decimal('0')
-    for acc in Account.objects.filter(created_by=tenant, account_type=AccountType.EXPENSE):
-        expense_total += get_balance(acc)
-
-    retained_earnings = revenue_total - expense_total
+    # Retained Earnings — same helper as P&L net profit
+    _rev, _exp, retained_earnings = compute_gl_net_profit(tenant, as_of=as_of)
     total_equity += retained_earnings
 
     is_balanced = abs(total_assets - (total_liabilities + total_equity)) < Decimal('0.01')

@@ -1161,7 +1161,10 @@ class HRMSSettings(models.Model):
     pf_employee_rate = models.DecimalField(max_digits=5, decimal_places=2, default=12.0)
     pf_employer_rate = models.DecimalField(max_digits=5, decimal_places=2, default=12.0)
     pf_wage_ceiling = models.DecimalField(max_digits=10, decimal_places=2, default=15000.0)
-    pf_apply_ceiling = models.BooleanField(default=False)
+    pf_apply_ceiling = models.BooleanField(
+        default=True,
+        help_text='When True, PF wage is capped at pf_wage_ceiling (statutory ₹15,000). Opt out per tenant to use full basic.',
+    )
 
     esi_employee_rate = models.DecimalField(max_digits=5, decimal_places=3, default=0.75)
     esi_employer_rate = models.DecimalField(max_digits=5, decimal_places=3, default=3.25)

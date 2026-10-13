@@ -47,3 +47,32 @@ def get_or_init_leave_balance(employee, leave_type, year):
         defaults={'balance': leave_type.annual_entitlement}
     )
     return balance
+
+
+def ensure_employee_leave_balances(employee, year=None):
+    """
+    Ensure LeaveBalance rows exist for every paid leave type for the employee/year.
+    Called on employee create and leave-type create so the UI never shows an empty list.
+    """
+    from ..models import LeaveType
+    if year is None:
+        year = datetime.date.today().year
+    leave_types = LeaveType.objects.filter(tenant=employee.tenant, is_paid=True)
+    balances = []
+    for lt in leave_types:
+        balances.append(get_or_init_leave_balance(employee, lt, year))
+    return balances
+
+
+def ensure_leave_type_balances(leave_type, year=None):
+    """Init balances for all active employees when a new paid leave type is created."""
+    from ..models import Employee
+    if not leave_type.is_paid:
+        return []
+    if year is None:
+        year = datetime.date.today().year
+    employees = Employee.objects.filter(tenant=leave_type.tenant, status='active')
+    balances = []
+    for emp in employees:
+        balances.append(get_or_init_leave_balance(emp, leave_type, year))
+    return balances

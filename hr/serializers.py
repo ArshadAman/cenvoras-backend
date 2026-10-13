@@ -875,17 +875,9 @@ class PayslipSerializer(serializers.ModelSerializer):
         if obj.loan_recovery > 0 and 'Loan Recovery' not in db:
             db['Loan Recovery'] = str(obj.loan_recovery)
 
-        # Loss of Pay docked amount if any
-        if obj.lop_days > 0 and 'Loss of Pay (LOP)' not in db:
-            working_days = Decimal(str(obj.total_working_days or 26))
-            present_days = Decimal(str(obj.present_days or 0))
-            if present_days > 0:
-                daily_rate = Decimal(str(obj.gross_salary)) / present_days
-            else:
-                daily_rate = Decimal(str(obj.gross_salary)) / working_days
-            lop_amt = (Decimal(str(obj.lop_days)) * daily_rate).quantize(Decimal('0.01'))
-            if lop_amt > 0:
-                db['Loss of Pay (LOP)'] = str(lop_amt)
+        # LOP is applied via gross proration — do not inject a synthetic deduction line
+        db.pop('Loss of Pay (LOP)', None)
+        db.pop('LOP', None)
 
         # Fallback if total_deductions > 0 but db is still empty
         if not db and obj.total_deductions > 0:
@@ -945,14 +937,20 @@ class PayslipSerializer(serializers.ModelSerializer):
         }
 
     def get_lop_amount(self, obj):
-        if obj.lop_days > 0:
-            working_days = Decimal(str(obj.total_working_days or 26))
+        """
+        Informational docked amount implied by proration (full CTC − prorated gross).
+        Not a separate deduction — gross is already post-LOP.
+        """
+        if obj.lop_days > 0 and obj.total_working_days:
+            working_days = Decimal(str(obj.total_working_days))
             present_days = Decimal(str(obj.present_days or 0))
-            if present_days > 0:
-                daily_rate = Decimal(str(obj.gross_salary)) / present_days
-            else:
-                daily_rate = Decimal(str(obj.gross_salary)) / working_days
-            return str((Decimal(str(obj.lop_days)) * daily_rate).quantize(Decimal('0.01')))
+            if working_days > 0 and present_days < working_days:
+                # Reverse-engineer full-month gross from prorated gross
+                full_gross = (
+                    (Decimal(str(obj.gross_salary)) * working_days / present_days)
+                    if present_days > 0 else Decimal(str(obj.gross_salary))
+                )
+                return str((full_gross - Decimal(str(obj.gross_salary))).quantize(Decimal('0.01')))
         return '0.00'
 
 

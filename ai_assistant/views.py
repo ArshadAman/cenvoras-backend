@@ -32,24 +32,25 @@ def gather_business_context(user):
     month_start = today.replace(day=1)
     week_start = today - timedelta(days=today.weekday())
 
-    # Sales summaries
-    sales_today = SalesInvoice.objects.filter(
-        created_by=tenant, invoice_date=today
-    ).aggregate(count=Count('id'), total=Sum('total_amount'))
+    # Sales summaries — final invoices only (exclude drafts)
+    final_sales = SalesInvoice.objects.filter(created_by=tenant, status='final')
+    sales_today = final_sales.filter(invoice_date=today).aggregate(
+        count=Count('id'), total=Sum('total_amount')
+    )
 
-    sales_week = SalesInvoice.objects.filter(
-        created_by=tenant, invoice_date__gte=week_start
-    ).aggregate(count=Count('id'), total=Sum('total_amount'))
+    sales_week = final_sales.filter(invoice_date__gte=week_start).aggregate(
+        count=Count('id'), total=Sum('total_amount')
+    )
 
-    sales_month = SalesInvoice.objects.filter(
-        created_by=tenant, invoice_date__gte=month_start
-    ).aggregate(count=Count('id'), total=Sum('total_amount'))
+    sales_month = final_sales.filter(invoice_date__gte=month_start).aggregate(
+        count=Count('id'), total=Sum('total_amount')
+    )
 
     # Previous month for comparison
     prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
     prev_month_end = month_start - timedelta(days=1)
-    sales_prev_month = SalesInvoice.objects.filter(
-        created_by=tenant, invoice_date__gte=prev_month_start, invoice_date__lte=prev_month_end
+    sales_prev_month = final_sales.filter(
+        invoice_date__gte=prev_month_start, invoice_date__lte=prev_month_end
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
     # Purchase summaries
@@ -61,20 +62,23 @@ def gather_business_context(user):
         created_by=tenant, bill_date__gte=prev_month_start, bill_date__lte=prev_month_end
     ).aggregate(count=Count('id'), total=Sum('total_amount'))
 
-    # Top products this month
+    # Top products this month (final invoices only)
     top_products = list(
         SalesInvoiceItem.objects
-        .filter(sales_invoice__created_by=tenant, sales_invoice__invoice_date__gte=month_start)
+        .filter(
+            sales_invoice__created_by=tenant,
+            sales_invoice__invoice_date__gte=month_start,
+            sales_invoice__status='final',
+        )
         .values('product__name')
         .annotate(qty_sold=Sum('quantity'), revenue=Sum('amount'))
         .order_by('-qty_sold')[:5]
     )
 
-    # Low stock
+    # Low stock — match dashboard alert query (stock < alert, alert > 0)
     low_stock = list(
-        Product.objects.filter(created_by=tenant)
-        .exclude(low_stock_alert=0)
-        .filter(stock__lte=F('low_stock_alert'))
+        Product.objects.filter(created_by=tenant, low_stock_alert__gt=0)
+        .filter(stock__lt=F('low_stock_alert'))
         .values('name', 'stock', 'low_stock_alert')[:10]
     )
 
@@ -117,6 +121,7 @@ def gather_business_context(user):
     warranty_sales = []
     warranty_items_qs = SalesInvoiceItem.objects.filter(
         sales_invoice__created_by=tenant,
+        sales_invoice__status='final',
         product__warranty_months__gt=0,
     ).select_related('sales_invoice', 'product').order_by('-sales_invoice__invoice_date')[:10]
     for item in warranty_items_qs:
@@ -154,16 +159,56 @@ def gather_business_context(user):
             'mrp': float(b['mrp'] or 0),
         })
 
-    # GST data for filing assistance
-    gst_invoices_month = SalesInvoice.objects.filter(
-        created_by=tenant, invoice_date__gte=month_start
+    # GST data — real tax amounts (never Sum('tax') rates); final invoices only
+    from decimal import Decimal
+    from billing.gst_utils import calculate_item_tax_breakup, is_interstate_supply
+
+    gst_invoices_month = list(
+        final_sales.filter(invoice_date__gte=month_start)
+        .select_related('customer')
+        .prefetch_related('items__product')
     )
-    gst_sales_total = gst_invoices_month.aggregate(total=Sum('total_amount'))['total'] or 0
-    gst_tax_total = SalesInvoiceItem.objects.filter(
-        sales_invoice__in=gst_invoices_month
-    ).aggregate(
-        total_tax=Sum('tax')
-    )['total_tax'] or 0
+    gst_sales_total = sum((inv.total_amount or Decimal('0') for inv in gst_invoices_month), Decimal('0'))
+    gst_output_tax = Decimal('0.00')
+    for inv in gst_invoices_month:
+        pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None)
+        try:
+            is_inter = is_interstate_supply(tenant, pos_raw)
+        except Exception:
+            is_inter = False
+        for item in inv.items.all():
+            if getattr(item, 'row_type', 'item') == 'note':
+                continue
+            _taxable, tax_amt, _c, _s, _i, _rt = calculate_item_tax_breakup(item, is_inter)
+            gst_output_tax += tax_amt
+
+    # ITC from ledger Input GST (Output − Input = net GST owed)
+    gst_input_tax = Decimal('0.00')
+    try:
+        from ledger.models import GeneralLedgerEntry
+        itc_totals = GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            date__gte=month_start,
+            date__lte=today,
+            account__code__in=['1301', '1302', '1303'],
+            purchase_bill__isnull=False,
+            debit__gt=0,
+        ).aggregate(s=Sum('debit'))
+        gst_input_tax = itc_totals['s'] or Decimal('0.00')
+        rev_totals = GeneralLedgerEntry.objects.filter(
+            created_by=tenant,
+            date__gte=month_start,
+            date__lte=today,
+            account__code__in=['1301', '1302', '1303'],
+            debit_note__isnull=False,
+            credit__gt=0,
+        ).aggregate(s=Sum('credit'))
+        gst_input_tax = max(gst_input_tax - (rev_totals['s'] or Decimal('0.00')), Decimal('0.00'))
+    except Exception:
+        logger.exception('AI context: failed to compute ledger ITC')
+
+    gst_tax_total = gst_output_tax
+    net_gst_payable = max(gst_output_tax - gst_input_tax, Decimal('0.00'))
 
     gst_purchases_month = PurchaseBill.objects.filter(
         created_by=tenant, bill_date__gte=month_start
@@ -191,7 +236,7 @@ def gather_business_context(user):
     # Counts
     total_products = Product.objects.filter(created_by=tenant).count()
     total_customers = Customer.objects.filter(created_by=tenant).count()
-    total_invoices = SalesInvoice.objects.filter(created_by=tenant).count()
+    total_invoices = final_sales.count()
     total_vendors = Vendor.objects.filter(created_by=tenant).count()
 
     # HRMS Context
@@ -272,8 +317,9 @@ def gather_business_context(user):
         "gst_this_month": {
             "sales_total": float(gst_sales_total),
             "tax_collected": float(gst_tax_total),
+            "itc_available": float(gst_input_tax),
             "purchase_total": float(gst_purchase_total),
-            "net_gst_payable": float(gst_tax_total),  # Simplified
+            "net_gst_payable": float(net_gst_payable),
         },
         # Credit/Debit Notes
         "credit_notes_this_month": {"count": credit_notes_month['count'] or 0, "total": float(credit_notes_month['total'] or 0)},

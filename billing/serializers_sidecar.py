@@ -141,12 +141,9 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
             product_obj = Product.objects.filter(name__iexact=str(product_value).strip(), created_by=user).first()
             
             if not product_obj:
-                # If product doesn't exist, we might want to create it if plan allows, 
-                # but for Sales Order we'll just fail if it's not found for now 
-                # to keep it consistent with other non-accounting vouchers unless specified.
-                # Actually, let's auto-create it if possible to match Sales Invoice behavior.
                 can_auto_create = can_auto_create_inventory_product(user)
-                if can_auto_create:
+                confirm_create = data.get('confirm_create_product') in (True, 'true', 'True', '1', 1)
+                if can_auto_create and confirm_create:
                     product_obj = Product.objects.create(
                         name=str(product_value).strip(),
                         hsn_sac_code=data.get('hsn_sac_code') or '',
@@ -154,6 +151,13 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
                         unit=data.get('unit') or 'pcs',
                         created_by=user
                     )
+                elif can_auto_create:
+                    raise serializers.ValidationError({
+                        'product': (
+                            f'Product "{product_value}" was not found. '
+                            'Confirm catalog create (confirm_create_product=true) or pass a product UUID.'
+                        )
+                    })
                 else:
                     raise serializers.ValidationError({'product': f'Product "{product_value}" not found in inventory.'})
 
@@ -458,6 +462,14 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
                 if not can_auto_create:
                     raise serializers.ValidationError({
                         'product': 'Only Pro and above plans can create new inventory products.'
+                    })
+                confirm_create = mutable.get('confirm_create_product') in (True, 'true', 'True', '1', 1)
+                if not confirm_create:
+                    raise serializers.ValidationError({
+                        'product': (
+                            f'Product "{product_name}" was not found. '
+                            'Confirm catalog create (confirm_create_product=true) or pass a product UUID.'
+                        )
                     })
                 product_obj = Product.objects.create(
                     name=product_name,

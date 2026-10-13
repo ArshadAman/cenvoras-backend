@@ -388,7 +388,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class TeamMemberSerializer(serializers.ModelSerializer):
     """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
-    password = serializers.CharField(write_only=True, min_length=8, required=False)
+    password = serializers.CharField(write_only=True, min_length=8, required=False, allow_blank=True)
     
     class Meta:
         model = User
@@ -403,6 +403,27 @@ class TeamMemberSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("An account with this email already exists.")
         return value
 
+    def _write_team_audit(self, action, member, changes=None):
+        try:
+            from audit_log.models import AuditLog
+            from audit_log.signals import get_client_ip
+            request = self.context.get('request')
+            actor = request.user if request else None
+            tenant = getattr(actor, 'active_tenant', actor) if actor else None
+            AuditLog.objects.create(
+                tenant=tenant,
+                user=actor,
+                user_email=getattr(actor, 'email', '') or '',
+                action=action,
+                model_name='User',
+                object_id=str(member.id),
+                object_repr=str(member),
+                changes=changes or {},
+                ip_address=get_client_ip(request) if request else None,
+            )
+        except Exception:
+            pass
+
     def create(self, validated_data):
         admin_user = self.context['request'].user
         
@@ -411,7 +432,9 @@ class TeamMemberSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Only Admins can spawn team members.")
             
         validated_data['username'] = validated_data['email']
-        password = validated_data.pop('password')
+        password = validated_data.pop('password', None)
+        if not password:
+            raise serializers.ValidationError({'password': 'Password is required when creating a team member.'})
         
         # Set parent to the tenant owner
         parent = admin_user.active_tenant
@@ -422,12 +445,33 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         )
         member.set_password(password)
         member.save()
+        self._write_team_audit('CREATE', member, changes={
+            'email': member.email,
+            'role': member.role,
+            'permissions': member.permissions,
+        })
         return member
 
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
+        before = {
+            'role': instance.role,
+            'permissions': instance.permissions,
+            'first_name': instance.first_name,
+            'last_name': instance.last_name,
+        }
         instance = super().update(instance, validated_data)
         if password:
             instance.set_password(password)
             instance.save()
+        self._write_team_audit('UPDATE', instance, changes={
+            'before': before,
+            'after': {
+                'role': instance.role,
+                'permissions': instance.permissions,
+                'first_name': instance.first_name,
+                'last_name': instance.last_name,
+                'password_changed': bool(password),
+            },
+        })
         return instance

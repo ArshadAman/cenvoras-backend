@@ -377,18 +377,14 @@ class AccountingService:
         ap_account = accounts_payable_account or accounts['accounts_payable']
 
         from billing.models import PurchaseBillItem
+        from billing.gst_utils import get_seller_state_code, get_purchase_supplier_state_code
         line_items = list(PurchaseBillItem.objects.filter(purchase_bill=purchase_bill))
 
-        # Determine intra-state vs inter-state
+        # GSTIN-first POS (same as sales/DN) — empty vendor.state must not force CGST/SGST
         tenant = getattr(user, 'active_tenant', user)
-        buyer_state = getattr(tenant, 'state', None) or getattr(user, 'state', None)
-        vendor_state = None
-        if purchase_bill.vendor:
-            vendor_state = getattr(purchase_bill.vendor, 'state', None)
-
-        is_interstate = False
-        if buyer_state and vendor_state:
-            is_interstate = (buyer_state.strip().upper() != vendor_state.strip().upper())
+        buyer_code = get_seller_state_code(tenant)
+        supplier_code = get_purchase_supplier_state_code(purchase_bill, buyer_code)
+        is_interstate = bool(buyer_code and supplier_code and buyer_code != supplier_code)
 
         total_taxable = Decimal('0.00')
         total_tax = Decimal('0.00')
@@ -486,6 +482,49 @@ class AccountingService:
                         created_by=user
                     )
 
+        # Reverse Charge: credit Output GST liability matching Input ITC (GSTR-3B inward RCM)
+        is_rcm = bool(getattr(purchase_bill, 'is_reverse_charge', False))
+        if is_rcm and total_tax > Decimal('0.00'):
+            if is_interstate:
+                GeneralLedgerEntry.objects.create(
+                    date=purchase_bill.bill_date,
+                    account=accounts['output_igst'],
+                    debit=0,
+                    credit=total_tax,
+                    description=f"RCM Output IGST for Bill {purchase_bill.bill_number}",
+                    reference=purchase_bill.bill_number,
+                    purchase_bill=purchase_bill,
+                    vendor=vendor_obj,
+                    created_by=user
+                )
+            else:
+                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
+                sgst = total_tax - cgst
+                if cgst > 0:
+                    GeneralLedgerEntry.objects.create(
+                        date=purchase_bill.bill_date,
+                        account=accounts['output_cgst'],
+                        debit=0,
+                        credit=cgst,
+                        description=f"RCM Output CGST for Bill {purchase_bill.bill_number}",
+                        reference=purchase_bill.bill_number,
+                        purchase_bill=purchase_bill,
+                        vendor=vendor_obj,
+                        created_by=user
+                    )
+                if sgst > 0:
+                    GeneralLedgerEntry.objects.create(
+                        date=purchase_bill.bill_date,
+                        account=accounts['output_sgst'],
+                        debit=0,
+                        credit=sgst,
+                        description=f"RCM Output SGST for Bill {purchase_bill.bill_number}",
+                        reference=purchase_bill.bill_number,
+                        purchase_bill=purchase_bill,
+                        vendor=vendor_obj,
+                        created_by=user
+                    )
+
         # Create detailed description with line items for accounts payable
         if line_items:
             item_details = []
@@ -499,12 +538,17 @@ class AccountingService:
         else:
             detailed_payable_description = f"Amount owed to {purchase_bill.vendor_name}"
 
+        # Under RCM, AP is typically the taxable value (GST paid to govt, not vendor)
+        ap_credit = (
+            total_taxable if is_rcm else Decimal(str(purchase_bill.total_amount or '0.00'))
+        ).quantize(Decimal('0.01'))
+
         # Credit: Accounts Payable (record total amount owed)
         GeneralLedgerEntry.objects.create(
             date=purchase_bill.bill_date,
             account=ap_account,
             debit=0,
-            credit=purchase_bill.total_amount,
+            credit=ap_credit,
             description=detailed_payable_description,
             reference=purchase_bill.bill_number,
             purchase_bill=purchase_bill,
@@ -513,8 +557,11 @@ class AccountingService:
         )
 
         # Debit/Credit: Rounding Off adjustment (guarantee Debits == Credits down to the exact cent)
+        # RCM: Dr Purchases + Dr Input GST = Cr AP (taxable) + Cr Output GST
         total_debited = total_taxable + total_tax
-        total_credited = Decimal(str(purchase_bill.total_amount or '0.00'))
+        total_credited = ap_credit + (total_tax if is_rcm else Decimal('0.00'))
+        if not is_rcm:
+            total_credited = Decimal(str(purchase_bill.total_amount or '0.00'))
         round_off_diff = (total_credited - total_debited).quantize(Decimal('0.01'))
 
         if round_off_diff != Decimal('0.00'):

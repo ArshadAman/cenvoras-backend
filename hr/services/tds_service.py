@@ -1,4 +1,3 @@
-import calendar
 import datetime
 from decimal import Decimal
 from django.db.models import Q, Sum
@@ -34,19 +33,111 @@ def get_financial_year_info(month, year):
     }
 
 
-def compute_tax_on_income(taxable_income, regime='new'):
+# ---------------------------------------------------------------------------
+# FY-versioned tax configuration (additive — never overwrite closed FYs)
+# ---------------------------------------------------------------------------
+# New regime slabs are (upper_bound, cumulative_tax_at_lower, rate_above_lower).
+# upper_bound None = open-ended top slab.
+
+_FA2024_NEW_SLABS = [
+    # Finance Act 2024 / Sec 115BAC (FY 2024-25, FY 2025-26)
+    (Decimal('300000.00'), Decimal('0.00'), Decimal('0.00')),
+    (Decimal('700000.00'), Decimal('0.00'), Decimal('0.05')),
+    (Decimal('1000000.00'), Decimal('20000.00'), Decimal('0.10')),
+    (Decimal('1200000.00'), Decimal('50000.00'), Decimal('0.15')),
+    (Decimal('1500000.00'), Decimal('80000.00'), Decimal('0.20')),
+    (None, Decimal('140000.00'), Decimal('0.30')),
+]
+
+_BUDGET2025_NEW_SLABS = [
+    # Budget 2025 style (FY 2026-27+): 4/8/12/16/20/24L + ₹12L Sec 87A rebate
+    (Decimal('400000.00'), Decimal('0.00'), Decimal('0.00')),
+    (Decimal('800000.00'), Decimal('0.00'), Decimal('0.05')),
+    (Decimal('1200000.00'), Decimal('20000.00'), Decimal('0.10')),
+    (Decimal('1600000.00'), Decimal('60000.00'), Decimal('0.15')),
+    (Decimal('2000000.00'), Decimal('120000.00'), Decimal('0.20')),
+    (Decimal('2400000.00'), Decimal('200000.00'), Decimal('0.25')),
+    (None, Decimal('300000.00'), Decimal('0.30')),
+]
+
+_OLD_REGIME_SLABS = [
+    (Decimal('250000.00'), Decimal('0.00'), Decimal('0.00')),
+    (Decimal('500000.00'), Decimal('0.00'), Decimal('0.05')),
+    (Decimal('1000000.00'), Decimal('12500.00'), Decimal('0.20')),
+    (None, Decimal('112500.00'), Decimal('0.30')),
+]
+
+
+def _fy_start_year_from_string(fy_string):
+    if not fy_string:
+        return None
+    try:
+        return int(str(fy_string).split('-')[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def resolve_tax_fy_config(fy_string=None, month=None, year=None):
+    """
+    Resolve slab/rebate/std-deduction config for a financial year.
+    FY start >= 2026 → Budget 2025 new-regime tables; earlier → FA 2024.
+    """
+    fy_start = _fy_start_year_from_string(fy_string)
+    if fy_start is None:
+        if month is not None and year is not None:
+            fy_start = get_financial_year_info(month, year)['fy_start_year']
+            fy_string = get_financial_year_info(month, year)['fy_string']
+        else:
+            today = datetime.date.today()
+            info = get_financial_year_info(today.month, today.year)
+            fy_start = info['fy_start_year']
+            fy_string = info['fy_string']
+
+    if fy_start >= 2026:
+        new_slabs = _BUDGET2025_NEW_SLABS
+        new_rebate_threshold = Decimal('1200000.00')
+        new_max_rebate = Decimal('60000.00')  # enough to zero tax at ₹12L taxable
+        new_std_deduction = Decimal('75000.00')
+    else:
+        new_slabs = _FA2024_NEW_SLABS
+        new_rebate_threshold = Decimal('700000.00')
+        new_max_rebate = Decimal('25000.00')
+        new_std_deduction = Decimal('75000.00')
+
+    return {
+        'fy_string': fy_string or f"{fy_start}-{fy_start + 1}",
+        'fy_start_year': fy_start,
+        'new_slabs': new_slabs,
+        'old_slabs': _OLD_REGIME_SLABS,
+        'new_rebate_threshold': new_rebate_threshold,
+        'new_max_rebate': new_max_rebate,
+        'old_rebate_threshold': Decimal('500000.00'),
+        'old_max_rebate': Decimal('12500.00'),
+        'new_std_deduction': new_std_deduction,
+        'old_std_deduction': Decimal('50000.00'),
+        'cess_rate': Decimal('0.04'),
+    }
+
+
+def _raw_tax_from_slabs(ti, slabs):
+    prev_upper = Decimal('0.00')
+    for upper, cumulative_at_lower, rate in slabs:
+        if upper is None or ti <= upper:
+            return (cumulative_at_lower + (ti - prev_upper) * rate).quantize(Decimal('0.01'))
+        prev_upper = upper
+    return Decimal('0.00')
+
+
+def compute_tax_on_income(taxable_income, regime='new', fy_string=None, month=None, year=None):
     """
     Computes Indian Income Tax under New (Sec 115BAC) or Old Regime with Section 87A rebate
-    and Marginal Relief.
-
-    Marginal Relief (Section 87A): When taxable income slightly exceeds the rebate threshold
-    (₹7,00,000 for new regime, ₹5,00,000 for old regime), the total tax liability including
-    cess cannot exceed the amount by which income exceeds the threshold.
+    and Marginal Relief. Slabs/rebate thresholds are FY-versioned.
 
     Returns: (base_tax, rebate_applied, rebate_amount, cess, total_annual_tax)
     """
     ti = Decimal(str(taxable_income)).quantize(Decimal('0.01'))
     regime = (regime or 'new').lower()
+    cfg = resolve_tax_fy_config(fy_string=fy_string, month=month, year=year)
 
     if ti <= Decimal('0.00'):
         return Decimal('0.00'), False, Decimal('0.00'), Decimal('0.00'), Decimal('0.00')
@@ -54,89 +145,34 @@ def compute_tax_on_income(taxable_income, regime='new'):
     rebate_applied = False
     rebate_amount = Decimal('0.00')
     marginal_relief_applied = False
+    cess_rate = cfg['cess_rate']
 
     if regime == 'new':
-        # New Tax Regime Slabs (Finance Act 2024 / Sec 115BAC)
-        # 0 to 3,00,000        : Nil
-        # 3,00,001 to 7,00,000  : 5%
-        # 7,00,001 to 10,00,000 : 10%
-        # 10,00,001 to 12,00,000: 15%
-        # 12,00,001 to 15,00,000: 20%
-        # Above 15,00,000       : 30%
-        if ti <= Decimal('300000.00'):
-            raw_tax = Decimal('0.00')
-        elif ti <= Decimal('700000.00'):
-            raw_tax = (ti - Decimal('300000.00')) * Decimal('0.05')
-        elif ti <= Decimal('1000000.00'):
-            raw_tax = Decimal('20000.00') + (ti - Decimal('700000.00')) * Decimal('0.10')
-        elif ti <= Decimal('1200000.00'):
-            raw_tax = Decimal('50000.00') + (ti - Decimal('1000000.00')) * Decimal('0.15')
-        elif ti <= Decimal('1500000.00'):
-            raw_tax = Decimal('80000.00') + (ti - Decimal('1200000.00')) * Decimal('0.20')
-        else:
-            raw_tax = Decimal('140000.00') + (ti - Decimal('1500000.00')) * Decimal('0.30')
-
-        rebate_threshold = Decimal('700000.00')
-        max_rebate = Decimal('25000.00')
-
-        # Section 87A Rebate: Full rebate if taxable income <= ₹7,00,000
-        if ti <= rebate_threshold and raw_tax > 0:
-            rebate_amount = min(raw_tax, max_rebate)
-            base_tax = max(Decimal('0.00'), raw_tax - rebate_amount)
-            rebate_applied = True
-        else:
-            base_tax = raw_tax
-            # Marginal Relief: If income slightly exceeds ₹7,00,000, total tax (incl. cess)
-            # cannot exceed the excess income over the threshold
-            if ti > rebate_threshold:
-                excess_income = (ti - rebate_threshold).quantize(Decimal('0.01'))
-                normal_cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01'))
-                normal_total = (base_tax + normal_cess).quantize(Decimal('0.01'))
-                if normal_total > excess_income:
-                    # Apply marginal relief - cap total tax at excess income
-                    # Reverse engineer: total_with_cess = base * 1.04 = excess → base = excess / 1.04
-                    relieved_base = (excess_income / Decimal('1.04')).quantize(Decimal('0.01'))
-                    base_tax = relieved_base
-                    marginal_relief_applied = True
-
+        raw_tax = _raw_tax_from_slabs(ti, cfg['new_slabs'])
+        rebate_threshold = cfg['new_rebate_threshold']
+        max_rebate = cfg['new_max_rebate']
     else:
-        # Old Tax Regime Slabs
-        # 0 to 2,50,000        : Nil
-        # 2,50,001 to 5,00,000  : 5%
-        # 5,00,001 to 10,00,000 : 20%
-        # Above 10,00,000       : 30%
-        if ti <= Decimal('250000.00'):
-            raw_tax = Decimal('0.00')
-        elif ti <= Decimal('500000.00'):
-            raw_tax = (ti - Decimal('250000.00')) * Decimal('0.05')
-        elif ti <= Decimal('1000000.00'):
-            raw_tax = Decimal('12500.00') + (ti - Decimal('500000.00')) * Decimal('0.20')
-        else:
-            raw_tax = Decimal('112500.00') + (ti - Decimal('1000000.00')) * Decimal('0.30')
+        raw_tax = _raw_tax_from_slabs(ti, cfg['old_slabs'])
+        rebate_threshold = cfg['old_rebate_threshold']
+        max_rebate = cfg['old_max_rebate']
 
-        rebate_threshold = Decimal('500000.00')
-        max_rebate = Decimal('12500.00')
-
-        # Section 87A Rebate: Full rebate if taxable income <= ₹5,00,000
-        if ti <= rebate_threshold and raw_tax > 0:
-            rebate_amount = min(raw_tax, max_rebate)
-            base_tax = max(Decimal('0.00'), raw_tax - rebate_amount)
-            rebate_applied = True
-        else:
-            base_tax = raw_tax
-            # Marginal Relief: If income slightly exceeds ₹5,00,000, total tax (incl. cess)
-            # cannot exceed the excess income over the threshold
-            if ti > rebate_threshold:
-                excess_income = (ti - rebate_threshold).quantize(Decimal('0.01'))
-                normal_cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01'))
-                normal_total = (base_tax + normal_cess).quantize(Decimal('0.01'))
-                if normal_total > excess_income:
-                    relieved_base = (excess_income / Decimal('1.04')).quantize(Decimal('0.01'))
-                    base_tax = relieved_base
-                    marginal_relief_applied = True
+    if ti <= rebate_threshold and raw_tax > 0:
+        rebate_amount = min(raw_tax, max_rebate)
+        base_tax = max(Decimal('0.00'), raw_tax - rebate_amount)
+        rebate_applied = True
+    else:
+        base_tax = raw_tax
+        if ti > rebate_threshold:
+            excess_income = (ti - rebate_threshold).quantize(Decimal('0.01'))
+            normal_cess = (base_tax * cess_rate).quantize(Decimal('0.01'))
+            normal_total = (base_tax + normal_cess).quantize(Decimal('0.01'))
+            if normal_total > excess_income:
+                relieved_base = (excess_income / (Decimal('1.00') + cess_rate)).quantize(Decimal('0.01'))
+                base_tax = relieved_base
+                marginal_relief_applied = True
 
     base_tax = base_tax.quantize(Decimal('0.01'))
-    cess = (base_tax * Decimal('0.04')).quantize(Decimal('0.01')) if base_tax > 0 else Decimal('0.00')
+    cess = (base_tax * cess_rate).quantize(Decimal('0.01')) if base_tax > 0 else Decimal('0.00')
     total_annual_tax = (base_tax + cess).quantize(Decimal('0.01'))
 
     return base_tax, rebate_applied or marginal_relief_applied, rebate_amount, cess, total_annual_tax
@@ -150,7 +186,7 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
     1. Annual Income Projection (Earned YTD Gross + Remaining Months Gross + Previous Employment Income).
     2. Tax Regime Selection (New Regime [Default] vs Old Regime).
     3. Exemptions & Deductions Engine (Standard deduction ₹75k New / ₹50k Old, 80C/80D/HRA proofs).
-    4. Tax Slab & Sec 87A Rebate Evaluation + 4% Cess.
+    4. Tax Slab & Sec 87A Rebate Evaluation + 4% Cess (FY-versioned).
     5. Monthly TDS Dynamic Spreading:
        Monthly TDS = (Projected Annual Tax - YTD TDS Deducted - Previous Employer TDS) / Remaining Pay Cycles.
     6. Edge handlers: Mid-year hikes, missing investment proofs dropped in Q4.
@@ -163,6 +199,7 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
     fy_str = fy_info['fy_string']
     month_idx = fy_info['month_idx_in_fy']
     remaining_months = fy_info['remaining_months']
+    cfg = resolve_tax_fy_config(fy_string=fy_str)
 
     # 1. Earned Year-to-Date Gross and YTD TDS from past runs in current FY
     past_runs_q = Q(payroll_run__year=fy_start_year, payroll_run__month__gte=4)
@@ -192,7 +229,7 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
 
     q4_unverified_dropped = False
     if regime == 'old':
-        standard_deduction = Decimal('50000.00')
+        standard_deduction = cfg['old_std_deduction']
         # In Q4 (Jan, Feb, Mar => month_idx >= 10), drop provisional unverified declarations
         if month_idx >= 10 and declaration and not declaration.proof_verified:
             sec_80c = Decimal('0.00')
@@ -216,8 +253,7 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
 
         total_exemptions = standard_deduction + sec_80c + sec_80d + sec_24b + hra_exemption + other_exemptions
     else:
-        # New Regime
-        standard_deduction = Decimal('75000.00')
+        standard_deduction = cfg['new_std_deduction']
         sec_80c = Decimal('0.00')
         sec_80d = Decimal('0.00')
         sec_24b = Decimal('0.00')
@@ -233,10 +269,11 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
     # 4. Net Taxable Income
     net_taxable_income = max(Decimal('0.00'), projected_annual_gross - total_exemptions).quantize(Decimal('0.01'))
 
-    # 5. Tax liability & Cess
+    # 5. Tax liability & Cess (FY-versioned)
     base_tax, rebate_applied, rebate_amount, cess, total_annual_tax = compute_tax_on_income(
         net_taxable_income,
         regime=regime,
+        fy_string=fy_str,
     )
 
     # 6. Monthly TDS Spreading
@@ -287,4 +324,85 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
         'total_exemptions': total_exemptions,
         'reason': reason,
         'q4_unverified_dropped': q4_unverified_dropped,
+        'rebate_threshold': (
+            cfg['new_rebate_threshold'] if regime == 'new' else cfg['old_rebate_threshold']
+        ),
+    }
+
+
+def preview_monthly_tds(
+    monthly_gross,
+    regime='new',
+    month=None,
+    year=None,
+    previous_tds=Decimal('0.00'),
+    previous_income=Decimal('0.00'),
+    section_80c=Decimal('0.00'),
+    section_80d=Decimal('0.00'),
+    section_24b=Decimal('0.00'),
+    hra_exemption=Decimal('0.00'),
+    other_exemptions=Decimal('0.00'),
+):
+    """
+    Employee-screen / calculator preview using the same FY slabs and remaining-months
+    spreading as payroll (no YTD payslips).
+    """
+    today = datetime.date.today()
+    month = int(month or today.month)
+    year = int(year or today.year)
+    fy_info = get_financial_year_info(month, year)
+    fy_str = fy_info['fy_string']
+    # Calculator / offer-letter preview assumes full-year levelized employment.
+    # Live payroll uses compute_dynamic_tds (YTD + true remaining months).
+    remaining_months = 12
+    cfg = resolve_tax_fy_config(fy_string=fy_str)
+    regime = (regime or 'new').lower()
+
+    gross = Decimal(str(monthly_gross)).quantize(Decimal('0.01'))
+    prev_income = Decimal(str(previous_income or 0))
+    prev_tds = Decimal(str(previous_tds or 0))
+    projected_annual_gross = (gross * Decimal('12') + prev_income).quantize(Decimal('0.01'))
+
+    if regime == 'old':
+        standard_deduction = cfg['old_std_deduction']
+        total_exemptions = (
+            standard_deduction
+            + min(Decimal(str(section_80c or 0)), Decimal('150000.00'))
+            + Decimal(str(section_80d or 0))
+            + min(Decimal(str(section_24b or 0)), Decimal('200000.00'))
+            + Decimal(str(hra_exemption or 0))
+            + Decimal(str(other_exemptions or 0))
+        )
+        rebate_threshold = cfg['old_rebate_threshold']
+    else:
+        standard_deduction = cfg['new_std_deduction']
+        total_exemptions = standard_deduction
+        rebate_threshold = cfg['new_rebate_threshold']
+
+    net_taxable = max(Decimal('0.00'), projected_annual_gross - total_exemptions).quantize(Decimal('0.01'))
+    base_tax, rebate_applied, rebate_amount, cess, total_annual_tax = compute_tax_on_income(
+        net_taxable, regime=regime, fy_string=fy_str
+    )
+    remaining_tax = max(Decimal('0.00'), total_annual_tax - prev_tds)
+    monthly_tds = (
+        Decimal('0.00')
+        if total_annual_tax <= 0
+        else (remaining_tax / Decimal(str(remaining_months))).quantize(Decimal('0.01'))
+    )
+
+    return {
+        'monthly_tds': monthly_tds,
+        'projected_annual_gross': projected_annual_gross,
+        'net_taxable_income': net_taxable,
+        'total_annual_tax': total_annual_tax,
+        'base_tax': base_tax,
+        'cess': cess,
+        'rebate_applied': rebate_applied,
+        'rebate_amount': rebate_amount,
+        'remaining_months': remaining_months,
+        'regime': regime,
+        'financial_year': fy_str,
+        'standard_deduction': standard_deduction,
+        'total_exemptions': total_exemptions,
+        'rebate_threshold': rebate_threshold,
     }

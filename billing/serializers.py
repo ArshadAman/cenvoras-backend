@@ -255,7 +255,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
-            'warehouse', 'journal',
+            'warehouse', 'journal', 'is_reverse_charge',
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
@@ -389,6 +389,52 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
         
         return instance
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        from billing.gst_utils import (
+            get_seller_state_code,
+            get_purchase_supplier_state_code,
+            calculate_item_tax_breakup,
+        )
+        tenant = getattr(instance, 'created_by', None)
+        buyer = get_seller_state_code(tenant) if tenant else None
+        supplier = get_purchase_supplier_state_code(instance, buyer)
+        is_interstate = bool(buyer and supplier and buyer != supplier)
+
+        taxable_total = Decimal('0.00')
+        cgst_total = Decimal('0.00')
+        sgst_total = Decimal('0.00')
+        igst_total = Decimal('0.00')
+        tax_total = Decimal('0.00')
+        items_out = ret.get('items') or []
+        for idx, item in enumerate(instance.items.all()):
+            taxable, tax_amt, cgst, sgst, igst, tax_rate = calculate_item_tax_breakup(
+                item, is_interstate=is_interstate
+            )
+            taxable_total += taxable
+            cgst_total += cgst
+            sgst_total += sgst
+            igst_total += igst
+            tax_total += tax_amt
+            if idx < len(items_out) and isinstance(items_out[idx], dict):
+                items_out[idx]['taxable_amount'] = str(taxable)
+                items_out[idx]['tax_amount'] = str(tax_amt)
+                items_out[idx]['cgst'] = str(cgst)
+                items_out[idx]['sgst'] = str(sgst)
+                items_out[idx]['igst'] = str(igst)
+                items_out[idx]['tax_rate'] = str(tax_rate)
+                items_out[idx]['tax_display'] = f"{tax_rate}%" if tax_rate <= Decimal('40') else str(tax_rate)
+
+        ret['items'] = items_out
+        ret['taxable_amount'] = str(taxable_total.quantize(Decimal('0.01')))
+        ret['cgst'] = str(cgst_total.quantize(Decimal('0.01')))
+        ret['sgst'] = str(sgst_total.quantize(Decimal('0.01')))
+        ret['igst'] = str(igst_total.quantize(Decimal('0.01')))
+        ret['tax_amount'] = str(tax_total.quantize(Decimal('0.01')))
+        ret['is_interstate'] = is_interstate
+        ret['subtotal'] = ret['taxable_amount']
+        return ret
 
 class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     product = ProductField(required=False, allow_null=True)
@@ -1320,9 +1366,30 @@ class VendorSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("A vendor with this email already exists.")
         return value
 
+    def validate_gstin(self, value):
+        gstin = (value or '').strip().upper()
+        if not gstin:
+            return value
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        qs = Vendor.objects.filter(created_by=user, gstin__iexact=gstin)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                f"A vendor with GSTIN {gstin} already exists for this business."
+            )
+        return gstin
+
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
         validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        # Sync state from GSTIN prefix when state blank
+        gstin = (validated_data.get('gstin') or '').strip()
+        if gstin and len(gstin) >= 2 and not (validated_data.get('state') or '').strip():
+            from billing.gst_utils import get_state_code_from_gstin, CODE_TO_STATE_NAME
+            code = get_state_code_from_gstin(gstin)
+            if code and code in CODE_TO_STATE_NAME:
+                validated_data['state'] = CODE_TO_STATE_NAME[code]
         
         vendor = Vendor.objects.create(**validated_data)
         

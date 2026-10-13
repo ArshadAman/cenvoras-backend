@@ -18,12 +18,16 @@ from . import gst_views
 from . import returns_views
 from . import views
 from . import views_gst_shield
+from . import vendor_payment_views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
     path('purchase-bills/<uuid:pk>/', purchase_bill_detail, name='purchase_bill_detail'),
     path('purchase-bills/<uuid:pk>/edit/', purchase_bill_update_delete, name='purchase_bill_update_delete'),
     path('vendor-products/', vendor_products, name='vendor_products'),
+    path('vendor-payments/unpaid-bills/', vendor_payment_views.unpaid_purchase_bills, name='unpaid_purchase_bills'),
+    path('vendor-payments/', vendor_payment_views.vendor_payment_create, name='vendor_payment_create'),
+    path('rule37-itc/', vendor_payment_views.rule37_itc_reversals, name='rule37_itc_reversals'),
     # Purchase Orders
     path('purchase-orders/', purchase_order_list_create, name='purchase_order_list_create'),
     path('purchase-orders/<uuid:pk>/', purchase_order_detail, name='purchase_order_detail'),

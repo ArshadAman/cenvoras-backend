@@ -246,32 +246,60 @@ def compute_esi(gross_salary, hrms_settings=None):
     }
 
 
-def compute_tds(gross_salary, regime='new'):
+def compute_tds(gross_salary, regime='new', month=None, year=None):
     """
-    Computes monthly Tax Deducted at Source based on projected annual gross and tax regime.
-    Defaults to New Regime (Sec 115BAC) with Standard Deduction (Rs. 75,000) and Sec 87A rebate.
+    Legacy helper: levelized monthly TDS from annual projection.
+    Prefer compute_dynamic_tds for real payslips.
     """
+    import datetime
+    today = datetime.date.today()
+    month = int(month or today.month)
+    year = int(year or today.year)
     annual_gross = Decimal(str(gross_salary)) * Decimal('12')
     std_ded = Decimal('75000.00') if regime == 'new' else Decimal('50000.00')
     taxable_income = max(Decimal('0.00'), annual_gross - std_ded)
-    _, _, _, _, total_annual_tax = compute_tax_on_income(taxable_income, regime=regime)
+    _, _, _, _, total_annual_tax = compute_tax_on_income(
+        taxable_income, regime=regime, month=month, year=year
+    )
     monthly_tax = total_annual_tax / Decimal('12')
     return monthly_tax.quantize(Decimal('0.01'))
 
 
-def compute_pt(gross_salary, work_state):
-    """Calculates state-wise Professional Tax using ProfessionalTaxSlab."""
+def compute_pt(gross_salary, work_state, month=None, on_date=None):
+    """
+    State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
+    Karnataka February special: ₹300 when gross is in the taxable band (gross >= ₹25,000).
+    """
+    import datetime
+
     gross = Decimal(str(gross_salary))
-    slab = ProfessionalTaxSlab.objects.filter(
-        state_name__iexact=work_state or '',
-        lower_bound__lte=gross
+    state = (work_state or '').strip()
+    if not state:
+        return Decimal('0.00')
+
+    as_of = on_date or datetime.date.today()
+    month = int(month or as_of.month)
+
+    qs = ProfessionalTaxSlab.objects.filter(
+        state_name__iexact=state,
+        lower_bound__lte=gross,
     ).filter(
         Q(upper_bound__isnull=True) | Q(upper_bound__gte=gross)
-    ).first()
+    ).filter(
+        Q(effective_from__isnull=True) | Q(effective_from__lte=as_of)
+    ).filter(
+        Q(effective_to__isnull=True) | Q(effective_to__gte=as_of)
+    ).order_by('-lower_bound')
 
-    if slab:
-        return Decimal(str(slab.pt_amount))
-    return Decimal('0.00')
+    slab = qs.first()
+    if not slab:
+        return Decimal('0.00')
+
+    amount = Decimal(str(slab.pt_amount))
+    # Karnataka Feb surcharge: ₹300 for salary in taxable band
+    if state.lower() == 'karnataka' and month == 2 and amount > 0:
+        return Decimal('300.00')
+    return amount
 
 
 def compute_gross(employee, month, year):
@@ -438,7 +466,15 @@ def compute_payslip_for_employee(employee, payroll_run):
     esi_details = compute_esi(gross_with_earnings, settings)
     tds_data = compute_dynamic_tds(employee, gross_with_earnings, month, year)
     tds_val = tds_data['monthly_tds']
-    pt_val = compute_pt(gross_with_earnings, employee.work_state)
+    import datetime as _dt
+    import calendar as _cal
+    pt_day = min(28, _cal.monthrange(int(year), int(month))[1])
+    pt_val = compute_pt(
+        gross_with_earnings,
+        employee.work_state,
+        month=int(month),
+        on_date=_dt.date(int(year), int(month), pt_day),
+    )
 
     # Custom deductions total
     custom_deductions_total = sum(custom_deductions.values(), Decimal('0.00'))

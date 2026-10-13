@@ -35,7 +35,7 @@ class ProductSerializer(serializers.ModelSerializer):
             hsn_sac = self.instance.hsn_sac_code
         hsn_sac_str = str(hsn_sac or '').strip()
         if not hsn_sac_str or hsn_sac_str.upper() == 'N/A':
-            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is mandatory.'})
+            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is required.'})
         clean_digits = re.sub(r'\D', '', hsn_sac_str)
         request = self.context.get('request')
         user = request.user if request else None

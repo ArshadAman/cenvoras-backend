@@ -15,54 +15,20 @@ from django.db.models import Sum, F, Q, Case, When, Value, DecimalField, CharFie
 from django.db.models.functions import Coalesce
 from .models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Customer, Vendor, Payment
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
-from .gst_utils import get_seller_state_code, get_pos_state_code, is_interstate_supply, get_uqc, clean_hsn_sac_code
+from .gst_utils import (
+    get_seller_state_code,
+    get_pos_state_code,
+    is_interstate_supply,
+    get_uqc,
+    clean_hsn_sac_code,
+    get_debit_note_supplier_state_code,
+    get_purchase_supplier_state_code,
+    calculate_item_tax_breakup,
+)
 
 import datetime
 import hashlib
 import json
-
-
-def calculate_item_tax_breakup(item, is_interstate=False):
-    """
-    Standard tax calculation for SalesInvoiceItem, PurchaseBillItem, CreditNoteItem, DebitNoteItem.
-    Returns: (taxable_amount, tax_amount, cgst, sgst, igst, tax_rate)
-    """
-    quantity = Decimal(str(getattr(item, 'quantity', 0) or 0))
-    price = Decimal(str(getattr(item, 'price', 0) or 0))
-    discount = Decimal(str(getattr(item, 'discount', 0) or 0))
-    line_amount = Decimal(str(getattr(item, 'amount', 0) or 0))
-    tax_rate = Decimal(str(getattr(item, 'tax', 0) or 0))
-
-    base_amount = quantity * price
-    discount_amount = ((base_amount * discount) / Decimal('100')).quantize(Decimal('0.01'))
-    calc_taxable = (base_amount - discount_amount).quantize(Decimal('0.01'))
-
-    if quantity > 0 and price > 0:
-        taxable_amount = calc_taxable
-        if tax_rate > 0:
-            tax_amount = ((taxable_amount * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
-        elif line_amount > taxable_amount:
-            tax_amount = line_amount - taxable_amount
-        else:
-            tax_amount = Decimal('0.00')
-    else:
-        if tax_rate > 0 and line_amount > 0:
-            taxable_amount = (line_amount / (Decimal('1') + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
-            tax_amount = line_amount - taxable_amount
-        else:
-            taxable_amount = line_amount
-            tax_amount = Decimal('0.00')
-
-    if is_interstate:
-        igst = tax_amount
-        cgst = Decimal('0.00')
-        sgst = Decimal('0.00')
-    else:
-        cgst = (tax_amount / Decimal('2')).quantize(Decimal('0.01'))
-        sgst = tax_amount - cgst
-        igst = Decimal('0.00')
-
-    return taxable_amount, tax_amount, cgst, sgst, igst, tax_rate
 
 
 # ─── HSN Summary Report ───────────────────────────────────────
@@ -935,9 +901,7 @@ def gstr3b_summary(request):
     itc_sgst = Decimal('0.00')
 
     for bill in bills:
-        vendor_state = getattr(bill.vendor, 'state', None) if bill.vendor else None
-        vendor_gstin = getattr(bill.vendor, 'gstin', None) if bill.vendor else None
-        vendor_pos_code = get_pos_state_code(vendor_state or vendor_gstin, fallback_state=seller_state_code)
+        vendor_pos_code = get_purchase_supplier_state_code(bill, seller_state_code)
         is_inter = (seller_state_code != vendor_pos_code)
 
         for item in bill.items.all():
@@ -948,6 +912,8 @@ def gstr3b_summary(request):
             itc_sgst += sgst
 
     # 3. ITC Reversed (from Debit Notes / Purchase Returns)
+    # POS resolution MUST match AccountingService.create_debit_note_entries
+    # (see get_debit_note_supplier_state_code) so Table 4(B) ties to the ledger.
     debit_notes = DebitNote.objects.filter(
         created_by=tenant,
         date__gte=from_date,
@@ -959,10 +925,7 @@ def gstr3b_summary(request):
     rev_sgst = Decimal('0.00')
 
     for dn in debit_notes:
-        orig_bill = dn.original_bill
-        vendor_state = getattr(orig_bill.vendor, 'state', None) if (orig_bill and orig_bill.vendor) else None
-        vendor_gstin = getattr(dn, 'vendor_gstin', None) or (getattr(orig_bill.vendor, 'gstin', None) if (orig_bill and orig_bill.vendor) else None)
-        vendor_pos_code = get_pos_state_code(vendor_state or vendor_gstin, fallback_state=seller_state_code)
+        vendor_pos_code = get_debit_note_supplier_state_code(dn, seller_state_code)
         is_inter = (seller_state_code != vendor_pos_code)
 
         for item in dn.items.all():

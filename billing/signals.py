@@ -133,28 +133,92 @@ def track_sale_item_pre_save(sender, instance, **kwargs):
         instance._old_state = None
 
 
+def _consume_skip_initial_sale_stock(product_id):
+    """
+    Products auto-created from billing forms are tagged so the first sale
+    does not push stock negative (they should start at 0). Returns True if
+    this sale should skip stock deduction.
+    """
+    if not product_id:
+        return False
+    try:
+        from inventory.models_sidecar import ProductMeta
+        meta = ProductMeta.objects.filter(product_id=product_id).first()
+        if meta and 'skip_initial_sale_stock' in (meta.tags or []):
+            meta.tags = [t for t in (meta.tags or []) if t != 'skip_initial_sale_stock']
+            meta.save(update_fields=['tags'])
+            return True
+    except Exception as e:
+        logger.debug("skip_initial_sale_stock check failed: %s", e)
+    return False
+
+
+def _apply_stock_decrease_for_item(instance, qty_to_remove=None):
+    """Decrease product/stock-point quantities for a sales invoice line."""
+    qty_to_remove = _get_item_effective_qty(instance) if qty_to_remove is None else qty_to_remove
+    if not qty_to_remove:
+        return
+    product_id = instance.product_id
+    if not product_id:
+        return
+    user = getattr(instance.sales_invoice, 'created_by', None)
+    target_warehouse = _get_target_warehouse(instance.sales_invoice, user) if user else None
+
+    Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
+    if instance.batch and target_warehouse:
+        stock_point, _ = StockPoint.objects.get_or_create(
+            batch=instance.batch,
+            warehouse=target_warehouse,
+            defaults={'quantity': 0}
+        )
+        StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
+
+
+def apply_sale_stock_for_invoice(invoice):
+    """
+    Apply stock deductions when promoting a draft invoice to final.
+    Respects skip_initial_sale_stock for products auto-created from invoices.
+    """
+    if not invoice or getattr(invoice, 'status', None) == 'draft':
+        return
+    items = SalesInvoiceItem.objects.filter(sales_invoice=invoice).select_related('product', 'batch', 'sales_invoice')
+    for item in items:
+        if not item.product_id:
+            continue
+        if getattr(item, '_skip_stock_deduction', False):
+            continue
+        if getattr(getattr(item, 'product', None), '_created_from_invoice', False):
+            _consume_skip_initial_sale_stock(item.product_id)
+            continue
+        if _consume_skip_initial_sale_stock(item.product_id):
+            continue
+        _apply_stock_decrease_for_item(item)
+
+
 @receiver(post_save, sender=SalesInvoiceItem)
 def decrease_stock_on_sale(sender, instance, created, **kwargs):
     if getattr(instance, '_skip_stock_deduction', False) or getattr(getattr(instance, 'sales_invoice', None), '_skip_stock_deduction', False):
         return
-    qty_to_remove = _get_item_effective_qty(instance)
+
+    invoice = getattr(instance, 'sales_invoice', None)
+    # Draft invoices must not affect inventory
+    if invoice is not None and getattr(invoice, 'status', None) == 'draft':
+        return
+
     product_id = instance.product_id
-    user = getattr(instance.sales_invoice, 'created_by', None)
-    target_warehouse = _get_target_warehouse(instance.sales_invoice, user) if user else None
+    if getattr(getattr(instance, 'product', None), '_created_from_invoice', False):
+        _consume_skip_initial_sale_stock(product_id)
+        return
+    if _consume_skip_initial_sale_stock(product_id):
+        return
+
+    qty_to_remove = _get_item_effective_qty(instance)
+    user = getattr(invoice, 'created_by', None)
+    target_warehouse = _get_target_warehouse(invoice, user) if user else None
     old_state = getattr(instance, '_old_state', None)
 
     if created or not old_state:
-        # ATOMIC UPDATE: Decrease Product Stock
-        Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
-
-        # Update StockPoint
-        if instance.batch and target_warehouse:
-            stock_point, _ = StockPoint.objects.get_or_create(
-                batch=instance.batch,
-                warehouse=target_warehouse,
-                defaults={'quantity': 0}
-            )
-            StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
+        _apply_stock_decrease_for_item(instance, qty_to_remove)
     else:
         old_product_id = old_state['product_id']
         old_batch_id = old_state['batch_id']
@@ -179,14 +243,7 @@ def decrease_stock_on_sale(sender, instance, created, **kwargs):
                     quantity=F('quantity') + old_qty
                 )
             # Deduct new
-            Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
-            if instance.batch and target_warehouse:
-                stock_point, _ = StockPoint.objects.get_or_create(
-                    batch=instance.batch,
-                    warehouse=target_warehouse,
-                    defaults={'quantity': 0}
-                )
-                StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
+            _apply_stock_decrease_for_item(instance, qty_to_remove)
 
 
 @receiver(post_save, sender=SalesInvoiceItem)
@@ -235,6 +292,9 @@ def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
 @receiver(post_delete, sender=SalesInvoiceItem)
 def increase_stock_on_sale_delete(sender, instance, **kwargs):
     if getattr(instance, '_skip_stock_deduction', False) or getattr(getattr(instance, 'sales_invoice', None), '_skip_stock_deduction', False):
+        return
+    # Draft lines never deducted stock, so do not restore
+    if getattr(getattr(instance, 'sales_invoice', None), 'status', None) == 'draft':
         return
     qty_to_restore = _get_item_effective_qty(instance)
     Product.objects.filter(pk=instance.product_id).update(stock=F('stock') + qty_to_restore)

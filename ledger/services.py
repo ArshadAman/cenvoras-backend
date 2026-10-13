@@ -133,32 +133,9 @@ class AccountingService:
           else:
             tax_amount = line_amount - taxable_amount (if line_amount > taxable_amount)
         """
-        line_amount = Decimal(str(getattr(item, 'amount', 0) or 0))
-        quantity = Decimal(str(getattr(item, 'quantity', 0) or 0))
-        price = Decimal(str(getattr(item, 'price', 0) or 0))
-        discount = Decimal(str(getattr(item, 'discount', 0) or 0))
-        tax_rate = Decimal(str(getattr(item, 'tax', 0) or 0))
-
-        base_amount = quantity * price
-        discount_amount = ((base_amount * discount) / Decimal('100')).quantize(Decimal('0.01'))
-        calc_taxable = (base_amount - discount_amount).quantize(Decimal('0.01'))
-
-        if quantity > 0 and price > 0:
-            taxable_amount = calc_taxable
-            if tax_rate > 0:
-                tax_amount = ((taxable_amount * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
-            elif line_amount > taxable_amount:
-                tax_amount = line_amount - taxable_amount
-            else:
-                tax_amount = Decimal('0.00')
-        else:
-            if tax_rate > 0 and line_amount > 0:
-                taxable_amount = (line_amount / (Decimal('1') + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
-                tax_amount = line_amount - taxable_amount
-            else:
-                taxable_amount = line_amount
-                tax_amount = Decimal('0.00')
-
+        # Keep ledger tax math identical to GSTR reports (incl. absolute-tax legacy rows)
+        from billing.gst_utils import calculate_item_tax_breakup
+        taxable_amount, tax_amount, _cgst, _sgst, _igst, _rt = calculate_item_tax_breakup(item, is_interstate=False)
         return taxable_amount, tax_amount
 
     @classmethod
@@ -180,6 +157,10 @@ class AccountingService:
             (or Cr. Output IGST for Interstate)
             Cr./Dr. Rounding Off              [Round Off Difference]
         """
+        # Drafts / non-final invoices must not affect accounting totals
+        if getattr(sales_invoice, 'status', None) != 'final':
+            return False
+
         user = sales_invoice.created_by
         accounts = cls.get_or_create_default_accounts(user)
         ar_account = accounts_receivable_account or accounts['accounts_receivable']
@@ -751,9 +732,19 @@ class AccountingService:
         }
     
     @classmethod
+    def purge_non_final_sales_invoice_entries(cls, user):
+        """Remove ledger rows incorrectly posted for draft/non-final sales invoices."""
+        user = getattr(user, 'active_tenant', user)
+        return GeneralLedgerEntry.objects.filter(
+            created_by=user,
+            sales_invoice__isnull=False,
+        ).exclude(sales_invoice__status='final').delete()
+
+    @classmethod
     def get_trial_balance(cls, user, date_to=None):
         """Get trial balance for all accounts"""
         user = getattr(user, 'active_tenant', user)
+        cls.purge_non_final_sales_invoice_entries(user)
         accounts = Account.objects.filter(created_by=user, is_active=True).order_by('account_type', 'code', 'name')
         
         accounts_data = []
@@ -973,13 +964,10 @@ class AccountingService:
         if debit_note.reason:
             description += f" ({debit_note.get_reason_display()})"
 
-        from billing.gst_utils import get_seller_state_code, get_pos_state_code
+        from billing.gst_utils import get_seller_state_code, get_debit_note_supplier_state_code
         tenant = getattr(user, 'active_tenant', user)
         buyer_state_code = get_seller_state_code(tenant)
-        vendor_state = None
-        if debit_note.original_bill and debit_note.original_bill.vendor:
-            vendor_state = getattr(debit_note.original_bill.vendor, 'state', None)
-        vendor_pos_code = get_pos_state_code(vendor_state or debit_note.vendor_gstin, fallback_state=buyer_state_code)
+        vendor_pos_code = get_debit_note_supplier_state_code(debit_note, buyer_state_code)
         is_interstate = (buyer_state_code != vendor_pos_code)
 
         items = list(debit_note.items.all()) if hasattr(debit_note, 'items') else []

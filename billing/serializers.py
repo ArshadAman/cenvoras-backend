@@ -82,7 +82,10 @@ def _rebuild_sales_invoice_ledger(invoice_id):
     from django.db import transaction as db_transaction
     with db_transaction.atomic():
         sales_invoice = SalesInvoice.objects.select_related('customer').get(pk=invoice_id)
+        # Drafts must never affect the ledger / balance sheet
         GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice).delete()
+        if getattr(sales_invoice, 'status', None) != 'final':
+            return
         AccountingService.create_sales_invoice_entries(sales_invoice)
 
 
@@ -595,7 +598,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
                     print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
                     raise serializers.ValidationError({'product': error_msg})
-                # Create new product
+                # Create new product (stock starts at 0; skip initial sale deduction)
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)
                 try:
                     product = Product.objects.create(
@@ -604,20 +607,24 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                         unit=data.get('unit', 'pcs'),
                         sale_price=data.get('price', 0),
                         tax=data.get('tax', 0),
+                        stock=0,
                         manufacturer=str(data.get('manufacturer', '') or '').strip() or None,
                         internal_reference=str(data.get('internal_reference', '') or '').strip() or None,
                         created_by=user,
                     )
-                    storage_cond = data.get('storage_condition')
-                    if storage_cond and str(storage_cond).strip():
-                        try:
-                            from inventory.models_sidecar import ProductMeta
-                            ProductMeta.objects.create(
-                                product=product,
-                                storage_condition=str(storage_cond).strip()
-                            )
-                        except Exception:
-                            pass
+                    try:
+                        from inventory.models_sidecar import ProductMeta
+                        p_meta, _ = ProductMeta.objects.get_or_create(product=product)
+                        storage_cond = data.get('storage_condition')
+                        if storage_cond and str(storage_cond).strip():
+                            p_meta.storage_condition = str(storage_cond).strip()
+                        tags = list(p_meta.tags or [])
+                        if 'skip_initial_sale_stock' not in tags:
+                            tags.append('skip_initial_sale_stock')
+                        p_meta.tags = tags
+                        p_meta.save()
+                    except Exception:
+                        pass
                     # Mark product as created during invoice flow so stock can be adjusted later
                     try:
                         setattr(product, '_created_from_invoice', True)
@@ -1155,6 +1162,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             instance.customer = resolved_customer
         instance.save()
 
+        # Draft creation skipped stock; apply it once status is final, before item sync deltas
+        if is_draft_to_final:
+            from billing.signals import apply_sale_stock_for_invoice
+            apply_sale_stock_for_invoice(instance)
 
         # Keep linked payments in sync when invoice customer changes.
         if old_customer_id != instance.customer_id and instance.customer_id:

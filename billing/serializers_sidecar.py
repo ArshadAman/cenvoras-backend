@@ -19,7 +19,7 @@ from .models_sidecar import (
 )
 from inventory.models import Product, Warehouse, ProductBatch, StockPoint
 from billing.models import Customer
-from django.db.models import F
+from django.db.models import F, Q
 
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -219,7 +219,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         linked_challans = list(DeliveryChallan.objects.filter(sales_order=instance).values_list('challan_number', flat=True))
         # Linked invoices info
         linked_invoices = list(SalesInvoice.objects.filter(
-            models.Q(source_sales_order=instance) | models.Q(po_number=instance.order_number, created_by=instance.created_by)
+            Q(source_sales_order=instance) | Q(po_number=instance.order_number, created_by=instance.created_by)
         ).values_list('invoice_number', flat=True))
 
         ret['has_challans'] = len(linked_challans) > 0

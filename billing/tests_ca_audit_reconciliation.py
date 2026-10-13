@@ -16,10 +16,11 @@ from decimal import Decimal
 from datetime import date, timedelta
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from django.db.models import Sum
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from billing.models import SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment
+from billing.models import SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment, PurchaseBill
 from billing.models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from inventory.models import Product
 from ledger.models import Account, GeneralLedgerEntry, AccountType
@@ -448,13 +449,98 @@ class CAAuditReconciliationTests(TestCase):
         self.assertTrue(tb['is_balanced'])
 
         # Compare GSTR-1 and GSTR-3B outward supplies
-        res_gstr1 = self.client.get(f"/api/billing/gstr1-export/?from={date.today()}&to={date.today()}")
-        res_gstr3b = self.client.get(f"/api/billing/gstr3b-summary/?from={date.today()}&to={date.today()}")
+        res_gstr1 = self.client.get(f"/api/billing/gst/gstr1-export/?from={date.today()}&to={date.today()}")
+        res_gstr3b = self.client.get(f"/api/billing/gst/gstr3b/?from={date.today()}&to={date.today()}")
         self.assertEqual(res_gstr1.status_code, status.HTTP_200_OK)
         self.assertEqual(res_gstr3b.status_code, status.HTTP_200_OK)
 
         t31_outward = res_gstr3b.data.get('table_3_1', {}).get('outward_taxable', {})
         self.assertIsNotNone(t31_outward)
+
+    def test_07b_gstr3b_table_4b_matches_ledger_igst_reversal(self):
+        """
+        Table 4(B) ITC reverse (IGST) must match Input IGST ledger credits from debit notes.
+        Seller GSTIN 29 (Karnataka); vendor GSTIN 27 (Maharashtra) => ₹1,000 @ 18% = ₹180 IGST.
+        """
+        dn = DebitNote.objects.create(
+            created_by=self.tenant,
+            debit_note_number="DN-CA-001",
+            date=date.today(),
+            vendor_name="MH Supplier",
+            vendor_gstin="27ABCDE1234F1Z5",
+            reason="return",
+            total_amount=Decimal('1180.00'),
+        )
+        DebitNoteItem.objects.create(
+            debit_note=dn,
+            product=self.product_18,
+            quantity=1,
+            price=Decimal('1000.00'),
+            tax=Decimal('18.00'),
+            amount=Decimal('1180.00'),
+            hsn_sac_code="847130",
+        )
+        AccountingService.create_debit_note_entries(dn)
+
+        igst_credits = GeneralLedgerEntry.objects.filter(
+            created_by=self.tenant,
+            debit_note=dn,
+            account__code='1303',  # Input IGST
+        )
+        ledger_igst = sum((e.credit for e in igst_credits), Decimal('0.00'))
+        self.assertEqual(ledger_igst, Decimal('180.00'))
+
+        # Linked bill with vendor.gstin but empty vendor.state must NOT inflate 4(B)
+        # beyond what the ledger posted (regression for ₹540 vs ₹180).
+        mh_vendor = Vendor.objects.create(
+            name="MH Vendor No State",
+            gstin="27XYZAB9999C1Z1",
+            state="",
+            created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number="PB-CA-DN-001",
+            bill_date=date.today(),
+            vendor=mh_vendor,
+            vendor_name=mh_vendor.name,
+            vendor_gstin=mh_vendor.gstin,
+            total_amount=Decimal('1180.00'),
+        )
+        dn2 = DebitNote.objects.create(
+            created_by=self.tenant,
+            debit_note_number="DN-CA-002",
+            date=date.today(),
+            original_bill=bill,
+            vendor_name=mh_vendor.name,
+            vendor_gstin="",  # empty on DN — ledger ignores bill.vendor.gstin
+            reason="return",
+            total_amount=Decimal('1180.00'),
+        )
+        DebitNoteItem.objects.create(
+            debit_note=dn2,
+            product=self.product_18,
+            quantity=1,
+            price=Decimal('1000.00'),
+            tax=Decimal('18.00'),
+            amount=Decimal('1180.00'),
+            hsn_sac_code="847130",
+        )
+        AccountingService.create_debit_note_entries(dn2)
+
+        res = self.client.get(f"/api/billing/gst/gstr3b/?from={date.today()}&to={date.today()}")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        rev = res.data['table_4_itc']['itc_reversed']['others']
+        # Only DN-CA-001 is interstate under shared POS rules (₹180). DN-CA-002 is intra.
+        self.assertEqual(Decimal(str(rev['iamt'])), Decimal('180.00'))
+
+        total_ledger_igst = GeneralLedgerEntry.objects.filter(
+            created_by=self.tenant,
+            debit_note__isnull=False,
+            account__code='1303',
+            credit__gt=0,
+        ).aggregate(s=Sum('credit'))['s'] or Decimal('0.00')
+        self.assertEqual(Decimal(str(rev['iamt'])), total_ledger_igst)
 
     def test_08_migrations_idempotency(self):
         """

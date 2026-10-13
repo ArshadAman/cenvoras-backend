@@ -156,6 +156,8 @@ def balance_sheet(request):
 
     # Ensure default accounts exist
     AccountingService.get_or_create_default_accounts(tenant)
+    # Draft invoices must not appear in balance sheet totals
+    AccountingService.purge_non_final_sales_invoice_entries(tenant)
 
     def get_balance(account):
         entries = GeneralLedgerEntry.objects.filter(account=account, created_by=tenant)

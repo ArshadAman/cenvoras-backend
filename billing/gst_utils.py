@@ -250,6 +250,111 @@ def is_interstate_supply(seller_state_code_or_obj, pos_or_customer_state):
     return str(seller_code).strip() != str(pos_code).strip()
 
 
+# GST slab rates used in the product UI; values above this are treated as absolute tax amounts
+# (legacy/seed rows sometimes stored tax amount in the `tax` column instead of the %).
+_MAX_GST_RATE_PERCENT = Decimal('40')
+
+
+def calculate_item_tax_breakup(item, is_interstate=False):
+    """
+    Standard tax calculation for SalesInvoiceItem, PurchaseBillItem, CreditNoteItem, DebitNoteItem.
+    Returns: (taxable_amount, tax_amount, cgst, sgst, igst, tax_rate_or_field)
+    """
+    quantity = Decimal(str(getattr(item, 'quantity', 0) or 0))
+    price = Decimal(str(getattr(item, 'price', 0) or 0))
+    discount = Decimal(str(getattr(item, 'discount', 0) or 0))
+    line_amount = Decimal(str(getattr(item, 'amount', 0) or 0))
+    tax_field = Decimal(str(getattr(item, 'tax', 0) or 0))
+
+    base_amount = quantity * price
+    discount_amount = ((base_amount * discount) / Decimal('100')).quantize(Decimal('0.01'))
+    calc_taxable = (base_amount - discount_amount).quantize(Decimal('0.01'))
+
+    # Detect legacy rows where `tax` holds an absolute amount rather than a %.
+    tax_is_absolute = tax_field > _MAX_GST_RATE_PERCENT
+    tax_rate = Decimal('0.00') if tax_is_absolute else tax_field
+
+    if quantity > 0 and price > 0:
+        taxable_amount = calc_taxable
+        if tax_is_absolute:
+            tax_amount = tax_field.quantize(Decimal('0.01'))
+            if line_amount > taxable_amount:
+                embedded = (line_amount - taxable_amount).quantize(Decimal('0.01'))
+                # Prefer gross-embedded tax when present (and when absolute field is implausible)
+                if abs(embedded - tax_amount) <= Decimal('0.05') or tax_amount > taxable_amount:
+                    tax_amount = embedded
+        elif tax_rate > 0:
+            tax_amount = ((taxable_amount * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
+        elif line_amount > taxable_amount:
+            tax_amount = line_amount - taxable_amount
+        else:
+            tax_amount = Decimal('0.00')
+    else:
+        if tax_is_absolute and line_amount > 0:
+            if line_amount > tax_field:
+                taxable_amount = (line_amount - tax_field).quantize(Decimal('0.01'))
+                tax_amount = tax_field.quantize(Decimal('0.01'))
+            else:
+                taxable_amount = line_amount
+                tax_amount = tax_field.quantize(Decimal('0.01'))
+        elif tax_rate > 0 and line_amount > 0:
+            taxable_amount = (line_amount / (Decimal('1') + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
+            tax_amount = line_amount - taxable_amount
+        else:
+            taxable_amount = line_amount
+            tax_amount = Decimal('0.00')
+
+    if is_interstate:
+        igst = tax_amount
+        cgst = Decimal('0.00')
+        sgst = Decimal('0.00')
+    else:
+        cgst = (tax_amount / Decimal('2')).quantize(Decimal('0.01'))
+        sgst = tax_amount - cgst
+        igst = Decimal('0.00')
+
+    return taxable_amount, tax_amount, cgst, sgst, igst, tax_rate if not tax_is_absolute else tax_field
+
+
+def get_debit_note_supplier_state_code(debit_note, buyer_state_code):
+    """
+    Resolve supplier POS for a purchase return (debit note).
+
+    Must stay aligned with AccountingService.create_debit_note_entries so GSTR-3B
+    Table 4(B) ITC reversals match Input IGST/CGST/SGST ledger credits.
+
+    Preference (same as ledger):
+      1. original_bill.vendor.state (when linked bill + vendor exist)
+      2. debit_note.vendor_gstin
+      3. buyer_state_code fallback (treat as intra-state)
+    """
+    vendor_state = None
+    original_bill = getattr(debit_note, 'original_bill', None)
+    if original_bill is not None and getattr(original_bill, 'vendor', None) is not None:
+        vendor_state = getattr(original_bill.vendor, 'state', None)
+    vendor_gstin = getattr(debit_note, 'vendor_gstin', None)
+    return get_pos_state_code(vendor_state or vendor_gstin, fallback_state=buyer_state_code)
+
+
+def get_purchase_supplier_state_code(bill, buyer_state_code):
+    """
+    Resolve supplier POS for a purchase bill (ITC available / Table 4(A)).
+    Prefer GSTIN (bill.vendor_gstin or vendor.gstin) over free-text state.
+    """
+    vendor = getattr(bill, 'vendor', None)
+    vendor_gstin = (
+        getattr(bill, 'vendor_gstin', None)
+        or (getattr(vendor, 'gstin', None) if vendor else None)
+    )
+    vendor_state = getattr(vendor, 'state', None) if vendor else None
+    # Prefer GSTIN prefix (authoritative) over possibly stale state labels
+    if vendor_gstin and len(str(vendor_gstin).strip()) == 15:
+        code = get_state_code_from_gstin(vendor_gstin)
+        if code:
+            return code
+    return get_pos_state_code(vendor_state or vendor_gstin, fallback_state=buyer_state_code)
+
+
 def validate_gstin_state_match(gstin, state):
     """
     Verifies that the state code prefix in GSTIN matches the chosen state.

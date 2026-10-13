@@ -178,14 +178,19 @@ class EmployeeSerializer(serializers.ModelSerializer):
         esi = (gross * Decimal('0.0075')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
         
         from hr.services.payroll_engine import compute_pt
+        import datetime as _dt
+        from hr.services.tds_service import compute_dynamic_tds
         pt = compute_pt(gross, obj.work_state)
 
-        from hr.services.tds_service import compute_tax_on_income
-        std_ded = Decimal('75000.00') if obj.tax_regime == 'new' else Decimal('50000.00')
-        annual_gross = (gross * Decimal('12')).quantize(Decimal('0.01'))
-        taxable = max(Decimal('0.00'), annual_gross - std_ded)
-        _, rebate_applied, _, _, annual_tax = compute_tax_on_income(taxable, regime=obj.tax_regime)
-        estimated_tds = (annual_tax / Decimal('12')).quantize(Decimal('0.01'))
+        today = _dt.date.today()
+        tds_data = compute_dynamic_tds(obj, gross, today.month, today.year)
+        std_ded = tds_data['standard_deduction']
+        annual_gross = tds_data['projected_annual_gross']
+        taxable = tds_data['net_taxable_income']
+        rebate_applied = tds_data['rebate_applied']
+        annual_tax = tds_data['total_annual_tax']
+        estimated_tds = tds_data['monthly_tds']
+        rebate_threshold = tds_data['rebate_threshold']
 
         total_deductions = epf + esi + pt + estimated_tds
         net_pay = max(Decimal('0.00'), gross - total_deductions)
@@ -197,7 +202,6 @@ class EmployeeSerializer(serializers.ModelSerializer):
         employer_esi = (gross * Decimal('0.0325')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
         total_employer = employer_epf + employer_eps + employer_esi
 
-        rebate_threshold = Decimal('700000.00') if obj.tax_regime == 'new' else Decimal('500000.00')
         is_rebate = rebate_applied  # True for full rebate or marginal relief
         marginal_relief = rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
 
@@ -298,6 +302,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
+        # Default work_state from company/tenant state for PT slabs
+        if not (validated_data.get('work_state') or '').strip():
+            request = self.context.get('request')
+            tenant = None
+            if request and hasattr(request, 'user'):
+                tenant = getattr(request.user, 'active_tenant', request.user)
+            company_state = getattr(tenant, 'state', None) if tenant else None
+            if company_state:
+                validated_data['work_state'] = company_state
         employee = super().create(validated_data)
         if employee.employment_type != 'contract':
             self._handle_salary_assignment(employee, salary_data)

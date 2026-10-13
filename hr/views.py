@@ -460,7 +460,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         returns instant computed breakdown of Basic, HRA, DA, Special Allowance,
         Employee PF, ESI, PT, dynamic projected TDS, Net Take-Home, and Employer contributions.
         """
-        from hr.services.tds_service import compute_tax_on_income
+        from hr.services.tds_service import preview_monthly_tds
         from hr.services.payroll_engine import compute_pt
 
         data = request.data
@@ -577,25 +577,29 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         pt = compute_pt(gross_salary, work_state)
 
         decl = data.get('declarations') or {}
-        sec_80c = min(Decimal(str(decl.get('section_80c') or 0)), Decimal('150000.00'))
-        sec_80d = Decimal(str(decl.get('section_80d') or 0))
-        sec_24b = min(Decimal(str(decl.get('section_24b_home_loan') or 0)), Decimal('200000.00'))
-        hra_exempt = Decimal(str(decl.get('hra_exemption') or 0))
-        prev_income = Decimal(str(decl.get('declared_previous_income') or 0))
-        prev_tds = Decimal(str(decl.get('declared_previous_tds') or 0))
-
-        annual_gross = (gross_salary * Decimal('12.0')) + prev_income
-        if regime == 'new':
-            std_ded = Decimal('75000.00')
-            exemptions = std_ded
-        else:
-            std_ded = Decimal('50000.00')
-            exemptions = std_ded + sec_80c + sec_80d + sec_24b + hra_exempt
-
-        net_taxable = max(Decimal('0.00'), annual_gross - exemptions)
-        base_tax, rebate_applied, rebate_amount, cess, total_annual_tax = compute_tax_on_income(net_taxable, regime=regime)
-        remaining_tax = max(Decimal('0.00'), total_annual_tax - prev_tds)
-        monthly_tds = (remaining_tax / Decimal('12.0')).quantize(Decimal('0.01'))
+        preview_month = data.get('month')
+        preview_year = data.get('year')
+        tds_preview = preview_monthly_tds(
+            monthly_gross=gross_salary,
+            regime=regime,
+            month=preview_month,
+            year=preview_year,
+            previous_tds=Decimal(str(decl.get('declared_previous_tds') or 0)),
+            previous_income=Decimal(str(decl.get('declared_previous_income') or 0)),
+            section_80c=Decimal(str(decl.get('section_80c') or 0)),
+            section_80d=Decimal(str(decl.get('section_80d') or 0)),
+            section_24b=Decimal(str(decl.get('section_24b_home_loan') or 0)),
+            hra_exemption=Decimal(str(decl.get('hra_exemption') or 0)),
+        )
+        monthly_tds = tds_preview['monthly_tds']
+        annual_gross = tds_preview['projected_annual_gross']
+        net_taxable = tds_preview['net_taxable_income']
+        total_annual_tax = tds_preview['total_annual_tax']
+        rebate_applied = tds_preview['rebate_applied']
+        rebate_amount = tds_preview['rebate_amount']
+        cess = tds_preview['cess']
+        std_ded = tds_preview['standard_deduction']
+        rebate_threshold = tds_preview['rebate_threshold']
 
         total_deductions = employee_pf + employee_esi + pt + monthly_tds
         net_take_home = max(Decimal('0.00'), gross_salary - total_deductions)
@@ -606,7 +610,6 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         total_employer_cost = ctc + employer_epf + employer_eps + employer_esi
 
         regime_label = "New Regime (Sec 115BAC)" if regime == 'new' else "Old Tax Regime"
-        rebate_threshold = Decimal('700000.00') if regime == 'new' else Decimal('500000.00')
         if monthly_tds == Decimal('0.00'):
             if rebate_applied and net_taxable <= rebate_threshold:
                 tds_reason = f"TDS skipped ({regime_label}): Taxable income Rs. {net_taxable:,.2f} is within Section 87A rebate threshold (Annual tax Rs. 0.00)."
@@ -1397,13 +1400,30 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             raise ValidationError("Only approved payroll runs can be marked as paid.")
 
         payment_account_id = request.data.get('payment_account_id')
-        payment_account = None
-        if payment_account_id:
-            from ledger.models import Account
-            try:
-                payment_account = Account.objects.get(id=payment_account_id, created_by=instance.tenant)
-            except Account.DoesNotExist:
-                raise ValidationError("Specified payment bank account not found.")
+        if not payment_account_id:
+            raise ValidationError(
+                "payment_account_id is required. Select a Bank account for salary disbursement."
+            )
+        from ledger.models import Account
+        from ledger.services import AccountingService
+        try:
+            payment_account = Account.objects.get(id=payment_account_id, created_by=instance.tenant)
+        except Account.DoesNotExist:
+            raise ValidationError("Specified payment bank account not found.")
+
+        total_net = instance.total_net or Decimal('0.00')
+        bal_info = AccountingService.get_account_balance(payment_account, instance.tenant)
+        balance = Decimal(str(bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info))
+        if balance < total_net:
+            raise ValidationError(
+                f"Insufficient balance in {payment_account.name} ({payment_account.code}). "
+                f"Available ₹{balance}, required ₹{total_net}."
+            )
+        warnings = []
+        if str(getattr(payment_account, 'code', '') or '') == '1001' and total_net > Decimal('10000.00'):
+            warnings.append(
+                "Section 40A(3): Cash salary disbursement exceeds ₹10,000. Prefer Bank transfer."
+            )
 
         before = {'status': instance.status}
         instance.status = 'paid'
@@ -1416,7 +1436,11 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         HRAccountingService.post_payroll_disbursement(instance, payment_account, request.user)
 
         audit_service.log_update(request, instance, before=before, after={'status': 'paid'})
-        return Response({'status': 'Payroll marked as paid and disbursement ledger entries recorded'}, status=status.HTTP_200_OK)
+        return Response({
+            'status': 'Payroll marked as paid and disbursement ledger entries recorded',
+            'warnings': warnings,
+            'payment_account_code': getattr(payment_account, 'code', None),
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def lock(self, request, pk=None):
@@ -2427,6 +2451,38 @@ class HRReportsView(APIView):
                 "total_esi_liability": str(total_esi + total_employer_esi),
                 "professional_tax": str(total_pt),
                 "tds_payable": str(total_tds),
+            }, status=status.HTTP_200_OK)
+
+        elif report_type == 'pt_register':
+            # Read-only PT return / payment register by work state
+            payslips = Payslip.objects.filter(
+                payroll_run__tenant=tenant,
+                payroll_run__year=year,
+                payroll_run__month=month,
+            ).select_related('employee', 'payroll_run')
+            by_state = {}
+            lines = []
+            total_pt = Decimal('0.00')
+            for p in payslips:
+                state = p.employee.work_state or 'Unspecified'
+                pt = p.professional_tax or Decimal('0.00')
+                total_pt += pt
+                by_state.setdefault(state, Decimal('0.00'))
+                by_state[state] += pt
+                lines.append({
+                    'employee_code': p.employee.employee_code,
+                    'employee_name': p.employee.full_name,
+                    'work_state': state,
+                    'gross_salary': str(p.gross_salary),
+                    'professional_tax': str(pt),
+                })
+            return Response({
+                'year': year,
+                'month': month,
+                'total_pt_payable': str(total_pt),
+                'by_state': {k: str(v) for k, v in by_state.items()},
+                'lines': lines,
+                'count': len(lines),
             }, status=status.HTTP_200_OK)
 
         return Response({"error": "Unknown report type."}, status=status.HTTP_400_BAD_REQUEST)

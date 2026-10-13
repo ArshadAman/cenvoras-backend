@@ -81,30 +81,38 @@ class DynamicTDSEngineTests(TestCase):
         self.assertEqual(info_mar['remaining_months'], 1)
 
     def test_zero_tax_employee_new_regime_sec_87a_rebate(self):
-        """Monthly gross ₹60,000 -> Annual ₹7.20L -> minus ₹75k std ded = ₹6.45L taxable.
-        Within ₹7.0L Section 87A rebate threshold -> Tax liability ₹0.00 -> Monthly TDS ₹0.00.
-        """
+        """FY 2026-27: Monthly ₹60k → annual ₹7.2L → taxable ₹6.45L → within ₹12L rebate → TDS ₹0."""
         tds_data = compute_dynamic_tds(self.emp, Decimal('60000.00'), month=4, year=2026)
         self.assertEqual(tds_data['monthly_tds'], Decimal('0.00'))
         self.assertEqual(tds_data['total_annual_tax'], Decimal('0.00'))
         self.assertTrue(tds_data['rebate_applied'])
         self.assertIn("Section 87A rebate", tds_data['reason'])
 
+    def test_fy2026_12l_taxable_zero_tax(self):
+        """P0 golden: ₹12L taxable under FY 2026-27 new regime → ₹0 tax."""
+        _, rebate_applied, _, _, total_tax = compute_tax_on_income(
+            Decimal('1200000.00'), regime='new', fy_string='2026-2027'
+        )
+        self.assertTrue(rebate_applied)
+        self.assertEqual(total_tax, Decimal('0.00'))
+
+    def test_fy2026_18l_annual_tax_and_monthly_tds(self):
+        """P0 golden: ₹18L gross → taxable ₹17.25L → annual tax ₹1,50,800 → monthly ≈ ₹12,566.67."""
+        tds_data = compute_dynamic_tds(self.emp, Decimal('150000.00'), month=4, year=2026)
+        self.assertEqual(tds_data['projected_annual_gross'], Decimal('1800000.00'))
+        self.assertEqual(tds_data['net_taxable_income'], Decimal('1725000.00'))
+        self.assertEqual(tds_data['total_annual_tax'], Decimal('150800.00'))
+        self.assertEqual(tds_data['monthly_tds'], Decimal('12566.67'))
+        self.assertEqual(tds_data['remaining_months'], 12)
+
     def test_taxable_employee_new_regime(self):
-        """Monthly gross ₹1,20,000 -> Annual ₹14.40L -> minus ₹75k = ₹13.65L taxable.
-        Tax under New Regime:
-        0 - 3L: 0
-        3L - 7L: 5% of 4L = 20,000
-        7L - 10L: 10% of 3L = 30,000
-        10L - 12L: 15% of 2L = 30,000
-        12L - 13.65L: 20% of 1.65L = 33,000
-        Base tax = 1,13,000
-        + 4% cess = 4,520 -> Total 1,17,520
-        Monthly TDS = 1,17,520 / 12 = 9,793.33.
+        """FY 2026-27: Monthly ₹1,20,000 → annual ₹14.40L → taxable ₹13.65L.
+        Slabs 4/8/12/16: 20k + 40k + 15% of 1.65L = 20k+40k+24.75k = 84,750
+        + 4% cess = 3,390 → Total 88,140; monthly = 7,345.00.
         """
         tds_data = compute_dynamic_tds(self.emp, Decimal('120000.00'), month=4, year=2026)
-        self.assertEqual(tds_data['total_annual_tax'], Decimal('117520.00'))
-        self.assertEqual(tds_data['monthly_tds'], Decimal('9793.33'))
+        self.assertEqual(tds_data['total_annual_tax'], Decimal('88140.00'))
+        self.assertEqual(tds_data['monthly_tds'], Decimal('7345.00'))
         self.assertFalse(tds_data['rebate_applied'])
         self.assertIn("TDS under Sec 192", tds_data['reason'])
 
@@ -172,8 +180,9 @@ class DynamicTDSEngineTests(TestCase):
         Total annual tax = ₹4,807.69 + ₹192.31 ≈ ₹5,000 (≤ ₹5,000 excess).
         Monthly TDS ≈ ₹5,000/12 ≈ ₹416.67.
         """
+        # FA 2024 tables (FY 2024-25) still use ₹7L rebate threshold
         base_tax, rebate_applied, _, cess, total_tax = compute_tax_on_income(
-            Decimal('705000.00'), regime='new'
+            Decimal('705000.00'), regime='new', fy_string='2024-2025'
         )
         # Should be much less than ₹21,320 due to marginal relief
         self.assertTrue(rebate_applied, "Marginal relief should mark rebate_applied=True")
@@ -184,16 +193,23 @@ class DynamicTDSEngineTests(TestCase):
 
     def test_marginal_relief_new_regime_income_far_above_threshold(self):
         """
-        Income well above ₹7,00,000 – no marginal relief should be needed.
-        Monthly ₹1,00,000 -> Annual ₹12,00,000, Taxable ₹11,25,000.
-        Tax: 20,000 + 10% of 3,00,000 + 15% of 1,25,000 = 20,000+30,000+18,750 = 68,750.
-        + 4% cess = 2,750 -> Total ₹71,500. No marginal relief.
+        FA 2024 (FY 2024-25): Taxable ₹11,25,000 well above ₹7L — no marginal relief.
+        Tax: 20,000 + 10% of 3,00,000 + 15% of 1,25,000 = 68,750 + 4% cess = ₹71,500.
         """
         base_tax, rebate_applied, _, cess, total_tax = compute_tax_on_income(
-            Decimal('1125000.00'), regime='new'
+            Decimal('1125000.00'), regime='new', fy_string='2024-2025'
         )
         self.assertFalse(rebate_applied, "No marginal relief for income well above threshold")
         self.assertEqual(total_tax, Decimal('71500.00'))
+
+    def test_fy2026_marginal_relief_just_above_12l(self):
+        """FY 2026-27: taxable just above ₹12L gets marginal relief vs full slab tax."""
+        _, rebate_applied, _, _, total_tax = compute_tax_on_income(
+            Decimal('1205000.00'), regime='new', fy_string='2026-2027'
+        )
+        self.assertTrue(rebate_applied)
+        self.assertLessEqual(total_tax, Decimal('5000.00'))
+        self.assertGreater(total_tax, Decimal('0.00'))
 
     def test_marginal_relief_old_regime_income_just_above_threshold(self):
         """

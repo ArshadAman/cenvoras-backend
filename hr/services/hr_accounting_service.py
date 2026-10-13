@@ -235,11 +235,16 @@ class HRAccountingService:
         period_label = f"{calendar.month_name[payroll_run.month]} {payroll_run.year}"
         payment_date = payroll_run.paid_at.date() if payroll_run.paid_at else timezone.now().date()
 
-        # If payment_account is not specified, default to Cash (1001)
+        # Prefer Bank (1002). Never silently fall back to Cash (1001) or Salaries Payable.
         if not payment_account:
             from ledger.services import AccountingService
             default_accs = AccountingService.get_or_create_default_accounts(tenant)
-            payment_account = default_accs.get('1001') or accounts['2250']
+            payment_account = default_accs.get('1002')
+            if not payment_account:
+                raise ValueError(
+                    "payment_account is required for payroll disbursement "
+                    "(default Bank account 1002 was not found)."
+                )
 
         if total_net > 0:
             # 1. Dr. Salaries Payable

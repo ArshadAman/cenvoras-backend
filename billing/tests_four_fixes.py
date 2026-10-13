@@ -393,3 +393,101 @@ class DebitNoteGSTAndGSTR3BTests(FourFixesBase):
         self.assertEqual(Decimal(str(t4['itc_available']['all_other_itc']['iamt'])), ledger_itc_igst)
         self.assertEqual(Decimal(str(t4['itc_reversed']['others']['iamt'])), ledger_rev_igst)
         self.assertEqual(Decimal(str(t4['net_itc_available']['iamt'])), max(ledger_net, Decimal('0')))
+
+class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
+    def test_interstate_purchase_posts_input_igst_when_vendor_state_blank(self):
+        """MH vendor GSTIN + empty vendor.state against KA buyer ? Input IGST ?1,800."""
+        vendor = Vendor.objects.create(
+            name="MH Supplier Blank State",
+            gstin="27ABCDE1234F1Z5",
+            state="",  # must not force CGST/SGST
+            created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number="PB-IGST-001",
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin=vendor.gstin,
+            total_amount=Decimal("11800.00"),
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill,
+            product=self.product,
+            quantity=1,
+            price=Decimal("10000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("11800.00"),
+            hsn_sac_code="847130",
+        )
+        AccountingService.create_purchase_bill_entries(bill)
+        igst = GeneralLedgerEntry.objects.filter(
+            purchase_bill=bill, account__code="1303", debit__gt=0
+        ).aggregate(s=Sum("debit"))["s"] or Decimal("0")
+        cgst = GeneralLedgerEntry.objects.filter(
+            purchase_bill=bill, account__code="1301", debit__gt=0
+        ).aggregate(s=Sum("debit"))["s"] or Decimal("0")
+        self.assertEqual(igst, Decimal("1800.00"))
+        self.assertEqual(cgst, Decimal("0.00"))
+
+    def test_duplicate_vendor_gstin_rejected(self):
+        Vendor.objects.create(
+            name="V1", gstin="27AAAAA0000A1Z5", created_by=self.tenant
+        )
+        res = self.client.post(
+            "/api/billing/vendors/",
+            {"name": "V2", "gstin": "27AAAAA0000A1Z5"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_vendor_payment_reduces_bill_balance(self):
+        from ledger.services import AccountingService as AS
+        bank = AS.get_or_create_default_accounts(self.tenant).get("1002")
+        # Fund bank so balance check paths elsewhere stay happy
+        GeneralLedgerEntry.objects.create(
+            date=date.today(),
+            account=bank,
+            debit=Decimal("50000.00"),
+            credit=Decimal("0.00"),
+            description="Seed",
+            reference="SEED-BANK",
+            created_by=self.tenant,
+        )
+        vendor = Vendor.objects.create(
+            name="Pay Vendor", gstin="29PAYEE1234F1Z5", state="Karnataka", created_by=self.tenant
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number="PB-PAY-001",
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin=vendor.gstin,
+            total_amount=Decimal("1180.00"),
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill,
+            product=self.product,
+            quantity=1,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00"),
+            hsn_sac_code="847130",
+        )
+        AccountingService.create_purchase_bill_entries(bill)
+        res = self.client.post(
+            "/api/billing/vendor-payments/",
+            {
+                "bill_id": str(bill.id),
+                "amount": "1180.00",
+                "payment_account_id": str(bank.id),
+                "mode": "bank_transfer",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        bill.refresh_from_db()
+        self.assertEqual(bill.payment_status, "paid")
+        self.assertEqual(Decimal(str(bill.amount_paid)), Decimal("1180.00"))

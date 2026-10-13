@@ -1210,6 +1210,17 @@ class ProfessionalTaxSlab(models.Model):
         decimal_places=2,
         help_text='Professional Tax amount (INR) to deduct for this slab.',
     )
+    # Date-versioned slabs (null = open-ended). Additive — do not delete historical rows.
+    effective_from = models.DateField(
+        null=True,
+        blank=True,
+        help_text='First date this slab applies; null = always effective historically.',
+    )
+    effective_to = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Last date this slab applies; null = currently open-ended.',
+    )
 
     class Meta:
         ordering = ['state_name', 'lower_bound']

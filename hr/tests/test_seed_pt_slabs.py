@@ -41,10 +41,13 @@ class SeedPTSlabsCommandTests(TestCase):
         self.assertIsNone(mh_top.upper_bound)
         self.assertEqual(mh_top.pt_amount, Decimal('200.00'))
         
-        # Karnataka lowest slab
+        # Karnataka: nil below ₹25,000; ₹200 above
         ka_bottom = ProfessionalTaxSlab.objects.get(state_name='Karnataka', lower_bound=0)
-        self.assertEqual(ka_bottom.upper_bound, 14999)
+        self.assertEqual(ka_bottom.upper_bound, 24999)
         self.assertEqual(ka_bottom.pt_amount, Decimal('0.00'))
+        ka_top = ProfessionalTaxSlab.objects.get(state_name='Karnataka', lower_bound=25000)
+        self.assertIsNone(ka_top.upper_bound)
+        self.assertEqual(ka_top.pt_amount, Decimal('200.00'))
         
         # Re-running the command should be idempotent
         initial_count = ProfessionalTaxSlab.objects.count()

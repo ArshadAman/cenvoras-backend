@@ -185,6 +185,20 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         if not validated_data.get('total_amount') or Decimal(str(validated_data['total_amount'])) < total_gross:
             validated_data['total_amount'] = total_gross
 
+        # Prefer bill linkage for vendor identity / GSTIN / ledger vendor FK
+        original_bill = validated_data.get('original_bill')
+        if original_bill:
+            if not validated_data.get('vendor_name'):
+                validated_data['vendor_name'] = (
+                    getattr(original_bill, 'vendor_name', None)
+                    or (original_bill.vendor.name if original_bill.vendor_id else '')
+                )
+            if not validated_data.get('vendor_gstin'):
+                validated_data['vendor_gstin'] = (
+                    getattr(original_bill, 'vendor_gstin', None)
+                    or (getattr(original_bill.vendor, 'gstin', None) if original_bill.vendor_id else None)
+                )
+
         debit_note = DebitNote.objects.create(**validated_data)
 
         source_warehouse = debit_note.warehouse

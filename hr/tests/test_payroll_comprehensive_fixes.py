@@ -271,8 +271,10 @@ class ComprehensivePayrollFixesTestCase(TestCase):
         self.payroll_run.status = 'approved'
         self.payroll_run.save()
 
-        # Simulate pay
-        HRAccountingService.post_payroll_disbursement(self.payroll_run, None, self.tenant)
+        # Simulate pay via Bank (1002) — Cash default removed
+        from ledger.services import AccountingService
+        bank = AccountingService.get_or_create_default_accounts(self.tenant).get('1002')
+        HRAccountingService.post_payroll_disbursement(self.payroll_run, bank, self.tenant)
         loan.refresh_from_db()
         self.assertEqual(loan.outstanding_balance, Decimal('2500.00'))
         self.assertTrue(LoanRecoveryLog.objects.filter(payslip__payroll_run=self.payroll_run).exists())

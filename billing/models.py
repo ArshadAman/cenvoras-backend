@@ -135,6 +135,10 @@ class PurchaseBill(models.Model):
     is_gst_withheld = models.BooleanField(default=False, help_text="True if GST amount is currently locked/withheld")
     gst_withholding_override = models.BooleanField(default=False, help_text="True if user manually bypassed withholding")
     gst_withholding_notes = models.TextField(blank=True, default='')
+    is_reverse_charge = models.BooleanField(
+        default=False,
+        help_text='True when this purchase is under GST reverse charge (RCM).',
+    )
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -382,7 +382,18 @@ class AIChatView(APIView):
 
         # 1. Get business context
         context = gather_business_context(user)
-        
+
+        # TDS / income-tax questions → payroll engine (not LLM)
+        from .services.invoice_service import answer_tds_question, enrich_invoice_draft_entities
+        tds_answer = answer_tds_question(question)
+        if tds_answer:
+            return Response({
+                "answer": tds_answer,
+                "question": question,
+                "mode": "tds_engine",
+                "action": None,
+            })
+
         # 2. Get AI Response
         answer = call_gemini(question, context, user)
         
@@ -395,11 +406,34 @@ class AIChatView(APIView):
             if "CHOOSE_CUSTOMER:" in question:
                 selected_id = question.split("CHOOSE_CUSTOMER:")[1].strip()
             
-            if question.lower() == 'create new customer' or 'new' in question.lower() or selected_id == "new":
-                # Proceed to draft or ask more questions
+            if question.lower() == 'create new customer' or selected_id == "new":
+                entities = enrich_invoice_draft_entities(user, session_state.get('entities', {}))
                 cache.delete(session_key)
+                action = {
+                    "intent": "create_invoice",
+                    "status": "draft",
+                    "entities": entities,
+                }
+                answer = (
+                    f"I've prepared a draft for **{entities.get('customer_name') or 'a new customer'}** "
+                    f"with **{len(entities.get('items') or [])}** line(s). No invoice number was reserved — "
+                    f"review and save when ready."
+                )
+                return Response({"answer": answer, "action": action, "question": question, "mode": "gemini"})
+            elif selected_id == "draft":
+                entities = enrich_invoice_draft_entities(user, session_state.get('entities', {}))
+                cache.delete(session_key)
+                action = {
+                    "intent": "create_invoice",
+                    "status": "draft",
+                    "entities": entities,
+                }
+                answer = (
+                    f"Draft ready for **{entities.get('customer_name') or 'customer'}**. "
+                    f"Open the form to review — cancel will not burn an invoice number."
+                )
+                return Response({"answer": answer, "action": action, "question": question, "mode": "gemini"})
             elif selected_id:
-                from .services.invoice_service import create_invoice_from_ai
                 from billing.models import Customer
                 try:
                     customer = Customer.objects.get(id=selected_id, created_by=getattr(user, 'active_tenant', user))
@@ -407,40 +441,39 @@ class AIChatView(APIView):
                     entities['customer_name'] = customer.name
                     entities['customer_id'] = str(customer.id)
                     cache.delete(session_key)
-                    
-                    # Proceed to create
-                    result = create_invoice_from_ai(user, entities, request=self.request)
-                    if result['status'] == 'success':
-                        action = {
-                            "intent": "create_invoice",
-                            "status": "success",
-                            "invoice_id": result['invoice_id'],
-                            "invoice_number": result['invoice_number']
-                        }
-                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
-                        return Response({"answer": answer, "action": action})
+                    entities = enrich_invoice_draft_entities(user, entities)
+                    action = {
+                        "intent": "create_invoice",
+                        "status": "draft",
+                        "entities": entities,
+                    }
+                    answer = (
+                        f"Draft prepared for **{customer.name}** with "
+                        f"**{len(entities.get('items') or [])}** item(s). Review & save to allocate an invoice number."
+                    )
+                    return Response({"answer": answer, "action": action, "question": question, "mode": "gemini"})
                 except Customer.DoesNotExist:
                     cache.delete(session_key)
             else:
                 # Fallback to name search if they typed instead of clicking
-                from .services.invoice_service import search_customers, create_invoice_from_ai
+                from .services.invoice_service import search_customers
                 matches = search_customers(user, question)
                 if matches.count() == 1:
                     entities = session_state.get('entities', {})
                     entities['customer_name'] = matches[0].name
                     entities['customer_id'] = str(matches[0].id)
                     cache.delete(session_key)
-                    # Proceed to create
-                    result = create_invoice_from_ai(user, entities, request=self.request)
-                    if result['status'] == 'success':
-                        action = {
-                            "intent": "create_invoice",
-                            "status": "success",
-                            "invoice_id": result['invoice_id'],
-                            "invoice_number": result['invoice_number']
-                        }
-                        answer = f"✅ **Invoice Created!**\n\nI've recorded bill **{result['invoice_number']}** for **{result['customer_name']}**."
-                        return Response({"answer": answer, "action": action})
+                    entities = enrich_invoice_draft_entities(user, entities)
+                    action = {
+                        "intent": "create_invoice",
+                        "status": "draft",
+                        "entities": entities,
+                    }
+                    answer = (
+                        f"Draft prepared for **{matches[0].name}**. "
+                        f"Review & save to allocate an invoice number."
+                    )
+                    return Response({"answer": answer, "action": action, "question": question, "mode": "gemini"})
 
         # Parse intent
         parsed = command_parser.parse(question, context)
@@ -450,7 +483,7 @@ class AIChatView(APIView):
             customer_name = entities.get('customer_name')
             
             if customer_name:
-                from .services.invoice_service import search_customers, create_invoice_from_ai
+                from .services.invoice_service import search_customers
                 matches = search_customers(user, customer_name)
                 
                 if matches.count() > 1:
@@ -478,29 +511,21 @@ class AIChatView(APIView):
                     # Store state in cache
                     cache.set(session_key, {"step": "SELECT_CUSTOMER", "entities": entities}, timeout=600)
                 elif matches.count() == 1:
-                    # One match found, check items
+                    # One match — always open SalesForm draft (no number until final save)
                     customer = matches[0]
                     entities['customer_name'] = customer.name
                     entities['customer_id'] = str(customer.id)
-                    
-                    # Proceed to direct creation or next check (Items)
-                    # For now, let's stick to the direct creation if it's high confidence
-                    if parsed.get('confidence', 0) > 0.8:
-                        result = create_invoice_from_ai(user, entities, request=self.request)
-                        if result['status'] == 'success':
-                            action = {
-                                "intent": "create_invoice",
-                                "status": "success",
-                                "invoice_id": result['invoice_id'],
-                                "invoice_number": result['invoice_number']
-                            }
-                            answer = f"✅ **Invoice Created Successfully!**\n\nI've created invoice **{result['invoice_number']}** for **{result['customer_name']}** totaling **₹{result['total_amount']:,.2f}**."
-                        else:
-                            action = parsed
-                            action['status'] = 'draft'
-                    else:
-                        action = parsed
-                        action['status'] = 'draft'
+                    entities = enrich_invoice_draft_entities(user, entities)
+                    action = {
+                        "intent": "create_invoice",
+                        "status": "draft",
+                        "entities": entities,
+                    }
+                    answer = (
+                        f"I've prepared a draft invoice for **{customer.name}** with "
+                        f"**{len(entities.get('items') or [])}** line(s). "
+                        f"Review & Create — cancel will not reserve an invoice number."
+                    )
                 else:
                     # No matches found, ask to create new or proceed as draft
                     answer = f"I couldn't find a customer named **{customer_name}**. Should I create a new record for them or prepare a draft?"
@@ -513,10 +538,15 @@ class AIChatView(APIView):
                         ],
                         "entities": entities
                     }
+                    cache.set(session_key, {"step": "SELECT_CUSTOMER", "entities": entities}, timeout=600)
             else:
                 # No customer name mentioned
-                action = parsed
-                action['status'] = 'draft'
+                entities = enrich_invoice_draft_entities(user, entities)
+                action = {
+                    "intent": "create_invoice",
+                    "status": "draft",
+                    "entities": entities,
+                }
         elif parsed and parsed.get('intent') != 'general_query' and parsed.get('confidence', 0) > 0.6:
             action = parsed
 

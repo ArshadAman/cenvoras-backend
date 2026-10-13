@@ -27,36 +27,38 @@ def sync_product_stock_on_stockpoint_delete(sender, instance, **kwargs):
 @receiver(post_save, sender=StockTransfer)
 def process_stock_transfer(sender, instance, created, **kwargs):
     """
-    Execute stock movement when transfer is marked as completed.
+    Execute stock movement when an existing transfer is marked completed.
+    Create path applies stock in StockTransferSerializer (items must exist first).
     """
-    if instance.status == 'completed':
-        print(f"DEBUG: Processing Stock Transfer {instance.id}")
-        
-        # Iterate through items and move stock
-        for item in instance.items.all():
-            try:
-                # Decrease from Source
-                source_stock, _ = StockPoint.objects.get_or_create(
-                    warehouse=instance.source_warehouse,
-                    batch=item.batch,
-                    defaults={'quantity': 0}
-                )
-                source_stock.quantity -= item.quantity
-                source_stock.save()
-                print(f"DEBUG: Decreased {item.quantity} from {instance.source_warehouse.name}")
+    if created or instance.status != 'completed':
+        return
 
-                # Increase at Destination
-                dest_stock, _ = StockPoint.objects.get_or_create(
-                    warehouse=instance.destination_warehouse,
-                    batch=item.batch,
-                    defaults={'quantity': 0}
-                )
-                dest_stock.quantity += item.quantity
-                dest_stock.save()
-                print(f"DEBUG: Increased {item.quantity} at {instance.destination_warehouse.name}")
-                
-            except Exception as e:
-                print(f"ERROR processing item {item.id}: {e}")
-                # Ideally, we should rollback here, but signals are already in transaction if atomic/
-                raise e
+    update_fields = kwargs.get('update_fields')
+    if update_fields is not None and 'status' not in update_fields:
+        return
+
+    # Skip when serializer already applied stock then set status=completed
+    if getattr(instance, '_stock_applied_inline', False):
+        return
+
+    from .stock_sync import reconcile_product_stock
+
+    for item in instance.items.select_related('product', 'batch').all():
+        source_stock, _ = StockPoint.objects.select_for_update().get_or_create(
+            warehouse=instance.source_warehouse,
+            batch=item.batch,
+            defaults={'quantity': 0},
+        )
+        source_stock.quantity = int(source_stock.quantity or 0) - int(item.quantity)
+        source_stock.save(update_fields=['quantity', 'last_updated'])
+
+        dest_stock, _ = StockPoint.objects.select_for_update().get_or_create(
+            warehouse=instance.destination_warehouse,
+            batch=item.batch,
+            defaults={'quantity': 0},
+        )
+        dest_stock.quantity = int(dest_stock.quantity or 0) + int(item.quantity)
+        dest_stock.save(update_fields=['quantity', 'last_updated'])
+
+        reconcile_product_stock(item.product, save=True)
 

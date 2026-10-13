@@ -118,7 +118,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         
     def get_plan_name(self, obj):
         if is_vip_user(obj):
-            return "Business"
+            return "VIP Lifetime"
         
         plan_code = get_effective_plan_code(obj)
         plan = get_tenant_plan(obj)

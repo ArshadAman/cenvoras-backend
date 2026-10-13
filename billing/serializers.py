@@ -468,7 +468,9 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         from billing.gst_utils import get_required_hsn_digits
         min_digits = get_required_hsn_digits(tenant) if tenant else 4
         if len(clean_digits) < min_digits:
-            raise serializers.ValidationError({'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'})
+            raise serializers.ValidationError({
+                'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'
+            })
         data['hsn_sac_code'] = hsn_str
         return data
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4, default=0)
@@ -664,7 +666,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                 min_digits = get_required_hsn_digits(user) if user else 4
                 if len(clean_digits) < min_digits:
                     raise serializers.ValidationError({
-                        'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'
+                        'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'
                     })
                 # Create new product (stock starts at 0; skip initial sale deduction)
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)
@@ -1354,7 +1356,8 @@ from .models_sidecar import PartyMeta
 
 class VendorSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
-    meta = PartyMetaSerializer(required=False)
+    # Accepted for FE compatibility but ignored — PartyMeta is customer-only
+    meta = serializers.JSONField(required=False, write_only=True)
     
     class Meta:
         model = Vendor
@@ -1390,7 +1393,8 @@ class VendorSerializer(serializers.ModelSerializer):
         return gstin
 
     def create(self, validated_data):
-        meta_data = validated_data.pop('meta', None)
+        # PartyMeta is customer-only — never pass vendor= (was causing silent 500)
+        validated_data.pop('meta', None)
         validated_data['created_by'] = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         # Sync state from GSTIN prefix when state blank
         gstin = (validated_data.get('gstin') or '').strip()
@@ -1399,29 +1403,22 @@ class VendorSerializer(serializers.ModelSerializer):
             code = get_state_code_from_gstin(gstin)
             if code and code in CODE_TO_STATE_NAME:
                 validated_data['state'] = CODE_TO_STATE_NAME[code]
-        
-        vendor = Vendor.objects.create(**validated_data)
-        
-        if meta_data:
-            PartyMeta.objects.create(vendor=vendor, **meta_data)
-        else:
-            PartyMeta.objects.create(vendor=vendor)
-            
+
+        try:
+            vendor = Vendor.objects.create(**validated_data)
+        except Exception as exc:
+            raise serializers.ValidationError({'detail': f'Could not create vendor: {exc}'}) from exc
         return vendor
 
     def update(self, instance, validated_data):
-        meta_data = validated_data.pop('meta', None)
-        
+        validated_data.pop('meta', None)
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        instance.save()
-        
-        if meta_data:
-            meta, _ = PartyMeta.objects.get_or_create(vendor=instance)
-            for attr, value in meta_data.items():
-                setattr(meta, attr, value)
-            meta.save()
-            
+        try:
+            instance.save()
+        except Exception as exc:
+            raise serializers.ValidationError({'detail': f'Could not update vendor: {exc}'}) from exc
         return instance
     
 

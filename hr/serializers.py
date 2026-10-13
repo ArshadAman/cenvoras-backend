@@ -302,7 +302,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
-        # Default work_state from company/tenant state for PT slabs
+        # Default work_state from company/tenant state for PT slabs (full name)
         if not (validated_data.get('work_state') or '').strip():
             request = self.context.get('request')
             tenant = None
@@ -310,7 +310,11 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 tenant = getattr(request.user, 'active_tenant', request.user)
             company_state = getattr(tenant, 'state', None) if tenant else None
             if company_state:
-                validated_data['work_state'] = company_state
+                from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
+                code = normalize_state_code(company_state)
+                validated_data['work_state'] = (
+                    CODE_TO_STATE_NAME.get(code, company_state) if code else company_state
+                )
         employee = super().create(validated_data)
         if employee.employment_type != 'contract':
             self._handle_salary_assignment(employee, salary_data)

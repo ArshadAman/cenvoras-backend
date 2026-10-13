@@ -154,24 +154,35 @@ def _consume_skip_initial_sale_stock(product_id):
 
 
 def _apply_stock_decrease_for_item(instance, qty_to_remove=None):
-    """Decrease product/stock-point quantities for a sales invoice line."""
-    qty_to_remove = _get_item_effective_qty(instance) if qty_to_remove is None else qty_to_remove
-    if not qty_to_remove:
-        return
-    product_id = instance.product_id
-    if not product_id:
-        return
-    user = getattr(instance.sales_invoice, 'created_by', None)
-    target_warehouse = _get_target_warehouse(instance.sales_invoice, user) if user else None
+    """Decrease product/stock-point quantities for a sales invoice line.
 
-    Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
-    if instance.batch and target_warehouse:
-        stock_point, _ = StockPoint.objects.get_or_create(
-            batch=instance.batch,
-            warehouse=target_warehouse,
-            defaults={'quantity': 0}
+    Negative stock / overselling is allowed — never raise into the sale save path.
+    """
+    try:
+        qty_to_remove = _get_item_effective_qty(instance) if qty_to_remove is None else qty_to_remove
+        if not qty_to_remove:
+            return
+        product_id = instance.product_id
+        if not product_id:
+            return
+        user = getattr(instance.sales_invoice, 'created_by', None)
+        target_warehouse = _get_target_warehouse(instance.sales_invoice, user) if user else None
+
+        Product.objects.filter(pk=product_id).update(stock=F('stock') - qty_to_remove)
+        if instance.batch and target_warehouse:
+            stock_point, _ = StockPoint.objects.get_or_create(
+                batch=instance.batch,
+                warehouse=target_warehouse,
+                defaults={'quantity': 0}
+            )
+            StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
+    except Exception as e:
+        logger.exception(
+            "Stock decrease failed for sales line %s (product=%s); allowing sale to continue: %s",
+            getattr(instance, 'pk', None),
+            getattr(instance, 'product_id', None),
+            e,
         )
-        StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - qty_to_remove)
 
 
 def apply_sale_stock_for_invoice(invoice):
@@ -205,45 +216,52 @@ def decrease_stock_on_sale(sender, instance, created, **kwargs):
     if invoice is not None and getattr(invoice, 'status', None) == 'draft':
         return
 
-    product_id = instance.product_id
-    if getattr(getattr(instance, 'product', None), '_created_from_invoice', False):
-        _consume_skip_initial_sale_stock(product_id)
-        return
-    if _consume_skip_initial_sale_stock(product_id):
-        return
+    try:
+        product_id = instance.product_id
+        if getattr(getattr(instance, 'product', None), '_created_from_invoice', False):
+            _consume_skip_initial_sale_stock(product_id)
+            return
+        if _consume_skip_initial_sale_stock(product_id):
+            return
 
-    qty_to_remove = _get_item_effective_qty(instance)
-    user = getattr(invoice, 'created_by', None)
-    target_warehouse = _get_target_warehouse(invoice, user) if user else None
-    old_state = getattr(instance, '_old_state', None)
+        qty_to_remove = _get_item_effective_qty(instance)
+        user = getattr(invoice, 'created_by', None)
+        target_warehouse = _get_target_warehouse(invoice, user) if user else None
+        old_state = getattr(instance, '_old_state', None)
 
-    if created or not old_state:
-        _apply_stock_decrease_for_item(instance, qty_to_remove)
-    else:
-        old_product_id = old_state['product_id']
-        old_batch_id = old_state['batch_id']
-        old_qty = old_state['effective_qty']
-
-        if old_product_id == product_id and old_batch_id == instance.batch_id:
-            delta = qty_to_remove - old_qty
-            if delta != 0:
-                Product.objects.filter(pk=product_id).update(stock=F('stock') - delta)
-                if instance.batch and target_warehouse:
-                    stock_point, _ = StockPoint.objects.get_or_create(
-                        batch=instance.batch,
-                        warehouse=target_warehouse,
-                        defaults={'quantity': 0}
-                    )
-                    StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - delta)
-        else:
-            # Restore old
-            Product.objects.filter(pk=old_product_id).update(stock=F('stock') + old_qty)
-            if old_batch_id and target_warehouse:
-                StockPoint.objects.filter(batch_id=old_batch_id, warehouse=target_warehouse).update(
-                    quantity=F('quantity') + old_qty
-                )
-            # Deduct new
+        if created or not old_state:
             _apply_stock_decrease_for_item(instance, qty_to_remove)
+        else:
+            old_product_id = old_state['product_id']
+            old_batch_id = old_state['batch_id']
+            old_qty = old_state['effective_qty']
+
+            if old_product_id == product_id and old_batch_id == instance.batch_id:
+                delta = qty_to_remove - old_qty
+                if delta != 0:
+                    Product.objects.filter(pk=product_id).update(stock=F('stock') - delta)
+                    if instance.batch and target_warehouse:
+                        stock_point, _ = StockPoint.objects.get_or_create(
+                            batch=instance.batch,
+                            warehouse=target_warehouse,
+                            defaults={'quantity': 0}
+                        )
+                        StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') - delta)
+            else:
+                # Restore old
+                Product.objects.filter(pk=old_product_id).update(stock=F('stock') + old_qty)
+                if old_batch_id and target_warehouse:
+                    StockPoint.objects.filter(batch_id=old_batch_id, warehouse=target_warehouse).update(
+                        quantity=F('quantity') + old_qty
+                    )
+                # Deduct new
+                _apply_stock_decrease_for_item(instance, qty_to_remove)
+    except Exception as e:
+        logger.exception(
+            "decrease_stock_on_sale failed for item %s; sale continues (negative stock allowed): %s",
+            getattr(instance, 'pk', None),
+            e,
+        )
 
 
 @receiver(post_save, sender=SalesInvoiceItem)

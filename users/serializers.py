@@ -303,25 +303,6 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'email': 'A user with this email already exists.'
                 })
-
-        # Bank details validation (Requires current password to update)
-        bank_fields = [
-            'bank_name', 'bank_account_number', 'bank_ifsc_code',
-            'bank_branch', 'bank_upi_id', 'bank_qr_code'
-        ]
-        bank_fields_changed = any(
-            field in attrs and (attrs[field] or '') != (getattr(user, field, '') or '')
-            for field in bank_fields
-        ) or ('bank_accounts' in attrs and attrs['bank_accounts'] != (getattr(user, 'bank_accounts', []) or []))
-        if bank_fields_changed:
-            if not current_password:
-                raise serializers.ValidationError({
-                    'current_password': 'Current password is required to update bank details.'
-                })
-            if not user.check_password(current_password):
-                raise serializers.ValidationError({
-                    'current_password': 'Current password is incorrect.'
-                })
         
         # Phone validation
         phone = attrs.get('phone')

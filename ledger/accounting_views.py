@@ -11,8 +11,7 @@ from .services import AccountingService
 import logging
 from django.db.models import Sum, Avg, Max, Count, F
 from django.utils import timezone
-from datetime import timedelta
-import decimal
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 

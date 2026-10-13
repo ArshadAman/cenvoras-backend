@@ -936,7 +936,8 @@ def gstr3b_summary(request):
 
     for bill in bills:
         vendor_state = getattr(bill.vendor, 'state', None) if bill.vendor else None
-        vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+        vendor_gstin = getattr(bill.vendor, 'gstin', None) if bill.vendor else None
+        vendor_pos_code = get_pos_state_code(vendor_state or vendor_gstin, fallback_state=seller_state_code)
         is_inter = (seller_state_code != vendor_pos_code)
 
         for item in bill.items.all():
@@ -951,7 +952,7 @@ def gstr3b_summary(request):
         created_by=tenant,
         date__gte=from_date,
         date__lte=to_date,
-    ).select_related('original_bill').prefetch_related('items__product')
+    ).select_related('original_bill', 'original_bill__vendor').prefetch_related('items__product')
 
     rev_igst = Decimal('0.00')
     rev_cgst = Decimal('0.00')
@@ -960,7 +961,8 @@ def gstr3b_summary(request):
     for dn in debit_notes:
         orig_bill = dn.original_bill
         vendor_state = getattr(orig_bill.vendor, 'state', None) if (orig_bill and orig_bill.vendor) else None
-        vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+        vendor_gstin = getattr(dn, 'vendor_gstin', None) or (getattr(orig_bill.vendor, 'gstin', None) if (orig_bill and orig_bill.vendor) else None)
+        vendor_pos_code = get_pos_state_code(vendor_state or vendor_gstin, fallback_state=seller_state_code)
         is_inter = (seller_state_code != vendor_pos_code)
 
         for item in dn.items.all():
@@ -1057,6 +1059,15 @@ def gstr3b_summary(request):
             'eco_igst': 0.0,
             'eco_cgst': 0.0,
             'eco_sgst': 0.0,
+            'eco_csamt': 0.0,
+            'supplies_notified_9_5': {
+                'desc': '(i) Taxable supplies on which electronic commerce operator pays tax u/s 9(5)',
+                'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0,
+            },
+            'supplies_through_eco': {
+                'desc': '(ii) Taxable supplies made by the registered person through electronic commerce operator',
+                'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0,
+            },
         },
         'table_3_2': [
             {'pos': row['pos'], 'txval': float(row['txval']), 'iamt': float(row['iamt'])}
@@ -1090,17 +1101,24 @@ def gstr3b_summary(request):
                 'samt': float(net_itc_sgst),
                 'csamt': 0.0,
             },
-            'ineligible_itc': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+            'ineligible_itc': {
+                'as_per_section_17_5': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                'others': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+            },
         },
         'table_5_exempt': {
             'inter_state': 0.0,
             'intra_state': 0.0,
+            'from_composition_scheme': {'inter_state': 0.0, 'intra_state': 0.0},
+            'non_gst_supply': {'inter_state': 0.0, 'intra_state': 0.0},
         },
         'table_5_1_interest': {
             'iamt': 0.0,
             'camt': 0.0,
             'samt': 0.0,
             'csamt': 0.0,
+            'interest': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+            'late_fee': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
         },
         'table_6_1_payment': {
             'igst': {

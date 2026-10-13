@@ -30,7 +30,7 @@ class AccountingService:
             # Liabilities
             ('2001', 'Accounts Payable', AccountType.LIABILITY),
             ('2100', 'Accrued Expenses', AccountType.LIABILITY),
-            ('2101', 'Customer Advances', AccountType.LIABILITY),
+            ('2102', 'Customer Advances', AccountType.LIABILITY),
             ('2200', 'GST Payable', AccountType.LIABILITY),
             ('2201', 'Output CGST', AccountType.LIABILITY),
             ('2202', 'Output SGST', AccountType.LIABILITY),

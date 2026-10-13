@@ -8,6 +8,7 @@ from cenvoras.constants import IndianStates
 from subscription.services import can_auto_create_inventory_product
 from django.db import transaction
 from django.db.models import F, Sum
+import re
 import uuid
 from decimal import Decimal
 
@@ -402,6 +403,24 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         free_qty = data.get('free_quantity', 0) or 0
         if qty <= 0 and free_qty <= 0:
             raise serializers.ValidationError({'quantity': 'Quantity or Free Quantity must be greater than 0.'})
+
+        # CA Audit (Issue 5): Validate HSN/SAC code (mandatory, min 4 digits, never blank or N/A)
+        hsn_sac = data.get('hsn_sac_code')
+        product = data.get('product')
+        if not hsn_sac and product and getattr(product, 'hsn_sac_code', None):
+            hsn_sac = product.hsn_sac_code
+        hsn_str = str(hsn_sac or '').strip()
+        if not hsn_str or hsn_str.upper() == 'N/A':
+            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is mandatory for each invoice item.'})
+        clean_digits = re.sub(r'\D', '', hsn_str)
+        request = self.context.get('request')
+        user = request.user if request else None
+        tenant = getattr(user, 'active_tenant', user) if user else None
+        from billing.gst_utils import get_required_hsn_digits
+        min_digits = get_required_hsn_digits(tenant) if tenant else 4
+        if len(clean_digits) < min_digits:
+            raise serializers.ValidationError({'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'})
+        data['hsn_sac_code'] = hsn_str
         return data
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4, default=0)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
@@ -1117,6 +1136,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         template_id = validated_data.pop('template_id', None)
         old_customer_id = instance.customer_id
         old_status = instance.status
+        old_place_of_supply = instance.place_of_supply
         old_total_amount = Decimal(str(instance.total_amount or 0))
         resolved_customer = getattr(self, '_customer_obj', None)
         
@@ -1239,7 +1259,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     current_balance=F('current_balance') - old_total_amount
                 )
 
-        if items_data is not None or old_customer_id != instance.customer_id or old_status != new_status:
+        if (
+            items_data is not None
+            or old_customer_id != instance.customer_id
+            or old_status != new_status
+            or old_place_of_supply != instance.place_of_supply
+            or old_total_amount != new_total_amount
+        ):
             transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
 
         return instance

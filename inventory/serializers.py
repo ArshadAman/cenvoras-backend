@@ -1,3 +1,4 @@
+import re
 from rest_framework import serializers
 from .models import Product, Warehouse, StockPoint, StockTransfer, StockTransferItem, ProductBatch, ProductMeta, BillOfMaterial, StockJournal, StockJournalItem
 from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal
@@ -27,6 +28,23 @@ class ProductSerializer(serializers.ModelSerializer):
 
         if sale_price in (None, ''):
             raise serializers.ValidationError({'sale_price': 'Sale price is required.'})
+
+        # Validate HSN/SAC code (CA Audit Issue 5)
+        hsn_sac = attrs.get('hsn_sac_code')
+        if hsn_sac is None and self.instance is not None:
+            hsn_sac = self.instance.hsn_sac_code
+        hsn_sac_str = str(hsn_sac or '').strip()
+        if not hsn_sac_str or hsn_sac_str.upper() == 'N/A':
+            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is mandatory.'})
+        clean_digits = re.sub(r'\D', '', hsn_sac_str)
+        request = self.context.get('request')
+        user = request.user if request else None
+        tenant = getattr(user, 'active_tenant', user) if user else None
+        from billing.gst_utils import get_required_hsn_digits
+        min_digits = get_required_hsn_digits(tenant) if tenant else 4
+        if len(clean_digits) < min_digits:
+            raise serializers.ValidationError({'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'})
+        attrs['hsn_sac_code'] = hsn_sac_str
 
         cost_price = attrs.get('price')
         if cost_price is None:

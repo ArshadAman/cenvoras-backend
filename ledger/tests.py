@@ -150,9 +150,9 @@ class PaymentLedgerInvoiceReferenceTests(TestCase):
 		for entry in entries:
 			self.assertIsNone(entry.sales_invoice)
 		
-		# Check credit entry account is Customer Advances (code 2101)
+		# Check credit entry account is Customer Advances (code 2102)
 		credit_entry = next(e for e in entries if e.credit > 0)
-		self.assertEqual(credit_entry.account.code, "2101")
+		self.assertEqual(credit_entry.account.code, "2102")
 
 	def test_rebuild_payment_ledger_entries_command(self):
 		"""Rebuilding payment ledger entries must properly link to sales_invoice"""

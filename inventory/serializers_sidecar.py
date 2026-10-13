@@ -1,6 +1,8 @@
+from django.db import transaction
 from rest_framework import serializers
-from .models import Product
+from .models import Product, ProductBatch, Warehouse
 from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal, StockJournalItem
+from .stock_sync import apply_stock_delta
 
 class ProductMetaSerializer(serializers.ModelSerializer):
     secondary_stock = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
@@ -53,8 +55,13 @@ class BillOfMaterialSerializer(serializers.ModelSerializer):
 
 class StockJournalItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
-    
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
+    batch = serializers.PrimaryKeyRelatedField(
+        queryset=ProductBatch.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = StockJournalItem
         fields = ['id', 'product', 'product_name', 'batch', 'batch_number', 'quantity']
@@ -74,11 +81,42 @@ class StockJournalSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
-        
-        journal = StockJournal.objects.create(**validated_data)
-        
-        for item_data in items_data:
-            StockJournalItem.objects.create(journal=journal, **item_data)
-            
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        if not tenant:
+            raise serializers.ValidationError('Authentication required.')
+        validated_data['created_by'] = tenant
+
+        warehouse = validated_data.get('warehouse')
+        if not warehouse:
+            raise serializers.ValidationError({'warehouse': 'Warehouse is required.'})
+
+        with transaction.atomic():
+            journal = StockJournal.objects.create(**validated_data)
+
+            for item_data in items_data:
+                product = item_data['product']
+                if product.created_by_id != tenant.id:
+                    raise serializers.ValidationError({'product': f'Product "{product.name}" not found.'})
+
+                qty_delta = int(item_data.get('quantity') or 0)
+                if qty_delta == 0:
+                    raise serializers.ValidationError({'quantity': 'Quantity cannot be zero.'})
+
+                # Lock product row then apply StockPoint + Product.stock sync
+                product = Product.objects.select_for_update().get(pk=product.pk)
+                batch_in = item_data.get('batch')
+                _sp, batch, _new_qty = apply_stock_delta(
+                    product,
+                    warehouse,
+                    qty_delta,
+                    batch=batch_in,
+                )
+                StockJournalItem.objects.create(
+                    journal=journal,
+                    product=product,
+                    batch=batch,
+                    quantity=qty_delta,
+                )
+
         return journal

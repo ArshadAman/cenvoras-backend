@@ -37,12 +37,15 @@ def apply_rounding(amount, rounding_rule='nearest_one'):
         return Decimal(str(f"{val:.2f}"))
 
 
-def get_total_working_days(month, year, lop_rule='working_days', weekend_rule='sunday_only'):
+def get_total_working_days(month, year, lop_rule='working_days', weekend_rule='sunday_only', default_working_days=None):
     """Calculate total expected working days in the month according to the configured rule."""
     days_in_month = calendar.monthrange(year, month)[1]
     if lop_rule == 'calendar_days':
         return days_in_month
-    elif lop_rule == 'fixed_30':
+    elif lop_rule in ('fixed_30', 'fixed_days', 'fixed'):
+        # Prefer HRMSSettings.default_working_days (e.g. 26) over hard-coded 30
+        if default_working_days is not None and int(default_working_days) > 0:
+            return int(default_working_days)
         return 30
 
     exclude_weekdays = {7}  # Sunday
@@ -121,6 +124,7 @@ def get_attendance_breakdown(employee, month, year, total_working_days, hrms_set
     absent_days = Decimal('0.0')
     paid_leave_days = Decimal('0.0')
     logged_lop_days = Decimal('0.0')
+    actual_present = Decimal('0.0')
     absent_dates_list = []
     unpaid_leave_dates_list = []
 
@@ -140,6 +144,7 @@ def get_attendance_breakdown(employee, month, year, total_working_days, hrms_set
                 logged_lop_days += Decimal('1.0')
                 absent_dates_list.append(str(cur_date))
             elif rec.status == 'half_day':
+                actual_present += Decimal('0.5')
                 absent_days += Decimal('0.5')
                 logged_lop_days += Decimal('0.5')
                 absent_dates_list.append(f"{cur_date} (half-day)")
@@ -149,12 +154,19 @@ def get_attendance_breakdown(employee, month, year, total_working_days, hrms_set
                     unpaid_leave_dates_list.append(str(cur_date))
                 else:
                     paid_leave_days += Decimal('1.0')
+            elif rec.status == 'present':
+                actual_present += Decimal('1.0')
+        else:
+            # Unlogged post-joining weekdays default to present (no partial-log penalty)
+            actual_present += Decimal('1.0')
 
     total_lop = Decimal(str(days_before_joining)) + logged_lop_days
-    effective_present = max(Decimal('0.0'), Decimal(str(total_working_days)) - total_lop)
+    # Payable days for salary proration (= working − LOP); includes paid leave, not labeled “present”
+    payable_days = max(Decimal('0.0'), Decimal(str(total_working_days)) - total_lop)
 
     return {
-        'present_days': effective_present,
+        'present_days': actual_present,
+        'payable_days': payable_days,
         'paid_leave_days': paid_leave_days,
         'absent_days': absent_days,
         'lop_days': total_lop,
@@ -165,10 +177,15 @@ def get_attendance_breakdown(employee, month, year, total_working_days, hrms_set
 
 
 def get_present_days(employee, month, year):
-    """Backward-compatible helper returning effective present days."""
-    total_working = get_total_working_days(month, year)
-    breakdown = get_attendance_breakdown(employee, month, year, total_working)
-    return breakdown['present_days']
+    """Backward-compatible helper returning payable days (working − LOP)."""
+    hrms_settings = get_hrms_settings(employee.tenant) if employee else None
+    lop_rule = getattr(hrms_settings, 'lop_calculation_rule', 'working_days') if hrms_settings else 'working_days'
+    default_wd = getattr(hrms_settings, 'default_working_days', None) if hrms_settings else None
+    total_working = get_total_working_days(
+        month, year, lop_rule=lop_rule, default_working_days=default_wd
+    )
+    breakdown = get_attendance_breakdown(employee, month, year, total_working, hrms_settings)
+    return breakdown.get('payable_days', breakdown['present_days'])
 
 
 def compute_overtime(employee, month, year):
@@ -323,15 +340,19 @@ def compute_gross(employee, month, year):
         return Decimal('0.0'), None, Decimal('0.0'), {}, {}
 
     settings = get_hrms_settings(employee.tenant)
-    working_days = Decimal(str(get_total_working_days(month, year, settings.lop_calculation_rule)))
+    working_days = Decimal(str(get_total_working_days(
+        month, year, settings.lop_calculation_rule,
+        weekend_rule=getattr(settings, 'weekend_rule', 'sunday_only'),
+        default_working_days=getattr(settings, 'default_working_days', None),
+    )))
 
     if working_days == Decimal('0.0'):
         return Decimal('0.0'), assignment, Decimal('0.0'), {}, {}
 
-    breakdown = get_attendance_breakdown(employee, month, year, int(working_days))
-    present_days = breakdown['present_days']
+    breakdown = get_attendance_breakdown(employee, month, year, int(working_days), settings)
+    payable_days = breakdown.get('payable_days', breakdown['present_days'])
 
-    proration_factor = present_days / working_days
+    proration_factor = payable_days / working_days
 
     # Separate earnings from deductions based on SalaryStructure component types
     structure_components = {c.name: c for c in assignment.salary_structure.components.all()}
@@ -422,8 +443,12 @@ def compute_payslip_for_employee(employee, payroll_run):
     if employee.employment_type == 'contract':
         return None
 
-    working_days = get_total_working_days(month, year, settings.lop_calculation_rule)
-    breakdown = get_attendance_breakdown(employee, month, year, working_days)
+    working_days = get_total_working_days(
+        month, year, settings.lop_calculation_rule,
+        weekend_rule=getattr(settings, 'weekend_rule', 'sunday_only'),
+        default_working_days=getattr(settings, 'default_working_days', None),
+    )
+    breakdown = get_attendance_breakdown(employee, month, year, working_days, settings)
 
     prorated_gross, assignment, proration_factor, earnings_map, custom_deductions = compute_gross(employee, month, year)
 
@@ -531,7 +556,12 @@ def compute_payslip_for_employee(employee, payroll_run):
         if breakdown['unpaid_leave_dates']:
             lop_reasons.append(f"Unpaid leave on: {', '.join(breakdown['unpaid_leave_dates'][:4])}")
         
-        reason_text = f"Prorated salary based on {breakdown['present_days']} present days of {working_days} working days. " + "; ".join(lop_reasons)
+        payable = breakdown.get('payable_days', breakdown['present_days'])
+        reason_text = (
+            f"Prorated salary based on {payable} payable days "
+            f"({breakdown['present_days']} present + {breakdown['paid_leave_days']} paid leave) "
+            f"of {working_days} working days. "
+        ) + "; ".join(lop_reasons)
         deduction_reasons['Loss of Pay (LOP)'] = {
             'days': str(breakdown['lop_days']),
             'reason': reason_text

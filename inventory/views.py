@@ -589,7 +589,9 @@ def expiry_report(request):
     cache_key = tenant_cache_key('inventory', tenant.id, 'expiry-report', f'days-{days}')
 
     def build_report():
-        today = timezone.now().date()
+        from zoneinfo import ZoneInfo
+        from decimal import Decimal
+        today = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
         cutoff = today + timedelta(days=days)
 
         batches = ProductBatch.objects.filter(
@@ -604,9 +606,22 @@ def expiry_report(request):
         results = []
         for batch in batches:
             total_qty = batch.total_stock or 0
+            # Fallback: single-batch product with cached stock but no StockPoints yet
             if total_qty <= 0:
-                continue
+                sibling_count = batch.product.batches.filter(is_active=True).count()
+                if sibling_count == 1 and (batch.product.stock or 0) > 0:
+                    total_qty = int(batch.product.stock)
+                else:
+                    continue
             days_left = (batch.expiry_date - today).days
+            unit_price = (
+                Decimal(str(batch.mrp or 0))
+                or Decimal(str(batch.sale_price or 0))
+                or Decimal(str(batch.cost_price or 0))
+                or Decimal(str(batch.product.sale_price or 0))
+                or Decimal(str(batch.product.price or 0))
+            )
+            value = unit_price * Decimal(str(total_qty))
             results.append({
                 'batch_id': str(batch.id),
                 'product_name': batch.product.name,
@@ -615,8 +630,8 @@ def expiry_report(request):
                 'days_until_expiry': days_left,
                 'status': 'expired' if days_left < 0 else ('critical' if days_left <= 30 else 'warning'),
                 'quantity': total_qty,
-                'mrp': float(batch.mrp),
-                'value': float(batch.mrp * total_qty),
+                'mrp': float(unit_price),
+                'value': float(value),
             })
 
         return {
@@ -626,7 +641,8 @@ def expiry_report(request):
             'results': results,
         }
 
-    return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_report))
+    # Short TTL so newly received/expiring batches appear promptly
+    return Response(cache_get_or_set(cache_key, 60, build_report))
 
 
 # =============================================================================
@@ -899,7 +915,9 @@ def expiry_dashboard_summary(request):
     - Total value at risk
     Used by the "Expiring Soon" card on the Dashboard.
     """
-    today = timezone.now().date()
+    from zoneinfo import ZoneInfo
+    from decimal import Decimal
+    today = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
     days = int(request.query_params.get('days', 30))
     tenant = getattr(request.user, 'active_tenant', request.user)
     cache_key = tenant_cache_key('inventory', tenant.id, 'expiry-summary', f'days-{days}')
@@ -922,9 +940,20 @@ def expiry_dashboard_summary(request):
         for batch in batches:
             total_qty = batch.total_stock or 0
             if total_qty <= 0:
-                continue
+                sibling_count = batch.product.batches.filter(is_active=True).count()
+                if sibling_count == 1 and (batch.product.stock or 0) > 0:
+                    total_qty = int(batch.product.stock)
+                else:
+                    continue
             days_left = (batch.expiry_date - today).days
-            value = float(batch.mrp * total_qty)
+            unit_price = (
+                Decimal(str(batch.mrp or 0))
+                or Decimal(str(batch.sale_price or 0))
+                or Decimal(str(batch.cost_price or 0))
+                or Decimal(str(batch.product.sale_price or 0))
+                or Decimal(str(batch.product.price or 0))
+            )
+            value = float(unit_price * Decimal(str(total_qty)))
             count += 1
             total_value += value
             items.append({

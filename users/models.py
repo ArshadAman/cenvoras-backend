@@ -142,10 +142,12 @@ class User(AbstractUser):
         return bool(tenant.gstin and tenant.business_address)
     
     def mark_profile_completed(self):
-        """Mark profile as completed if all required fields are filled"""
-        required_fields = [self.business_name, self.business_address]
-        if all(required_fields):
-            self.profile_completed = True
+        """Mark profile completed only when required fields are filled; clear otherwise."""
+        required_ok = bool(
+            (self.business_name or '').strip() and (self.business_address or '').strip()
+        )
+        if self.profile_completed != required_ok:
+            self.profile_completed = required_ok
             self.save(update_fields=['profile_completed'])
 
 class ActionLog(models.Model):

@@ -43,7 +43,7 @@ class ProductSerializer(serializers.ModelSerializer):
         from billing.gst_utils import get_required_hsn_digits
         min_digits = get_required_hsn_digits(tenant) if tenant else 4
         if len(clean_digits) < min_digits:
-            raise serializers.ValidationError({'hsn_sac_code': f'HSN/SAC code must be at least {min_digits} digits.'})
+            raise serializers.ValidationError({'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'})
         attrs['hsn_sac_code'] = hsn_sac_str
 
         cost_price = attrs.get('price')
@@ -159,14 +159,54 @@ class StockTransferSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'transfer_date', 'created_by']
 
     def create(self, validated_data):
+        from django.db import transaction
+        from .models import StockPoint
+        from .stock_sync import reconcile_product_stock, resolve_batch_for_product
+
         items_data = validated_data.pop('items')
-        validated_data['created_by'] = self.context['request'].user
-        
-        transfer = StockTransfer.objects.create(**validated_data)
-        
-        for item_data in items_data:
-            StockTransferItem.objects.create(transfer=transfer, **item_data)
-            
+        request = self.context['request']
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        validated_data['created_by'] = tenant
+        # Create as pending first so post_save signal does not move stock before items exist
+        target_status = validated_data.get('status') or 'completed'
+        validated_data['status'] = 'pending'
+
+        with transaction.atomic():
+            transfer = StockTransfer.objects.create(**validated_data)
+
+            for item_data in items_data:
+                product = item_data['product']
+                batch = item_data.get('batch') or resolve_batch_for_product(product)
+                StockTransferItem.objects.create(
+                    transfer=transfer,
+                    product=product,
+                    batch=batch,
+                    quantity=item_data['quantity'],
+                )
+
+            if target_status == 'completed':
+                for item in transfer.items.select_related('product', 'batch').all():
+                    source_stock, _ = StockPoint.objects.select_for_update().get_or_create(
+                        warehouse=transfer.source_warehouse,
+                        batch=item.batch,
+                        defaults={'quantity': 0},
+                    )
+                    source_stock.quantity = int(source_stock.quantity or 0) - int(item.quantity)
+                    source_stock.save(update_fields=['quantity', 'last_updated'])
+
+                    dest_stock, _ = StockPoint.objects.select_for_update().get_or_create(
+                        warehouse=transfer.destination_warehouse,
+                        batch=item.batch,
+                        defaults={'quantity': 0},
+                    )
+                    dest_stock.quantity = int(dest_stock.quantity or 0) + int(item.quantity)
+                    dest_stock.save(update_fields=['quantity', 'last_updated'])
+                    reconcile_product_stock(item.product, save=True)
+
+                transfer._stock_applied_inline = True
+                transfer.status = 'completed'
+                transfer.save(update_fields=['status'])
+
         return transfer
 
 

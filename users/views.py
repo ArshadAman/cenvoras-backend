@@ -338,7 +338,7 @@ def view_profile(request):
     user.last_login_at = timezone.now()
     user.save(update_fields=['last_login_at'])
     
-    # Calculate profile completion percentage
+    # Calculate profile completion percentage (never 100% without business address)
     total_fields = 7  # email, phone, business_name, first_name, last_name, business_address, gstin
     completed_fields = 0
     
@@ -351,6 +351,14 @@ def view_profile(request):
     if tenant.gstin: completed_fields += 1
     
     completion_percentage = int((completed_fields / total_fields) * 100)
+    if not (tenant.business_address or '').strip():
+        completion_percentage = min(completion_percentage, 99)
+        if tenant.profile_completed:
+            tenant.profile_completed = False
+            tenant.save(update_fields=['profile_completed'])
+    else:
+        # Keep flag aligned with required business fields
+        tenant.mark_profile_completed()
     
     # Calculate account stats
     days_since_signup = (timezone.now() - user.date_joined).days
@@ -371,7 +379,7 @@ def view_profile(request):
         'billing_profile': tenant_serializer.data,
         'setup_progress': {
             'signup_completed': True,
-            'profile_completed': user.profile_completed,
+            'profile_completed': tenant.profile_completed,
             'can_create_invoices': bool(tenant.business_name),
             'can_create_gst_invoices': tenant.can_generate_gst_invoice,
             'completion_percentage': completion_percentage,

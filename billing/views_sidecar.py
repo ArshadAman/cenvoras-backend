@@ -1358,6 +1358,11 @@ def quotation_detail(request, pk):
         return Response(QuotationSerializer(quotation).data)
 
     if request.method in ['PUT', 'PATCH']:
+        if quotation.status in ('converted', 'partially_converted'):
+            return Response(
+                {'message': 'Converted quotations are locked and cannot be edited.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         serializer = QuotationSerializer(
             quotation,
             data=request.data,
@@ -1372,6 +1377,11 @@ def quotation_detail(request, pk):
             return Response(QuotationSerializer(quotation).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    if quotation.status in ('converted', 'partially_converted'):
+        return Response(
+            {'message': 'Converted quotations cannot be deleted.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     quotation.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 

@@ -518,8 +518,9 @@ def sales_summary_analytics(request):
     # Filter for invoices created by the owner OR any of their team members
     from django.db.models import Q
     base_qs = SalesInvoice.objects.filter(
-        Q(created_by=tenant) | Q(created_by__parent=tenant)
-    ).exclude(status='draft')
+        Q(created_by=tenant) | Q(created_by__parent=tenant),
+        status='final',
+    )
 
     qs = base_qs
     if start_date:
@@ -534,12 +535,13 @@ def sales_summary_analytics(request):
     
     logger.info(f"Sales Analytics Result - count: {total_invoices}, total: {total_revenue}")
 
-    import pytz
-    ist = pytz.timezone('Asia/Kolkata')
-    now = timezone.now().astimezone(ist)
-    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    from zoneinfo import ZoneInfo
+    now = timezone.now().astimezone(ZoneInfo('Asia/Kolkata'))
+    today_ist = now.date()
+    this_month_start = today_ist.replace(day=1)
     this_month_qs = base_qs.filter(
-        invoice_date__gte=this_month_start.date(),
+        invoice_date__gte=this_month_start,
+        invoice_date__lte=today_ist,
     )
 
     this_month_invoices_list = list(this_month_qs.only('total_amount'))
@@ -560,7 +562,8 @@ def sales_summary_analytics(request):
     total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
     
     month_returns = returns_base_qs.filter(
-        date__gte=this_month_start.date()
+        date__gte=this_month_start,
+        date__lte=today_ist,
     ).aggregate(total=Sum('total_amount'))['total'] or 0
 
     return Response(

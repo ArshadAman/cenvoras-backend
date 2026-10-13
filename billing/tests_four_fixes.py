@@ -174,6 +174,38 @@ class SalesOrderFourFixesTests(FourFixesBase):
         self.assertEqual(line.hsn_sac_code, "847130")
         self.assertEqual(Decimal(str(line.tax)), Decimal("18.00"))
 
+    def test_convert_allows_negative_product_stock(self):
+        """SO→invoice must succeed when product stock is already negative (oversell)."""
+        self.product.stock = -2
+        self.product.save(update_fields=["stock"])
+
+        order = SalesOrder.objects.create(
+            order_number="R5-SO2-NEG",
+            date=date.today(),
+            customer=self.customer,
+            customer_name=self.customer.name,
+            customer_gstin=self.customer.gstin,
+            place_of_supply="Karnataka",
+            total_amount=Decimal("1180.00"),
+            created_by=self.tenant,
+        )
+        SalesOrderItem.objects.create(
+            sales_order=order,
+            product=self.product,
+            quantity=1,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00"),
+            hsn_sac_code="847130",
+            unit="pcs",
+        )
+
+        convert_res = self.client.post(f"/api/billing/sales-orders/{order.id}/convert_to_invoice/")
+        self.assertEqual(convert_res.status_code, status.HTTP_200_OK, convert_res.data)
+        self.assertTrue(convert_res.data.get("invoice_id"))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, -3)
+
 
 class DebitNoteGSTAndGSTR3BTests(FourFixesBase):
     def test_interstate_debit_note_posts_igst_reversal(self):

@@ -50,7 +50,10 @@ class CreditNote(models.Model):
         unique_together = [['created_by', 'credit_note_number']]
 
     def __str__(self):
-        return f"CN-{self.credit_note_number} ({self.customer.name})"
+        num = self.credit_note_number
+        if not num.startswith('CN-'):
+            num = f"CN-{num}"
+        return f"{num} ({self.customer.name})"
 
 
 class CreditNoteItem(models.Model):
@@ -110,7 +113,10 @@ class DebitNote(models.Model):
         unique_together = [['created_by', 'debit_note_number']]
 
     def __str__(self):
-        return f"DN-{self.debit_note_number} ({self.vendor_name})"
+        num = self.debit_note_number
+        if not num.startswith('DN-'):
+            num = f"DN-{num}"
+        return f"{num} ({self.vendor_name})"
 
 
 class DebitNoteItem(models.Model):

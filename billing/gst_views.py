@@ -13,9 +13,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Sum, F, Q, Case, When, Value, DecimalField, CharField
 from django.db.models.functions import Coalesce
-from .models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Customer, Vendor
+from .models import SalesInvoice, SalesInvoiceItem, PurchaseBill, PurchaseBillItem, Customer, Vendor, Payment
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
-from .models_sidecar import EWayBill
+from .gst_utils import get_seller_state_code, get_pos_state_code, is_interstate_supply, get_uqc, clean_hsn_sac_code
 
 import datetime
 import hashlib
@@ -34,15 +34,20 @@ def calculate_item_tax_breakup(item, is_interstate=False):
     tax_rate = Decimal(str(getattr(item, 'tax', 0) or 0))
 
     base_amount = quantity * price
-    discount_amount = (base_amount * discount) / Decimal('100')
+    discount_amount = ((base_amount * discount) / Decimal('100')).quantize(Decimal('0.01'))
     calc_taxable = (base_amount - discount_amount).quantize(Decimal('0.01'))
 
-    if quantity > 0 and price > 0 and Decimal('0.00') <= calc_taxable <= line_amount:
+    if quantity > 0 and price > 0:
         taxable_amount = calc_taxable
-        tax_amount = line_amount - taxable_amount
-    else:
         if tax_rate > 0:
-            taxable_amount = (line_amount / (1 + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
+            tax_amount = ((taxable_amount * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
+        elif line_amount > taxable_amount:
+            tax_amount = line_amount - taxable_amount
+        else:
+            tax_amount = Decimal('0.00')
+    else:
+        if tax_rate > 0 and line_amount > 0:
+            taxable_amount = (line_amount / (Decimal('1') + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
             tax_amount = line_amount - taxable_amount
         else:
             taxable_amount = line_amount
@@ -198,7 +203,7 @@ def tax_register(request):
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
     report_type = request.query_params.get('type', 'sales')
-    seller_state = getattr(tenant, 'state', None) or getattr(request.user, 'state', None)
+    seller_state_code = get_seller_state_code(tenant)
 
     results = []
     totals = {
@@ -222,7 +227,8 @@ def tax_register(request):
 
         for inv in invoices:
             pos = inv.place_of_supply or (inv.customer.state if inv.customer else None)
-            is_inter = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+            pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
+            is_inter = (seller_state_code != pos_code)
 
             inv_taxable = Decimal('0')
             inv_cgst = Decimal('0')
@@ -275,7 +281,8 @@ def tax_register(request):
 
         for bill in bills:
             vendor_state = getattr(bill.vendor, 'state', None) if bill.vendor else None
-            is_inter = bool(seller_state and vendor_state and seller_state.strip().upper() != vendor_state.strip().upper())
+            vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+            is_inter = (seller_state_code != vendor_pos_code)
 
             bill_taxable = Decimal('0')
             bill_cgst = Decimal('0')
@@ -332,7 +339,7 @@ def tax_register_invoice_detail(request, invoice_id):
     """
     tenant = getattr(request.user, 'active_tenant', request.user)
     report_type = request.query_params.get('type', 'sales')
-    seller_state = getattr(tenant, 'state', None) or getattr(request.user, 'state', None)
+    seller_state_code = get_seller_state_code(tenant)
 
     if report_type == 'sales':
         try:
@@ -343,7 +350,8 @@ def tax_register_invoice_detail(request, invoice_id):
             return Response({'error': 'Sales invoice not found'}, status=404)
 
         pos = invoice.place_of_supply or (invoice.customer.state if invoice.customer else None)
-        is_inter_state = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+        pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
+        is_inter_state = (seller_state_code != pos_code)
         invoice_number = invoice.invoice_number
         invoice_date = invoice.invoice_date
         party_name = invoice.customer_name or (invoice.customer.name if invoice.customer else 'Cash Customer')
@@ -359,7 +367,8 @@ def tax_register_invoice_detail(request, invoice_id):
             return Response({'error': 'Purchase bill not found'}, status=404)
 
         vendor_state = getattr(invoice.vendor, 'state', None) if invoice.vendor else None
-        is_inter_state = bool(seller_state and vendor_state and seller_state.strip().upper() != vendor_state.strip().upper())
+        vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+        is_inter_state = (seller_state_code != vendor_pos_code)
         invoice_number = invoice.bill_number
         invoice_date = invoice.bill_date
         party_name = invoice.vendor_name
@@ -444,7 +453,8 @@ def gstr1_json_export(request):
     if not from_date or not to_date:
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
-    seller_state = getattr(tenant, 'state', None) or getattr(request.user, 'state', None) or ''
+    # CA AUDIT (Issue 2): Derive seller state from 2-digit prefix of seller GSTIN first
+    seller_state_code = get_seller_state_code(tenant)
 
     invoices = SalesInvoice.objects.filter(
         created_by=tenant,
@@ -457,12 +467,17 @@ def gstr1_json_export(request):
     b2cs = []  # 7 (without GSTIN, intrastate or interstate <= 2.5L)
     b2cl = []  # 5A, 5B (without GSTIN, interstate > 2.5L)
 
-    hsn_dict = {}
+    hsn_dict_b2b = {}
+    hsn_dict_b2c = {}
+
+    import re
 
     for inv in invoices:
         items = [i for i in inv.items.all() if getattr(i, 'row_type', 'item') != 'note']
-        pos = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state
-        is_inter = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+        pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state_code
+        # CA AUDIT (Issue 4): pos MUST be the 2-digit state code (e.g. "21")
+        pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != pos_code)
 
         cust_gstin = ''
         if inv.customer and inv.customer.gstin:
@@ -473,8 +488,17 @@ def gstr1_json_export(request):
         has_gstin = (len(cust_gstin) == 15)
 
         items_data = []
+        inv_taxable = Decimal('0.00')
+        inv_cgst = Decimal('0.00')
+        inv_sgst = Decimal('0.00')
+        inv_igst = Decimal('0.00')
+
         for idx, item in enumerate(items, 1):
             taxable, tax, cgst, sgst, igst, rt = calculate_item_tax_breakup(item, is_inter)
+            inv_taxable += taxable
+            inv_cgst += cgst
+            inv_sgst += sgst
+            inv_igst += igst
 
             items_data.append({
                 'num': idx,
@@ -488,25 +512,33 @@ def gstr1_json_export(request):
                 }
             })
 
-            # Aggregate into HSN summary
-            hsn_code = (item.hsn_sac_code or (item.product.hsn_sac_code if item.product else '') or 'N/A').strip()
-            if hsn_code not in hsn_dict:
-                hsn_dict[hsn_code] = {
-                    'hsn_sc': hsn_code,
+            # CA AUDIT (Issue 5): HSN mandatory, never blank or "N/A", include uqc and qty, split B2B and B2C
+            raw_hsn = (item.hsn_sac_code or (item.product.hsn_sac_code if item.product else '') or '').strip()
+            clean_hsn = clean_hsn_sac_code(raw_hsn)
+            uqc_code = get_uqc(item.unit or (item.product.unit if item.product else 'NOS'))
+            desc = item.product.name if item.product else (item.description or 'Item')
+
+            target_hsn_dict = hsn_dict_b2b if has_gstin else hsn_dict_b2c
+            hsn_key = (clean_hsn, uqc_code)
+            if hsn_key not in target_hsn_dict:
+                target_hsn_dict[hsn_key] = {
+                    'hsn_sc': clean_hsn,
+                    'desc': desc,
+                    'uqc': uqc_code,
                     'qty': 0,
-                    'val': Decimal('0'),
-                    'txval': Decimal('0'),
-                    'camt': Decimal('0'),
-                    'samt': Decimal('0'),
-                    'iamt': Decimal('0'),
-                    'csamt': Decimal('0'),
+                    'val': Decimal('0.00'),
+                    'txval': Decimal('0.00'),
+                    'camt': Decimal('0.00'),
+                    'samt': Decimal('0.00'),
+                    'iamt': Decimal('0.00'),
+                    'csamt': Decimal('0.00'),
                 }
-            hsn_dict[hsn_code]['qty'] += item.quantity
-            hsn_dict[hsn_code]['val'] += item.amount
-            hsn_dict[hsn_code]['txval'] += taxable
-            hsn_dict[hsn_code]['camt'] += cgst
-            hsn_dict[hsn_code]['samt'] += sgst
-            hsn_dict[hsn_code]['iamt'] += igst
+            target_hsn_dict[hsn_key]['qty'] += item.quantity
+            target_hsn_dict[hsn_key]['val'] += item.amount
+            target_hsn_dict[hsn_key]['txval'] += taxable
+            target_hsn_dict[hsn_key]['camt'] += cgst
+            target_hsn_dict[hsn_key]['samt'] += sgst
+            target_hsn_dict[hsn_key]['iamt'] += igst
 
         if has_gstin:
             # B2B Invoice
@@ -514,7 +546,11 @@ def gstr1_json_export(request):
                 'inum': inv.invoice_number,
                 'idt': inv.invoice_date.strftime('%d-%m-%Y'),
                 'val': float(inv.total_amount),
-                'pos': pos,
+                'txval': float(inv_taxable),
+                'camt': float(inv_cgst),
+                'samt': float(inv_sgst),
+                'iamt': float(inv_igst),
+                'pos': pos_code,
                 'rchrg': 'N',
                 'inv_typ': 'R',
                 'itms': items_data,
@@ -532,11 +568,15 @@ def gstr1_json_export(request):
             if is_inter and inv.total_amount > Decimal('250000'):
                 # B2C Large (> 2.5L Interstate)
                 b2cl.append({
-                    'pos': pos,
+                    'pos': pos_code,
                     'inv': [{
                         'inum': inv.invoice_number,
                         'idt': inv.invoice_date.strftime('%d-%m-%Y'),
                         'val': float(inv.total_amount),
+                        'txval': float(inv_taxable),
+                        'camt': float(inv_cgst),
+                        'samt': float(inv_sgst),
+                        'iamt': float(inv_igst),
                         'itms': items_data,
                     }]
                 })
@@ -546,7 +586,7 @@ def gstr1_json_export(request):
                     det = item_payload['itm_det']
                     # Group by pos + rate
                     existing_b2cs = next(
-                        (b for b in b2cs if b['pos'] == pos and b['rt'] == det['rt'] and b['sply_ty'] == ('INTER' if is_inter else 'INTRA')),
+                        (b for b in b2cs if b['pos'] == pos_code and b['rt'] == det['rt'] and b['sply_ty'] == ('INTER' if is_inter else 'INTRA')),
                         None
                     )
                     if existing_b2cs:
@@ -557,7 +597,7 @@ def gstr1_json_export(request):
                     else:
                         b2cs.append({
                             'sply_ty': 'INTER' if is_inter else 'INTRA',
-                            'pos': pos,
+                            'pos': pos_code,
                             'rt': det['rt'],
                             'txval': det['txval'],
                             'camt': det['camt'],
@@ -579,15 +619,26 @@ def gstr1_json_export(request):
     for cn in credit_notes:
         cn_items = list(cn.items.all())
         orig_inv = cn.original_invoice
-        pos = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else seller_state) or seller_state
-        is_inter = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+        pos_raw = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
+        pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != pos_code)
 
         cust_gstin = cn.customer.gstin.strip().upper() if (cn.customer and cn.customer.gstin) else ''
         has_gstin = (len(cust_gstin) == 15)
 
         cn_items_data = []
+        cn_taxable = Decimal('0.00')
+        cn_cgst = Decimal('0.00')
+        cn_sgst = Decimal('0.00')
+        cn_igst = Decimal('0.00')
+
         for idx, item in enumerate(cn_items, 1):
             taxable, tax, cgst, sgst, igst, rt = calculate_item_tax_breakup(item, is_inter)
+            cn_taxable += taxable
+            cn_cgst += cgst
+            cn_sgst += sgst
+            cn_igst += igst
+
             cn_items_data.append({
                 'num': idx,
                 'itm_det': {
@@ -602,17 +653,23 @@ def gstr1_json_export(request):
 
         orig_inv_num = orig_inv.invoice_number if orig_inv else 'N/A'
         orig_inv_dt = orig_inv.invoice_date.strftime('%d-%m-%Y') if orig_inv else cn.date.strftime('%d-%m-%Y')
+        clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
 
+        # CA AUDIT (Issue 1): Show val, txval, camt, samt, iamt, note type "C", original inum and idt
         if has_gstin:
             nt_entry = {
-                'nt_num': cn.credit_note_number,
+                'nt_num': clean_cn_number,
                 'nt_dt': cn.date.strftime('%d-%m-%Y'),
                 'inum': orig_inv_num,
                 'idt': orig_inv_dt,
                 'val': float(cn.total_amount),
+                'txval': float(cn_taxable),
+                'camt': float(cn_cgst),
+                'samt': float(cn_sgst),
+                'iamt': float(cn_igst),
                 'ntty': 'C',
                 'p_gst': 'N',
-                'pos': pos,
+                'pos': pos_code,
                 'rchrg': 'N',
                 'itms': cn_items_data,
             }
@@ -627,23 +684,69 @@ def gstr1_json_export(request):
         else:
             cdnur.append({
                 'typ': 'B2CL' if (is_inter and cn.total_amount > Decimal('250000')) else 'B2CS',
-                'nt_num': cn.credit_note_number,
+                'nt_num': clean_cn_number,
                 'nt_dt': cn.date.strftime('%d-%m-%Y'),
                 'inum': orig_inv_num,
                 'idt': orig_inv_dt,
                 'val': float(cn.total_amount),
+                'txval': float(cn_taxable),
+                'camt': float(cn_cgst),
+                'samt': float(cn_sgst),
+                'iamt': float(cn_igst),
                 'ntty': 'C',
                 'p_gst': 'N',
-                'pos': pos,
+                'pos': pos_code,
                 'itms': cn_items_data,
             })
 
-    # Format HSN Summary
-    hsn_data = []
-    for idx, (hcode, hval) in enumerate(sorted(hsn_dict.items()), 1):
-        hsn_data.append({
+    # CA AUDIT (Issue 9): Advances on Services (Table 11A 'at' & Table 11B 'atadj')
+    at = []
+    atadj = []
+    advance_payments = Payment.objects.filter(
+        created_by=tenant,
+        date__gte=from_date,
+        date__lte=to_date,
+        invoice__isnull=True,
+        customer__isnull=False,
+    ).select_related('customer')
+
+    for p in advance_payments:
+        adv_pos_raw = (p.customer.state if p.customer else None) or seller_state_code
+        adv_pos = get_pos_state_code(adv_pos_raw, fallback_state=seller_state_code)
+        adv_is_inter = (seller_state_code != adv_pos)
+
+        adv_gross = Decimal(str(p.amount or 0))
+        if adv_gross > Decimal('0.00'):
+            adv_taxable = (adv_gross / Decimal('1.18')).quantize(Decimal('0.01'))
+            adv_tax = (adv_gross - adv_taxable).quantize(Decimal('0.01'))
+            if adv_is_inter:
+                adv_cgst = Decimal('0.00')
+                adv_sgst = Decimal('0.00')
+                adv_igst = adv_tax
+            else:
+                adv_cgst = (adv_tax / Decimal('2')).quantize(Decimal('0.01'))
+                adv_sgst = adv_tax - adv_cgst
+                adv_igst = Decimal('0.00')
+
+            at.append({
+                'sply_ty': 'INTER' if adv_is_inter else 'INTRA',
+                'pos': adv_pos,
+                'rt': 18.0,
+                'ad_amt': float(adv_gross),
+                'camt': float(adv_cgst),
+                'samt': float(adv_sgst),
+                'iamt': float(adv_igst),
+                'csamt': 0.0,
+            })
+
+    # Format HSN Summaries (Split into B2B and B2C)
+    hsn_data_b2b = []
+    for idx, (hkey, hval) in enumerate(sorted(hsn_dict_b2b.items()), 1):
+        hsn_data_b2b.append({
             'num': idx,
             'hsn_sc': hval['hsn_sc'],
+            'desc': hval['desc'],
+            'uqc': hval['uqc'],
             'qty': hval['qty'],
             'val': float(hval['val']),
             'txval': float(hval['txval']),
@@ -653,7 +756,30 @@ def gstr1_json_export(request):
             'csamt': float(hval['csamt']),
         })
 
-    # Documents Issued (Section 13)
+    hsn_data_b2c = []
+    for idx, (hkey, hval) in enumerate(sorted(hsn_dict_b2c.items()), 1):
+        hsn_data_b2c.append({
+            'num': idx,
+            'hsn_sc': hval['hsn_sc'],
+            'desc': hval['desc'],
+            'uqc': hval['uqc'],
+            'qty': hval['qty'],
+            'val': float(hval['val']),
+            'txval': float(hval['txval']),
+            'camt': float(hval['camt']),
+            'samt': float(hval['samt']),
+            'iamt': float(hval['iamt']),
+            'csamt': float(hval['csamt']),
+        })
+
+    hsn_data_all = hsn_data_b2b + hsn_data_b2c
+
+    # Documents Issued (Section 13) - clean numbering without duplicate prefixes (Issue 10)
+    first_cn = credit_notes.first()
+    last_cn = credit_notes.last()
+    first_cn_num = re.sub(r'^(CN-)+', 'CN-', first_cn.credit_note_number) if first_cn else ''
+    last_cn_num = re.sub(r'^(CN-)+', 'CN-', last_cn.credit_note_number) if last_cn else ''
+
     doc_issue = {
         'doc_det': [
             {
@@ -668,8 +794,8 @@ def gstr1_json_export(request):
             {
                 'doc_num': 2,
                 'doc_typ': 'Credit Note',
-                'from': credit_notes.first().credit_note_number if credit_notes.exists() else '',
-                'to': credit_notes.last().credit_note_number if credit_notes.exists() else '',
+                'from': first_cn_num,
+                'to': last_cn_num,
                 'totnum': credit_notes.count(),
                 'canc': 0,
                 'net_issue': credit_notes.count(),
@@ -688,7 +814,15 @@ def gstr1_json_export(request):
         'b2cl': b2cl,
         'cdnr': cdnr,
         'cdnur': cdnur,
-        'hsn': {'data': hsn_data},
+        'hsn': {
+            'data': hsn_data_all,
+            'b2b': hsn_data_b2b,
+            'b2c': hsn_data_b2c,
+        },
+        'hsn_b2b': hsn_data_b2b,
+        'hsn_b2c': hsn_data_b2c,
+        'at': at,
+        'atadj': atadj,
         'doc_issue': doc_issue,
     }
 
@@ -705,10 +839,12 @@ def gstr3b_summary(request):
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     Computes:
     - Table 3.1: Outward supplies & Inward reverse charge
-    - Table 3.2: Interstate supplies to unregistered
-    - Table 4: Eligible ITC (Available, Reversed, Net ITC)
+    - Table 3.1.1: Supplies notified under Section 9(5)
+    - Table 3.2: Interstate supplies to unregistered by POS
+    - Table 4: Eligible ITC (Available, Reversed, Net ITC, Ineligible)
+    - Table 5: Exempt/Nil inward supplies
     - Table 5.1: Interest & Late fee
-    - Table 6.1: Payment of Tax (Net tax payable in cash after ITC utilization)
+    - Table 6.1: Payment of Tax (Net tax payable in cash under GST Rule 88A set-off order)
     """
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
@@ -717,7 +853,7 @@ def gstr3b_summary(request):
     if not from_date or not to_date:
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
-    seller_state = getattr(tenant, 'state', None) or getattr(request.user, 'state', None) or ''
+    seller_state_code = get_seller_state_code(tenant)
 
     # 1. Outward Supplies (from finalized Sales Invoices)
     invoices = SalesInvoice.objects.filter(
@@ -737,8 +873,9 @@ def gstr3b_summary(request):
 
     for inv in invoices:
         items = [i for i in inv.items.all() if getattr(i, 'row_type', 'item') != 'note']
-        pos = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state
-        is_inter = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+        pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state_code
+        pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != pos_code)
         has_gstin = bool(inv.customer and inv.customer.gstin and len(inv.customer.gstin.strip()) == 15)
 
         for item in items:
@@ -749,10 +886,10 @@ def gstr3b_summary(request):
             outward_sgst += sgst
 
             if is_inter and not has_gstin:
-                if pos not in table32_dict:
-                    table32_dict[pos] = {'pos': pos, 'txval': Decimal('0.00'), 'iamt': Decimal('0.00')}
-                table32_dict[pos]['txval'] += taxable
-                table32_dict[pos]['iamt'] += igst
+                if pos_code not in table32_dict:
+                    table32_dict[pos_code] = {'pos': pos_code, 'txval': Decimal('0.00'), 'iamt': Decimal('0.00')}
+                table32_dict[pos_code]['txval'] += taxable
+                table32_dict[pos_code]['iamt'] += igst
 
     # Less Credit Notes (Sales Returns)
     credit_notes = CreditNote.objects.filter(
@@ -763,8 +900,9 @@ def gstr3b_summary(request):
 
     for cn in credit_notes:
         orig_inv = cn.original_invoice
-        pos = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else seller_state) or seller_state
-        is_inter = bool(seller_state and pos and seller_state.strip().upper() != pos.strip().upper())
+        pos_raw = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
+        pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != pos_code)
         has_gstin = bool(cn.customer and cn.customer.gstin and len(cn.customer.gstin.strip()) == 15)
 
         for item in cn.items.all():
@@ -774,9 +912,9 @@ def gstr3b_summary(request):
             outward_cgst -= cgst
             outward_sgst -= sgst
 
-            if is_inter and not has_gstin and pos in table32_dict:
-                table32_dict[pos]['txval'] -= taxable
-                table32_dict[pos]['iamt'] -= igst
+            if is_inter and not has_gstin and pos_code in table32_dict:
+                table32_dict[pos_code]['txval'] -= taxable
+                table32_dict[pos_code]['iamt'] -= igst
 
     # Floor at 0.00
     outward_taxable = max(outward_taxable, Decimal('0.00'))
@@ -798,7 +936,8 @@ def gstr3b_summary(request):
 
     for bill in bills:
         vendor_state = getattr(bill.vendor, 'state', None) if bill.vendor else None
-        is_inter = bool(seller_state and vendor_state and seller_state.strip().upper() != vendor_state.strip().upper())
+        vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != vendor_pos_code)
 
         for item in bill.items.all():
             taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
@@ -821,7 +960,8 @@ def gstr3b_summary(request):
     for dn in debit_notes:
         orig_bill = dn.original_bill
         vendor_state = getattr(orig_bill.vendor, 'state', None) if (orig_bill and orig_bill.vendor) else None
-        is_inter = bool(seller_state and vendor_state and seller_state.strip().upper() != vendor_state.strip().upper())
+        vendor_pos_code = get_pos_state_code(vendor_state, fallback_state=seller_state_code)
+        is_inter = (seller_state_code != vendor_pos_code)
 
         for item in dn.items.all():
             _taxable, tax, cgst, sgst, igst, _rt = calculate_item_tax_breakup(item, is_inter)
@@ -834,11 +974,59 @@ def gstr3b_summary(request):
     net_itc_cgst = max(itc_cgst - rev_cgst, Decimal('0.00'))
     net_itc_sgst = max(itc_sgst - rev_sgst, Decimal('0.00'))
 
-    # 5. Table 6.1: Tax Payment & Cash Liability Computation
-    # Simple set-off logic: IGST pays IGST, then CGST/SGST; CGST pays CGST; SGST pays SGST
-    cash_payable_igst = max(outward_igst - net_itc_igst, Decimal('0.00'))
-    cash_payable_cgst = max(outward_cgst - net_itc_cgst, Decimal('0.00'))
-    cash_payable_sgst = max(outward_sgst - net_itc_sgst, Decimal('0.00'))
+    # 5. Table 6.1: Tax Payment & Cash Liability Computation under GST Rule 88A
+    # RULE 88A Order:
+    # 1. IGST ITC must be fully exhausted first: against IGST liability, then CGST and SGST in order.
+    # 2. CGST ITC can then be used against CGST liability, then remaining IGST liability (never SGST).
+    # 3. SGST ITC can then be used against SGST liability, then remaining IGST liability (never CGST).
+    liab_igst = outward_igst
+    liab_cgst = outward_cgst
+    liab_sgst = outward_sgst
+
+    rem_itc_igst = net_itc_igst
+    rem_itc_cgst = net_itc_cgst
+    rem_itc_sgst = net_itc_sgst
+
+    # Step 1: IGST ITC -> IGST liability
+    igst_setoff_igst = min(liab_igst, rem_itc_igst)
+    liab_igst -= igst_setoff_igst
+    rem_itc_igst -= igst_setoff_igst
+
+    # Step 2: Remaining IGST ITC -> CGST liability, then SGST liability
+    igst_setoff_cgst = min(liab_cgst, rem_itc_igst)
+    liab_cgst -= igst_setoff_cgst
+    rem_itc_igst -= igst_setoff_cgst
+
+    igst_setoff_sgst = min(liab_sgst, rem_itc_igst)
+    liab_sgst -= igst_setoff_sgst
+    rem_itc_igst -= igst_setoff_sgst
+
+    # Step 3: CGST ITC -> CGST liability, then remaining IGST liability
+    cgst_setoff_cgst = min(liab_cgst, rem_itc_cgst)
+    liab_cgst -= cgst_setoff_cgst
+    rem_itc_cgst -= cgst_setoff_cgst
+
+    cgst_setoff_igst = min(liab_igst, rem_itc_cgst)
+    liab_igst -= cgst_setoff_igst
+    rem_itc_cgst -= cgst_setoff_igst
+
+    # Step 4: SGST ITC -> SGST liability, then remaining IGST liability
+    sgst_setoff_sgst = min(liab_sgst, rem_itc_sgst)
+    liab_sgst -= sgst_setoff_sgst
+    rem_itc_sgst -= sgst_setoff_sgst
+
+    sgst_setoff_igst = min(liab_igst, rem_itc_sgst)
+    liab_igst -= sgst_setoff_igst
+    rem_itc_sgst -= sgst_setoff_igst
+
+    # Total ITC utilized per tax head
+    tot_paid_itc_igst = igst_setoff_igst + cgst_setoff_igst + sgst_setoff_igst
+    tot_paid_itc_cgst = igst_setoff_cgst + cgst_setoff_cgst
+    tot_paid_itc_sgst = igst_setoff_sgst + sgst_setoff_sgst
+
+    cash_payable_igst = liab_igst
+    cash_payable_cgst = liab_cgst
+    cash_payable_sgst = liab_sgst
     total_cash_payable = cash_payable_igst + cash_payable_cgst + cash_payable_sgst
 
     gstin = tenant.gstin if hasattr(tenant, 'gstin') and tenant.gstin else ''
@@ -863,6 +1051,12 @@ def gstr3b_summary(request):
             'nil_exempt': {'desc': '(c) Other outward supplies (Nil rated, exempted)', 'txval': 0.0},
             'inward_reverse_charge': {'desc': '(d) Inward supplies (liable to reverse charge)', 'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
             'non_gst_outward': {'desc': '(e) Non-GST outward supplies', 'txval': 0.0},
+        },
+        'table_3_1_1': {
+            'eco_taxable': 0.0,
+            'eco_igst': 0.0,
+            'eco_cgst': 0.0,
+            'eco_sgst': 0.0,
         },
         'table_3_2': [
             {'pos': row['pos'], 'txval': float(row['txval']), 'iamt': float(row['iamt'])}
@@ -898,6 +1092,10 @@ def gstr3b_summary(request):
             },
             'ineligible_itc': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
         },
+        'table_5_exempt': {
+            'inter_state': 0.0,
+            'intra_state': 0.0,
+        },
         'table_5_1_interest': {
             'iamt': 0.0,
             'camt': 0.0,
@@ -905,11 +1103,37 @@ def gstr3b_summary(request):
             'csamt': 0.0,
         },
         'table_6_1_payment': {
-            'igst': {'tax_payable': float(outward_igst), 'paid_via_itc': float(min(outward_igst, net_itc_igst)), 'tax_paid_cash': float(cash_payable_igst)},
-            'cgst': {'tax_payable': float(outward_cgst), 'paid_via_itc': float(min(outward_cgst, net_itc_cgst)), 'tax_paid_cash': float(cash_payable_cgst)},
-            'sgst': {'tax_payable': float(outward_sgst), 'paid_via_itc': float(min(outward_sgst, net_itc_sgst)), 'tax_paid_cash': float(cash_payable_sgst)},
+            'igst': {
+                'tax_payable': float(outward_igst),
+                'paid_via_itc': float(tot_paid_itc_igst),
+                'tax_paid_cash': float(cash_payable_igst),
+                'itc_breakup': {
+                    'igst': float(igst_setoff_igst),
+                    'cgst': float(cgst_setoff_igst),
+                    'sgst': float(sgst_setoff_igst),
+                }
+            },
+            'cgst': {
+                'tax_payable': float(outward_cgst),
+                'paid_via_itc': float(tot_paid_itc_cgst),
+                'tax_paid_cash': float(cash_payable_cgst),
+                'itc_breakup': {
+                    'igst': float(igst_setoff_cgst),
+                    'cgst': float(cgst_setoff_cgst),
+                }
+            },
+            'sgst': {
+                'tax_payable': float(outward_sgst),
+                'paid_via_itc': float(tot_paid_itc_sgst),
+                'tax_paid_cash': float(cash_payable_sgst),
+                'itc_breakup': {
+                    'igst': float(igst_setoff_sgst),
+                    'sgst': float(sgst_setoff_sgst),
+                }
+            },
             'total_tax_payable': float(outward_igst + outward_cgst + outward_sgst),
             'total_net_itc': float(net_itc_igst + net_itc_cgst + net_itc_sgst),
+            'total_itc_utilized': float(tot_paid_itc_igst + tot_paid_itc_cgst + tot_paid_itc_sgst),
             'total_tax_paid_cash': float(total_cash_payable),
         }
     })

@@ -42,6 +42,7 @@ class AccountingService:
             
             # Revenue
             ('4001', 'Sales Revenue', AccountType.REVENUE),
+            ('4002', 'Sales Return', AccountType.REVENUE),
             ('4100', 'Service Revenue', AccountType.REVENUE),
             ('4200', 'Rounding Off', AccountType.REVENUE),
             
@@ -50,6 +51,7 @@ class AccountingService:
             ('5100', 'Office Supplies Expense', AccountType.EXPENSE),
             ('5200', 'Equipment Expense', AccountType.EXPENSE),
             ('6001', 'Purchases', AccountType.EXPENSE),
+            ('6002', 'Purchase Return', AccountType.EXPENSE),
         ]
         
         existing_accounts = Account.objects.filter(created_by=user)
@@ -111,6 +113,10 @@ class AccountingService:
 
         if 'bank' in accounts:
             accounts['bank_account'] = accounts['bank']
+        accounts['rounding_off'] = accounts.get('rounding_off') or accounts.get('4200')
+        accounts['round_off'] = accounts.get('rounding_off') or accounts.get('4200')
+        accounts['sales_return'] = accounts.get('sales_return') or accounts.get('4002') or accounts.get('sales_revenue')
+        accounts['purchase_return'] = accounts.get('purchase_return') or accounts.get('6002') or accounts.get('purchases')
             
         return accounts
 
@@ -119,24 +125,36 @@ class AccountingService:
         """
         Extract taxable amount and tax amount from a line item.
         Handles SalesInvoiceItem, PurchaseBillItem, CreditNoteItem, DebitNoteItem.
+        CA AUDIT:
+        - Round each line's tax to 2 decimal places.
+        - Taxable amount = (quantity * price * (1 - discount/100)).quantize(0.01)
+        - If tax percentage rate > 0:
+            tax_amount = ((taxable_amount * tax_rate) / 100).quantize(0.01)
+          else:
+            tax_amount = line_amount - taxable_amount (if line_amount > taxable_amount)
         """
         line_amount = Decimal(str(getattr(item, 'amount', 0) or 0))
         quantity = Decimal(str(getattr(item, 'quantity', 0) or 0))
         price = Decimal(str(getattr(item, 'price', 0) or 0))
         discount = Decimal(str(getattr(item, 'discount', 0) or 0))
+        tax_rate = Decimal(str(getattr(item, 'tax', 0) or 0))
 
         base_amount = quantity * price
-        discount_amount = (base_amount * discount) / Decimal('100')
+        discount_amount = ((base_amount * discount) / Decimal('100')).quantize(Decimal('0.01'))
         calc_taxable = (base_amount - discount_amount).quantize(Decimal('0.01'))
 
-        if quantity > 0 and price > 0 and Decimal('0.00') <= calc_taxable <= line_amount:
+        if quantity > 0 and price > 0:
             taxable_amount = calc_taxable
-            tax_amount = line_amount - taxable_amount
+            if tax_rate > 0:
+                tax_amount = ((taxable_amount * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
+            elif line_amount > taxable_amount:
+                tax_amount = line_amount - taxable_amount
+            else:
+                tax_amount = Decimal('0.00')
         else:
-            raw_tax = Decimal(str(getattr(item, 'tax', 0) or 0))
-            if raw_tax > 0 and raw_tax < line_amount:
-                tax_amount = raw_tax
-                taxable_amount = line_amount - tax_amount
+            if tax_rate > 0 and line_amount > 0:
+                taxable_amount = (line_amount / (Decimal('1') + (tax_rate / Decimal('100')))).quantize(Decimal('0.01'))
+                tax_amount = line_amount - taxable_amount
             else:
                 taxable_amount = line_amount
                 tax_amount = Decimal('0.00')
@@ -202,25 +220,34 @@ class AccountingService:
             created_by=user
         )
 
-        # Determine intra-state vs inter-state
+        # Determine intra-state vs inter-state (CA AUDIT: seller state from seller GSTIN first 2 digits)
+        from billing.gst_utils import get_seller_state_code, get_pos_state_code
         tenant = getattr(user, 'active_tenant', user)
-        seller_state = getattr(tenant, 'state', None) or getattr(user, 'state', None)
+        seller_state_code = get_seller_state_code(tenant)
         pos = sales_invoice.place_of_supply
         if not pos and sales_invoice.customer:
             pos = getattr(sales_invoice.customer, 'state', None)
-
-        is_interstate = False
-        if seller_state and pos:
-            is_interstate = (seller_state.strip().upper() != pos.strip().upper())
+        pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
+        is_interstate = (seller_state_code != pos_code)
 
         total_taxable = Decimal('0.00')
-        total_tax = Decimal('0.00')
+        total_cgst = Decimal('0.00')
+        total_sgst = Decimal('0.00')
+        total_igst = Decimal('0.00')
 
         if line_items:
             for item in line_items:
                 taxable_amount, tax_amount = cls._calculate_item_tax_split(item)
                 total_taxable += taxable_amount
-                total_tax += tax_amount
+
+                if is_interstate:
+                    line_igst = tax_amount
+                    total_igst += line_igst
+                else:
+                    line_cgst = (tax_amount / Decimal('2')).quantize(Decimal('0.01'))
+                    line_sgst = tax_amount - line_cgst
+                    total_cgst += line_cgst
+                    total_sgst += line_sgst
 
                 product_name = item.product.name if item.product else (item.description or 'Item')
                 item_description = f"Sale of {product_name}"
@@ -267,51 +294,47 @@ class AccountingService:
             )
 
         # Credit: Output GST (Duties & Taxes Liability)
-        if total_tax > Decimal('0.00'):
-            if is_interstate:
-                GeneralLedgerEntry.objects.create(
-                    date=sales_invoice.invoice_date,
-                    account=accounts['output_igst'],
-                    debit=0,
-                    credit=total_tax,
-                    description=f"Output IGST for Invoice {sales_invoice.invoice_number}",
-                    reference=sales_invoice.invoice_number,
-                    sales_invoice=sales_invoice,
-                    customer=None,
-                    created_by=user
-                )
-            else:
-                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
-                sgst = total_tax - cgst
-                if cgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=sales_invoice.invoice_date,
-                        account=accounts['output_cgst'],
-                        debit=0,
-                        credit=cgst,
-                        description=f"Output CGST for Invoice {sales_invoice.invoice_number}",
-                        reference=sales_invoice.invoice_number,
-                        sales_invoice=sales_invoice,
-                        customer=None,
-                        created_by=user
-                    )
-                if sgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=sales_invoice.invoice_date,
-                        account=accounts['output_sgst'],
-                        debit=0,
-                        credit=sgst,
-                        description=f"Output SGST for Invoice {sales_invoice.invoice_number}",
-                        reference=sales_invoice.invoice_number,
-                        sales_invoice=sales_invoice,
-                        customer=None,
-                        created_by=user
-                    )
+        if total_igst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=accounts['output_igst'],
+                debit=0,
+                credit=total_igst,
+                description=f"Output IGST for Invoice {sales_invoice.invoice_number}",
+                reference=sales_invoice.invoice_number,
+                sales_invoice=sales_invoice,
+                customer=None,
+                created_by=user
+            )
+        if total_cgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=accounts['output_cgst'],
+                debit=0,
+                credit=total_cgst,
+                description=f"Output CGST for Invoice {sales_invoice.invoice_number}",
+                reference=sales_invoice.invoice_number,
+                sales_invoice=sales_invoice,
+                customer=None,
+                created_by=user
+            )
+        if total_sgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=accounts['output_sgst'],
+                debit=0,
+                credit=total_sgst,
+                description=f"Output SGST for Invoice {sales_invoice.invoice_number}",
+                reference=sales_invoice.invoice_number,
+                sales_invoice=sales_invoice,
+                customer=None,
+                created_by=user
+            )
 
         # Credit/Debit: Rounding Off (guarantee Debits == Credits down to the exact cent)
-        total_credited = total_taxable + total_tax
+        total_parts = total_taxable + total_cgst + total_sgst + total_igst
         total_debited = Decimal(str(sales_invoice.total_amount or '0.00'))
-        round_off_diff = (total_debited - total_credited).quantize(Decimal('0.01'))
+        round_off_diff = (total_debited - total_parts).quantize(Decimal('0.01'))
 
         if round_off_diff != Decimal('0.00'):
             rounding_off_account = accounts.get('rounding_off')
@@ -338,6 +361,13 @@ class AccountingService:
                 sales_invoice=sales_invoice,
                 created_by=user
             )
+
+        # Strict Voucher Balance Verification (CA AUDIT: Reject unbalanced vouchers, never create Suspense)
+        voucher_entries = GeneralLedgerEntry.objects.filter(sales_invoice=sales_invoice)
+        tot_dr = voucher_entries.aggregate(Sum('debit'))['debit__sum'] or Decimal('0.00')
+        tot_cr = voucher_entries.aggregate(Sum('credit'))['credit__sum'] or Decimal('0.00')
+        if abs(tot_dr - tot_cr) > Decimal('0.001'):
+            raise ValueError(f"Unbalanced voucher rejected for Invoice {sales_invoice.invoice_number}: Total Dr ₹{tot_dr} != Total Cr ₹{tot_cr}")
 
         return True
 
@@ -768,45 +798,73 @@ class AccountingService:
     def create_credit_note_entries(cls, credit_note):
         """
         Create accounting entries for a Sales Return (Credit Note).
-        
-        Dr. Sales Revenue (Revenue Reversal)     [Taxable Amount]
-        Dr. Output CGST (Liability Reversal)    [CGST Amount]
-        Dr. Output SGST (Liability Reversal)    [SGST Amount]
-        (or Dr. Output IGST for Interstate)
-            Cr. Accounts Receivable (Asset)     [Total Amount]
+        CA AUDIT (Issue 1):
+        Intra-state:
+          Dr. Sales Return (Revenue contra)      [Taxable Amount]
+          Dr. Output CGST (Liability Reversal)   [CGST Amount]
+          Dr. Output SGST (Liability Reversal)   [SGST Amount]
+          Cr. Accounts Receivable (Asset)        [Total Amount]
+        Inter-state:
+          Dr. Sales Return (Revenue contra)      [Taxable Amount]
+          Dr. Output IGST (Liability Reversal)   [IGST Amount]
+          Cr. Accounts Receivable (Asset)        [Total Amount]
         """
         user = credit_note.created_by
         accounts = cls.get_or_create_default_accounts(user)
+        sales_return_acc = accounts.get('sales_return') or accounts.get('4002') or accounts['sales_revenue']
+
         description = f"Sales Return from {credit_note.customer.name} - CN {credit_note.credit_note_number}"
         if credit_note.reason:
             description += f" ({credit_note.get_reason_display()})"
 
+        from billing.gst_utils import get_seller_state_code, get_pos_state_code
         tenant = getattr(user, 'active_tenant', user)
-        seller_state = getattr(tenant, 'state', None) or getattr(user, 'state', None)
+        seller_state_code = get_seller_state_code(tenant)
         pos = getattr(credit_note.customer, 'state', None)
         if credit_note.original_invoice and getattr(credit_note.original_invoice, 'place_of_supply', None):
             pos = credit_note.original_invoice.place_of_supply
-
-        is_interstate = False
-        if seller_state and pos:
-            is_interstate = (seller_state.strip().upper() != pos.strip().upper())
+        pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
+        is_interstate = (seller_state_code != pos_code)
 
         items = list(credit_note.items.all()) if hasattr(credit_note, 'items') else []
-        total_tax = Decimal('0.00')
         total_taxable = Decimal('0.00')
+        total_cgst = Decimal('0.00')
+        total_sgst = Decimal('0.00')
+        total_igst = Decimal('0.00')
 
         if items:
             for item in items:
                 taxable, tax = cls._calculate_item_tax_split(item)
                 total_taxable += taxable
-                total_tax += tax
+                if is_interstate:
+                    total_igst += tax
+                else:
+                    line_cgst = (tax / Decimal('2')).quantize(Decimal('0.01'))
+                    line_sgst = tax - line_cgst
+                    total_cgst += line_cgst
+                    total_sgst += line_sgst
         else:
-            total_taxable = credit_note.total_amount
+            total_taxable = Decimal(str(credit_note.total_amount or '0.00'))
 
-        # Debit: Sales Revenue (reduce recorded income)
+        total_parts = total_taxable + total_cgst + total_sgst + total_igst
+
+        # If credit_note was saved with pre-tax amount, synchronize total_amount to gross
+        if Decimal(str(credit_note.total_amount or '0.00')) < total_parts and total_parts > Decimal('0.00'):
+            old_amt = credit_note.total_amount
+            credit_note.total_amount = total_parts
+            from billing.models_returns import CreditNote
+            CreditNote.objects.filter(pk=credit_note.pk).update(total_amount=total_parts)
+            if credit_note.customer:
+                from billing.models import Customer
+                diff = total_parts - Decimal(str(old_amt or '0.00'))
+                Customer.objects.filter(pk=credit_note.customer.pk).update(current_balance=F('current_balance') - diff)
+
+        cn_total = Decimal(str(credit_note.total_amount or '0.00'))
+
+        # Debit: Sales Return (reduce recorded income)
         GeneralLedgerEntry.objects.create(
             date=credit_note.date,
-            account=accounts['sales_revenue'],
+            account=sales_return_acc,
             debit=total_taxable,
             credit=0,
             description=description,
@@ -817,59 +875,78 @@ class AccountingService:
         )
 
         # Debit: Output GST (reduce tax liability)
-        if total_tax > Decimal('0.00'):
-            if is_interstate:
-                GeneralLedgerEntry.objects.create(
-                    date=credit_note.date,
-                    account=accounts['output_igst'],
-                    debit=total_tax,
-                    credit=0,
-                    description=f"Output IGST Reversal - CN {credit_note.credit_note_number}",
-                    reference=credit_note.credit_note_number,
-                    credit_note=credit_note,
-                    customer=credit_note.customer,
-                    created_by=user
-                )
-            else:
-                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
-                sgst = total_tax - cgst
-                if cgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=credit_note.date,
-                        account=accounts['output_cgst'],
-                        debit=cgst,
-                        credit=0,
-                        description=f"Output CGST Reversal - CN {credit_note.credit_note_number}",
-                        reference=credit_note.credit_note_number,
-                        credit_note=credit_note,
-                        customer=credit_note.customer,
-                        created_by=user
-                    )
-                if sgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=credit_note.date,
-                        account=accounts['output_sgst'],
-                        debit=sgst,
-                        credit=0,
-                        description=f"Output SGST Reversal - CN {credit_note.credit_note_number}",
-                        reference=credit_note.credit_note_number,
-                        credit_note=credit_note,
-                        customer=credit_note.customer,
-                        created_by=user
-                    )
+        if total_igst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=credit_note.date,
+                account=accounts['output_igst'],
+                debit=total_igst,
+                credit=0,
+                description=f"Output IGST Reversal - CN {credit_note.credit_note_number}",
+                reference=credit_note.credit_note_number,
+                credit_note=credit_note,
+                customer=credit_note.customer,
+                created_by=user
+            )
+        if total_cgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=credit_note.date,
+                account=accounts['output_cgst'],
+                debit=total_cgst,
+                credit=0,
+                description=f"Output CGST Reversal - CN {credit_note.credit_note_number}",
+                reference=credit_note.credit_note_number,
+                credit_note=credit_note,
+                customer=credit_note.customer,
+                created_by=user
+            )
+        if total_sgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=credit_note.date,
+                account=accounts['output_sgst'],
+                debit=total_sgst,
+                credit=0,
+                description=f"Output SGST Reversal - CN {credit_note.credit_note_number}",
+                reference=credit_note.credit_note_number,
+                credit_note=credit_note,
+                customer=credit_note.customer,
+                created_by=user
+            )
+
+        # Round Off difference if any
+        round_off_diff = (cn_total - total_parts).quantize(Decimal('0.01'))
+        if round_off_diff != Decimal('0.00'):
+            round_off_acc = accounts.get('rounding_off') or accounts.get('4200')
+            GeneralLedgerEntry.objects.create(
+                date=credit_note.date,
+                account=round_off_acc,
+                debit=round_off_diff if round_off_diff > 0 else 0,
+                credit=abs(round_off_diff) if round_off_diff < 0 else 0,
+                description=f"Rounding off adjustment for CN {credit_note.credit_note_number}",
+                reference=credit_note.credit_note_number,
+                credit_note=credit_note,
+                created_by=user
+            )
 
         # Credit: Accounts Receivable (reduce customer debt)
         GeneralLedgerEntry.objects.create(
             date=credit_note.date,
             account=accounts['accounts_receivable'],
             debit=0,
-            credit=credit_note.total_amount,
+            credit=cn_total,
             description=description,
             reference=credit_note.credit_note_number,
             credit_note=credit_note,
             customer=credit_note.customer,
             created_by=user
         )
+
+        # Strict Voucher Balance Verification
+        voucher_entries = GeneralLedgerEntry.objects.filter(credit_note=credit_note)
+        tot_dr = voucher_entries.aggregate(Sum('debit'))['debit__sum'] or Decimal('0.00')
+        tot_cr = voucher_entries.aggregate(Sum('credit'))['credit__sum'] or Decimal('0.00')
+        if abs(tot_dr - tot_cr) > Decimal('0.001'):
+            raise ValueError(f"Unbalanced voucher rejected for Credit Note {credit_note.credit_note_number}: Dr ₹{tot_dr} != Cr ₹{tot_cr}")
+
         return True
 
     @classmethod
@@ -877,40 +954,63 @@ class AccountingService:
     def create_debit_note_entries(cls, debit_note):
         """
         Create accounting entries for a Purchase Return (Debit Note).
-        
-        Dr. Accounts Payable (Liability)        [Total Amount]
-            Cr. Purchases (Expense Reversal)    [Taxable Amount]
-            Cr. Input CGST (Asset Reversal)     [CGST Amount]
-            Cr. Input SGST (Asset Reversal)     [SGST Amount]
-            (or Cr. Input IGST for Interstate)
+        CA AUDIT (Issue 1):
+        Intra-state:
+          Dr. Accounts Payable (Liability)       [Total Amount]
+          Cr. Purchase Return (Expense contra)   [Taxable Amount]
+          Cr. Input CGST (Asset Reversal)        [CGST Amount]
+          Cr. Input SGST (Asset Reversal)        [SGST Amount]
+        Inter-state:
+          Dr. Accounts Payable (Liability)       [Total Amount]
+          Cr. Purchase Return (Expense contra)   [Taxable Amount]
+          Cr. Input IGST (Asset Reversal)        [IGST Amount]
         """
         user = debit_note.created_by
         accounts = cls.get_or_create_default_accounts(user)
+        pur_return_acc = accounts.get('purchase_return') or accounts.get('6002') or accounts['purchases']
+
         description = f"Purchase Return to {debit_note.vendor_name} - DN {debit_note.debit_note_number}"
         if debit_note.reason:
             description += f" ({debit_note.get_reason_display()})"
 
+        from billing.gst_utils import get_seller_state_code, get_pos_state_code
         tenant = getattr(user, 'active_tenant', user)
-        buyer_state = getattr(tenant, 'state', None) or getattr(user, 'state', None)
+        buyer_state_code = get_seller_state_code(tenant)
         vendor_state = None
         if debit_note.original_bill and debit_note.original_bill.vendor:
             vendor_state = getattr(debit_note.original_bill.vendor, 'state', None)
-
-        is_interstate = False
-        if buyer_state and vendor_state:
-            is_interstate = (buyer_state.strip().upper() != vendor_state.strip().upper())
+        vendor_pos_code = get_pos_state_code(vendor_state or debit_note.vendor_gstin, fallback_state=buyer_state_code)
+        is_interstate = (buyer_state_code != vendor_pos_code)
 
         items = list(debit_note.items.all()) if hasattr(debit_note, 'items') else []
-        total_tax = Decimal('0.00')
         total_taxable = Decimal('0.00')
+        total_cgst = Decimal('0.00')
+        total_sgst = Decimal('0.00')
+        total_igst = Decimal('0.00')
 
         if items:
             for item in items:
                 taxable, tax = cls._calculate_item_tax_split(item)
                 total_taxable += taxable
-                total_tax += tax
+                if is_interstate:
+                    total_igst += tax
+                else:
+                    line_cgst = (tax / Decimal('2')).quantize(Decimal('0.01'))
+                    line_sgst = tax - line_cgst
+                    total_cgst += line_cgst
+                    total_sgst += line_sgst
         else:
-            total_taxable = debit_note.total_amount
+            total_taxable = Decimal(str(debit_note.total_amount or '0.00'))
+
+        total_parts = total_taxable + total_cgst + total_sgst + total_igst
+
+        # If debit_note was saved with pre-tax amount, synchronize total_amount to gross
+        if Decimal(str(debit_note.total_amount or '0.00')) < total_parts and total_parts > Decimal('0.00'):
+            debit_note.total_amount = total_parts
+            from billing.models_returns import DebitNote
+            DebitNote.objects.filter(pk=debit_note.pk).update(total_amount=total_parts)
+
+        dn_total = Decimal(str(debit_note.total_amount or '0.00'))
 
         vendor_obj = getattr(debit_note, 'vendor', None)
         if not vendor_obj and debit_note.original_bill and getattr(debit_note.original_bill, 'vendor', None):
@@ -923,7 +1023,7 @@ class AccountingService:
         GeneralLedgerEntry.objects.create(
             date=debit_note.date,
             account=accounts['accounts_payable'],
-            debit=debit_note.total_amount,
+            debit=dn_total,
             credit=0,
             description=description,
             reference=debit_note.debit_note_number,
@@ -932,10 +1032,10 @@ class AccountingService:
             created_by=user
         )
 
-        # Credit: Purchases (reduce expense)
+        # Credit: Purchase Return (reduce expense)
         GeneralLedgerEntry.objects.create(
             date=debit_note.date,
-            account=accounts['purchases'],
+            account=pur_return_acc,
             debit=0,
             credit=total_taxable,
             description=description,
@@ -946,45 +1046,63 @@ class AccountingService:
         )
 
         # Credit: Input GST (reversal of input credit)
-        if total_tax > Decimal('0.00'):
-            if is_interstate:
-                GeneralLedgerEntry.objects.create(
-                    date=debit_note.date,
-                    account=accounts['input_igst'],
-                    debit=0,
-                    credit=total_tax,
-                    description=f"Input IGST Reversal - DN {debit_note.debit_note_number}",
-                    reference=debit_note.debit_note_number,
-                    debit_note=debit_note,
-                    vendor=vendor_obj,
-                    created_by=user
-                )
-            else:
-                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
-                sgst = total_tax - cgst
-                if cgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=debit_note.date,
-                        account=accounts['input_cgst'],
-                        debit=0,
-                        credit=cgst,
-                        description=f"Input CGST Reversal - DN {debit_note.debit_note_number}",
-                        reference=debit_note.debit_note_number,
-                        debit_note=debit_note,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
-                if sgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=debit_note.date,
-                        account=accounts['input_sgst'],
-                        debit=0,
-                        credit=sgst,
-                        description=f"Input SGST Reversal - DN {debit_note.debit_note_number}",
-                        reference=debit_note.debit_note_number,
-                        debit_note=debit_note,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
+        if total_igst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=debit_note.date,
+                account=accounts['input_igst'],
+                debit=0,
+                credit=total_igst,
+                description=f"Input IGST Reversal - DN {debit_note.debit_note_number}",
+                reference=debit_note.debit_note_number,
+                debit_note=debit_note,
+                vendor=vendor_obj,
+                created_by=user
+            )
+        if total_cgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=debit_note.date,
+                account=accounts['input_cgst'],
+                debit=0,
+                credit=total_cgst,
+                description=f"Input CGST Reversal - DN {debit_note.debit_note_number}",
+                reference=debit_note.debit_note_number,
+                debit_note=debit_note,
+                vendor=vendor_obj,
+                created_by=user
+            )
+        if total_sgst > Decimal('0.00'):
+            GeneralLedgerEntry.objects.create(
+                date=debit_note.date,
+                account=accounts['input_sgst'],
+                debit=0,
+                credit=total_sgst,
+                description=f"Input SGST Reversal - DN {debit_note.debit_note_number}",
+                reference=debit_note.debit_note_number,
+                debit_note=debit_note,
+                vendor=vendor_obj,
+                created_by=user
+            )
+
+        # Round Off difference if any
+        round_off_diff = (dn_total - total_parts).quantize(Decimal('0.01'))
+        if round_off_diff != Decimal('0.00'):
+            round_off_acc = accounts.get('rounding_off') or accounts.get('4200')
+            GeneralLedgerEntry.objects.create(
+                date=debit_note.date,
+                account=round_off_acc,
+                debit=0 if round_off_diff > 0 else abs(round_off_diff),
+                credit=round_off_diff if round_off_diff > 0 else 0,
+                description=f"Rounding off adjustment for DN {debit_note.debit_note_number}",
+                reference=debit_note.debit_note_number,
+                debit_note=debit_note,
+                created_by=user
+            )
+
+        # Strict Voucher Balance Verification
+        voucher_entries = GeneralLedgerEntry.objects.filter(debit_note=debit_note)
+        tot_dr = voucher_entries.aggregate(Sum('debit'))['debit__sum'] or Decimal('0.00')
+        tot_cr = voucher_entries.aggregate(Sum('credit'))['credit__sum'] or Decimal('0.00')
+        if abs(tot_dr - tot_cr) > Decimal('0.001'):
+            raise ValueError(f"Unbalanced voucher rejected for Debit Note {debit_note.debit_note_number}: Dr ₹{tot_dr} != Cr ₹{tot_cr}")
 
         return True

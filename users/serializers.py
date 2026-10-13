@@ -340,6 +340,16 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'trn': 'UAE Tax Registration Number (TRN) must be exactly 15 digits.'
                 })
+        # GSTIN and State mismatch validation
+        gstin = attrs.get('gstin', getattr(user, 'gstin', ''))
+        state = attrs.get('state', getattr(user, 'state', ''))
+        if gstin and state:
+            from billing.gst_utils import validate_gstin_state_match
+            is_valid, _gstin_code, _state_code, err_msg = validate_gstin_state_match(gstin, state)
+            if not is_valid:
+                raise serializers.ValidationError({
+                    'gstin': err_msg or "GSTIN state code does not match the selected company state."
+                })
         
         return attrs
     

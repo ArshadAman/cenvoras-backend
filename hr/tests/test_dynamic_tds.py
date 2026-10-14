@@ -260,7 +260,8 @@ class DynamicTDSEngineTests(TestCase):
         self.assertEqual(data['earnings']['basic'], '30000.00')
         self.assertEqual(data['earnings']['hra'], '15000.00')
         self.assertEqual(data['earnings']['special_allowance'], '15000.00')
-        self.assertEqual(data['employee_deductions']['employee_pf'], '3600.00')
+        # Statutory PF wage ceiling ₹15,000 → 12% = ₹1,800 (not uncapped 12% of Basic)
+        self.assertEqual(data['employee_deductions']['employee_pf'], '1800.00')
         self.assertEqual(data['tds_details']['monthly_tds'], '0.00')
         self.assertTrue(data['tds_details']['rebate_applied'])
 

@@ -347,12 +347,13 @@ def view_profile(request):
     if (tenant.business_name or '').strip(): completed_fields += 1
     if (user.first_name or '').strip(): completed_fields += 1
     if (user.last_name or '').strip(): completed_fields += 1
-    has_address = bool((tenant.business_address or '').strip())
+    from users.address_utils import is_meaningful_address
+    has_address = is_meaningful_address(tenant.business_address)
     if has_address: completed_fields += 1
     if (tenant.gstin or '').strip(): completed_fields += 1
     
     completion_percentage = int((completed_fields / total_fields) * 100)
-    # Address is required for 100% — never report complete without it
+    # Address is required for 100% — never report complete without a real address
     if not has_address:
         completion_percentage = min(completion_percentage, 85)
         if tenant.profile_completed:

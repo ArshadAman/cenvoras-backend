@@ -16,9 +16,9 @@ from ledger.models import Account, AccountType, GeneralLedgerEntry
 from ledger.services import AccountingService
 
 
-# Default rates (simplified): 194C uses 2% (non-individual / company rate).
+# Default rates: 194C is 1% (individual/HUF) or 2% (others) — see _tds_rate_for_section.
 TDS_SECTION_RATES = {
-    '194C': Decimal('2.00'),   # contractors — company/default rate (individuals are 1%)
+    '194C': Decimal('2.00'),   # company / non-individual default
     '194J': Decimal('10.00'),  # professional fees
     '194Q': Decimal('0.10'),   # purchase of goods
 }
@@ -40,6 +40,49 @@ def _bill_taxable_total(bill):
                 line = amt
         total += line
     return total.quantize(Decimal('0.01'))
+
+
+def _is_individual_or_huf_vendor(bill):
+    """
+    194C: 1% for individual/HUF, 2% for others.
+    Prefer bill.gst_treatment; else GSTIN 5th character (P=individual, H=HUF).
+    """
+    treatment = (getattr(bill, 'gst_treatment', None) or '').strip().lower()
+    if treatment in ('individual', 'huf', 'unregistered', 'consumer'):
+        return True
+    if treatment in ('business', 'company', 'regular', 'composition', 'sezu', 'sez'):
+        return False
+    gstin = (getattr(bill, 'vendor_gstin', None) or '').strip().upper()
+    if not gstin and getattr(bill, 'vendor', None):
+        gstin = (getattr(bill.vendor, 'gstin', None) or '').strip().upper()
+    # GSTIN[2:12]=PAN; PAN 4th char (entity type) is at GSTIN index 5
+    if len(gstin) >= 6:
+        return gstin[5] in ('P', 'H')
+    return False
+
+
+def _tds_rate_for_section(section, bill):
+    section = (section or '').strip().upper()
+    if section == '194C':
+        return Decimal('1.00') if _is_individual_or_huf_vendor(bill) else Decimal('2.00')
+    return TDS_SECTION_RATES.get(section, Decimal('0.00'))
+
+
+def _compute_tds_preview(bill, amount, tds_section):
+    """Return (rate, tds_amount, taxable_base, net_paid) for a payment amount."""
+    amount = Decimal(str(amount or 0)).quantize(Decimal('0.01'))
+    if not tds_section or amount <= 0:
+        return Decimal('0.00'), Decimal('0.00'), Decimal('0.00'), amount
+    rate = _tds_rate_for_section(tds_section, bill)
+    bill_total = Decimal(str(bill.total_amount or 0))
+    taxable_total = _bill_taxable_total(bill)
+    if bill_total > 0 and taxable_total > 0:
+        tds_base = (amount * taxable_total / bill_total).quantize(Decimal('0.01'))
+    else:
+        tds_base = amount
+    tds_amount = (tds_base * rate / Decimal('100')).quantize(Decimal('0.01'))
+    net_paid = (amount - tds_amount).quantize(Decimal('0.01'))
+    return rate, tds_amount, tds_base, net_paid
 
 
 def _is_cash_or_bank_account(account):
@@ -67,6 +110,14 @@ def unpaid_purchase_bills(request):
         due = (Decimal(str(bill.total_amount or 0)) - Decimal(str(bill.amount_paid or 0))).quantize(Decimal('0.01'))
         if due <= 0:
             continue
+        taxable_total = _bill_taxable_total(bill)
+        bill_total = Decimal(str(bill.total_amount or 0))
+        if bill_total > 0 and taxable_total > 0:
+            taxable_balance = (due * taxable_total / bill_total).quantize(Decimal('0.01'))
+        else:
+            taxable_balance = due
+        rate_194c = _tds_rate_for_section('194C', bill)
+        tds_194c = (taxable_balance * rate_194c / Decimal('100')).quantize(Decimal('0.01'))
         rows.append({
             'id': str(bill.id),
             'bill_number': bill.bill_number,
@@ -74,9 +125,15 @@ def unpaid_purchase_bills(request):
             'vendor_id': str(bill.vendor_id) if bill.vendor_id else None,
             'vendor_name': bill.vendor_name,
             'vendor_gstin': bill.vendor_gstin,
+            'gst_treatment': getattr(bill, 'gst_treatment', None),
+            'is_individual_or_huf': _is_individual_or_huf_vendor(bill),
             'total_amount': str(bill.total_amount),
             'amount_paid': str(bill.amount_paid),
             'balance_due': str(due),
+            'taxable_balance': str(taxable_balance),
+            'tds_rate_194c': str(rate_194c),
+            'tds_amount_194c': str(tds_194c),
+            'net_payable_194c': str((due - tds_194c).quantize(Decimal('0.01'))),
             'payment_status': bill.payment_status,
             'is_reverse_charge': bool(getattr(bill, 'is_reverse_charge', False)),
             'days_outstanding': (date.today() - bill.bill_date).days if bill.bill_date else None,
@@ -142,33 +199,25 @@ def vendor_payment_create(request):
             {'message': f'tds_section must be one of {list(TDS_SECTION_RATES)}'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    tds_rate = Decimal('0.00')
     if tds_section and tds_amount <= 0:
-        # Auto-compute on GST-exclusive taxable base (proportional for partial pays)
-        rate = TDS_SECTION_RATES[tds_section]
-        bill_total = Decimal(str(bill.total_amount or 0))
-        taxable_total = _bill_taxable_total(bill)
-        if bill_total > 0 and taxable_total > 0:
-            tds_base = (amount * taxable_total / bill_total).quantize(Decimal('0.01'))
-        else:
-            tds_base = amount
-        tds_amount = (tds_base * rate / Decimal('100')).quantize(Decimal('0.01'))
+        tds_rate, tds_amount, _tds_base, _net = _compute_tds_preview(bill, amount, tds_section)
+    elif tds_section:
+        tds_rate = _tds_rate_for_section(tds_section, bill)
     if tds_amount >= amount:
         return Response({'message': 'tds_amount must be less than payment amount'}, status=status.HTTP_400_BAD_REQUEST)
 
     net_paid = (amount - tds_amount).quantize(Decimal('0.01'))
 
-    bal_info = AccountingService.get_account_balance(payment_account, tenant)
-    balance = Decimal(str(bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info))
-    if balance < net_paid:
-        return Response(
-            {
-                'message': (
-                    f'Insufficient balance in {payment_account.name} ({payment_account.code}). '
-                    f'Available ₹{balance}, required ₹{net_paid}.'
-                )
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    from ledger.balance_checks import assert_sufficient_balance
+    try:
+        assert_sufficient_balance(payment_account, tenant, net_paid)
+    except Exception as exc:
+        # DRF ValidationError → 400 with message
+        detail = getattr(exc, 'detail', None) or str(exc)
+        if isinstance(detail, (list, dict)):
+            detail = str(detail)
+        return Response({'message': detail}, status=status.HTTP_400_BAD_REQUEST)
 
     accounts = AccountingService.get_or_create_default_accounts(tenant)
 
@@ -234,6 +283,7 @@ def vendor_payment_create(request):
         'amount': str(amount),
         'net_paid': str(net_paid),
         'tds_section': tds_section,
+        'tds_rate': str(tds_rate),
         'tds_amount': str(tds_amount),
         'amount_paid': str(bill.amount_paid),
         'payment_status': bill.payment_status,

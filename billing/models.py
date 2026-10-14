@@ -226,6 +226,14 @@ class PurchaseBillItem(models.Model):
     # Scheme Support (Phase 6)
     free_quantity = models.PositiveIntegerField(default=0, help_text="Qty received free under scheme")
 
+    def __str__(self):
+        bill_no = getattr(self.purchase_bill, 'bill_number', None) or '—'
+        try:
+            product_name = self.product.name if self.product_id else 'item'
+        except Exception:
+            product_name = 'item'
+        return f"Bill {bill_no}, item: {product_name}"
+
 
 class SalesInvoice(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

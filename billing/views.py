@@ -549,6 +549,7 @@ def sales_summary_analytics(request):
     this_month_invoices = len(this_month_invoices_list)
 
     from billing.models_returns import CreditNote
+    from billing.sales_metrics import sales_mtd
     # Subtract returns for accuracy - also scoped to tenant+team
     returns_base_qs = CreditNote.objects.filter(
         Q(created_by=tenant) | Q(created_by__parent=tenant)
@@ -561,10 +562,7 @@ def sales_summary_analytics(request):
         returns_qs = returns_qs.filter(date__lte=end_date)
     total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
     
-    month_returns = returns_base_qs.filter(
-        date__gte=this_month_start,
-        date__lte=today_ist,
-    ).aggregate(total=Sum('total_amount'))['total'] or 0
+    mtd = sales_mtd(tenant)
 
     return Response(
         {
@@ -572,10 +570,12 @@ def sales_summary_analytics(request):
             # Period revenue is net of credit notes in the same date filter
             'total_revenue': float(total_revenue - total_returns),
             'total_invoices': total_invoices,
-            # MTD card must match the sum of October (etc.) final invoices in the list
-            'this_month_revenue': float(this_month_revenue),
-            'this_month_revenue_net': float(this_month_revenue - month_returns),
-            'this_month_invoices': this_month_invoices,
+            # MTD = shared sales_metrics (dashboard / AI parity)
+            'this_month_revenue': float(mtd['gross']),
+            'this_month_revenue_net': float(mtd['net']),
+            'this_month_invoices': int(mtd['count']),
+            'sales_mtd': mtd,
+            'sales_label': mtd.get('label'),
         }
     )
 

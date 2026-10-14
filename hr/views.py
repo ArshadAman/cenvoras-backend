@@ -487,7 +487,9 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             ctc = Decimal('0.00')
 
         regime = (data.get('tax_regime') or 'new').lower()
-        work_state = data.get('work_state') or ''
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        from hr.services.work_state import resolve_work_state
+        work_state = resolve_work_state(tenant=tenant, work_state=data.get('work_state') or '')
         custom_components = data.get('components') or {}
 
         if ctc <= Decimal('0.00'):
@@ -578,14 +580,13 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         # Realized gross salary for this pay cycle (Contracted Gross + Ad-hoc Additions)
         gross_salary = contracted_gross_salary + ad_hoc_monthly_total
 
-        tenant = getattr(request.user, 'active_tenant', request.user)
         hrms_settings = get_hrms_settings(tenant)
         from hr.services.payroll_engine import compute_pf, compute_esi
         pf_parts = compute_pf(basic, hrms_settings)
         esi_parts = compute_esi(gross_salary, hrms_settings)
         employee_pf = pf_parts['employee_pf']
         employee_esi = esi_parts['employee_esi']
-        pt = compute_pt(gross_salary, work_state)
+        pt = compute_pt(gross_salary, work_state, tenant=tenant)
 
         decl = data.get('declarations') or {}
         preview_month = data.get('month')
@@ -884,15 +885,17 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             elif is_weekend:
                 holiday_count += 1
 
+            check_in = getattr(rec, 'check_in', None) if rec else None
+            check_out = getattr(rec, 'check_out', None) if rec else None
             days_list.append({
                 'date': cur_date.isoformat(),
                 'day': cur_date.strftime('%a'),
                 'day_name': cur_date.strftime('%a'),
                 'day_number': d,
                 'status': day_status,
-                'check_in': rec.check_in.strftime('%H:%M') if rec and rec.check_in else None,
-                'check_out': rec.check_out.strftime('%H:%M') if rec and rec.check_out else None,
-                'notes': rec.notes if rec else '',
+                'check_in': check_in.strftime('%H:%M') if check_in else None,
+                'check_out': check_out.strftime('%H:%M') if check_out else None,
+                'notes': (getattr(rec, 'notes', None) or '') if rec else '',
                 'is_weekend': is_weekend,
             })
 
@@ -1481,14 +1484,12 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
                 "Receivables and other asset accounts are not allowed."
             )
 
-        total_net = instance.total_net or Decimal('0.00')
-        bal_info = AccountingService.get_account_balance(payment_account, instance.tenant)
-        balance = Decimal(str(bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info))
-        if balance < total_net:
-            raise ValidationError(
-                f"Insufficient balance in {payment_account.name} ({payment_account.code}). "
-                f"Available ₹{balance}, required ₹{total_net}."
-            )
+        # Required = sum of payslip nets (same figure credited to GL), not stale run.total_net
+        from django.db.models import Sum as _Sum
+        payslip_net = instance.payslips.aggregate(s=_Sum('net_salary'))['s']
+        total_net = Decimal(str(payslip_net if payslip_net is not None else (instance.total_net or 0))).quantize(Decimal('0.01'))
+        from ledger.balance_checks import assert_sufficient_balance
+        assert_sufficient_balance(payment_account, instance.tenant, total_net)
         warnings = []
         if code == '1001' and total_net > Decimal('10000.00'):
             warnings.append(
@@ -2325,6 +2326,24 @@ class HRDocumentViewSet(viewsets.ModelViewSet):
         if emp_id:
             qs = qs.filter(employee_id=emp_id)
         return qs
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        tenant = getattr(user, 'active_tenant', user)
+        try:
+            self.perform_create(serializer)
+        except Exception as exc:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            if isinstance(exc, (ValidationError, DRFValidationError)):
+                raise
+            return Response(
+                {'detail': f'Could not save document: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
         user = self.request.user

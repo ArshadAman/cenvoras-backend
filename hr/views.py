@@ -591,6 +591,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         decl = data.get('declarations') or {}
         preview_month = data.get('month')
         preview_year = data.get('year')
+        joining_raw = data.get('date_of_joining') or data.get('joining_date')
         tds_preview = preview_monthly_tds(
             monthly_gross=gross_salary,
             regime=regime,
@@ -602,6 +603,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             section_80d=Decimal(str(decl.get('section_80d') or 0)),
             section_24b=Decimal(str(decl.get('section_24b_home_loan') or 0)),
             hra_exemption=Decimal(str(decl.get('hra_exemption') or 0)),
+            date_of_joining=joining_raw,
         )
         monthly_tds = tds_preview['monthly_tds']
         annual_gross = tds_preview['projected_annual_gross']

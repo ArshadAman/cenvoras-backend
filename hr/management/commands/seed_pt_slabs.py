@@ -44,10 +44,16 @@ class Command(BaseCommand):
             ("Madhya Pradesh", 22501, 30000, 125),
             ("Madhya Pradesh", 30001, 40000, 167),
             ("Madhya Pradesh", 40001, None, 200),
+
+            # Odisha PT repealed w.e.f. 1 Apr 2026 — explicit ₹0 so lookups are honest.
+            # Confirm with local CA if state portal still shows legacy rates.
+            ("Odisha", 0, None, 0),
         ]
 
         # Replace Karnataka rows so obsolete ₹15k threshold does not linger
         ProfessionalTaxSlab.objects.filter(state_name='Karnataka').delete()
+        # Replace Odisha so any pre-repeal positive slabs do not linger
+        ProfessionalTaxSlab.objects.filter(state_name='Odisha').delete()
 
         count = 0
         for state, lower, upper, amount in slabs:
@@ -64,5 +70,5 @@ class Command(BaseCommand):
             count += 1
 
         self.stdout.write(
-            self.style.SUCCESS(f'Successfully seeded {count} Professional Tax slabs for 8 states.')
+            self.style.SUCCESS(f'Successfully seeded {count} Professional Tax slabs (incl. Odisha Rs 0).')
         )

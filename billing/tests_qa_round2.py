@@ -88,12 +88,15 @@ class Vendor194CRateTests(TestCase):
         bank = AccountingService.get_or_create_default_accounts(self.tenant).get('1002')
         GeneralLedgerEntry.objects.create(
             date=date.today(), account=bank,
-            debit=Decimal('100000.00'), credit=0,
+            debit=Decimal('500000.00'), credit=0,
             description='seed', reference='SEED-194', created_by=self.tenant,
         )
         self.bank = bank
 
-    def _pay(self, gstin, expected_tds):
+    def _pay(self, gstin, expected_tds, taxable=Decimal('50000.00'), tax_pct=Decimal('18.00')):
+        """taxable must exceed ₹30k single-payment threshold for 194C to apply."""
+        gst_amt = (taxable * tax_pct / Decimal('100')).quantize(Decimal('0.01'))
+        total = (taxable + gst_amt).quantize(Decimal('0.01'))
         vendor = Vendor.objects.create(
             name=f'V-{gstin[:6]}', gstin=gstin, state='Karnataka', created_by=self.tenant,
         )
@@ -104,19 +107,19 @@ class Vendor194CRateTests(TestCase):
             vendor=vendor,
             vendor_name=vendor.name,
             vendor_gstin=gstin,
-            total_amount=Decimal('1180.00'),
+            total_amount=total,
         )
         PurchaseBillItem.objects.create(
             purchase_bill=bill, product=self.product,
-            quantity=1, price=Decimal('1000.00'), tax=Decimal('18.00'),
-            amount=Decimal('1180.00'), hsn_sac_code='998311',
+            quantity=1, price=taxable, tax=tax_pct,
+            amount=total, hsn_sac_code='998311',
         )
         AccountingService.create_purchase_bill_entries(bill)
         res = self.client.post(
             '/api/billing/vendor-payments/',
             {
                 'bill_id': str(bill.id),
-                'amount': '1180.00',
+                'amount': str(total),
                 'payment_account_id': str(self.bank.id),
                 'mode': 'bank_transfer',
                 'tds_section': '194C',
@@ -125,13 +128,55 @@ class Vendor194CRateTests(TestCase):
         )
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
         self.assertEqual(Decimal(str(res.data['tds_amount'])), expected_tds)
-        self.assertEqual(Decimal(str(res.data['net_paid'])), Decimal('1180.00') - expected_tds)
+        self.assertEqual(Decimal(str(res.data['net_paid'])), total - expected_tds)
         return res
 
     def test_194c_company_2_percent(self):
-        # Entity char C (company) at GSTIN index 5
-        self._pay('29AABCU1234F1Z5', Decimal('20.00'))
+        # Entity char C (company) at GSTIN index 5 — 2% of ₹50,000 = ₹1,000
+        self._pay('29AABCU1234F1Z5', Decimal('1000.00'))
 
     def test_194c_individual_1_percent(self):
-        # Entity char P (individual) at GSTIN index 5
-        self._pay('29AAPPU0939F1Z5', Decimal('10.00'))
+        # Entity char P (individual) at GSTIN index 5 — 1% of ₹50,000 = ₹500
+        self._pay('29AAPPU0939F1Z5', Decimal('500.00'))
+
+    def test_194c_below_threshold_zero_tds(self):
+        """Single payment ≤ ₹30k with FY aggregate ≤ ₹1L → no 194C deduction."""
+        self._pay('29AABCU9999F1Z5', Decimal('0.00'), taxable=Decimal('1000.00'))
+
+    def test_194c_no_pan_20_percent(self):
+        """No GSTIN/PAN → Sec 206AA 20% when threshold met."""
+        gst_amt = (Decimal('50000.00') * Decimal('18') / Decimal('100')).quantize(Decimal('0.01'))
+        total = Decimal('50000.00') + gst_amt
+        vendor = Vendor.objects.create(
+            name='NoPAN Vendor', gstin='', state='Karnataka', created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number='PB-NOPAN',
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin='',
+            gst_treatment='unregistered',
+            total_amount=total,
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill, product=self.product,
+            quantity=1, price=Decimal('50000.00'), tax=Decimal('18.00'),
+            amount=total, hsn_sac_code='998311',
+        )
+        AccountingService.create_purchase_bill_entries(bill)
+        res = self.client.post(
+            '/api/billing/vendor-payments/',
+            {
+                'bill_id': str(bill.id),
+                'amount': str(total),
+                'payment_account_id': str(self.bank.id),
+                'mode': 'bank_transfer',
+                'tds_section': '194C',
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(Decimal(str(res.data['tds_amount'])), Decimal('10000.00'))
+        self.assertFalse(res.data['vendor_has_pan'])

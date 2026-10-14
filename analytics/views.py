@@ -428,7 +428,7 @@ def dashboard_summary(request):
             tax_amount = (taxable_value * tax_rate) / Decimal('100')
             gst_paid += tax_amount
 
-        gst_payable = gst_collected - gst_paid
+        gst_payable = (gst_collected - gst_paid).quantize(Decimal('0.01'))
 
         # Sales vs Purchases Chart Data (Monthly aggregation)
         sales_by_month = sales_qs.annotate(

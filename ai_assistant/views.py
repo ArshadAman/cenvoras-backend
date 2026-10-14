@@ -22,13 +22,23 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = getattr(settings, 'GEMINI_API_KEY', 'demo_gemini_key')
 
 
+def _ist_today():
+    """Business calendar day in Asia/Kolkata (matches dashboard / sales analytics)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
+    except Exception:
+        return timezone.localdate()
+
+
 def gather_business_context(user):
     """Pull comprehensive live business data to feed as context to Gemini."""
     from billing.models import SalesInvoice, SalesInvoiceItem, Customer, Payment, PurchaseBill, Vendor
     from inventory.models import Product, ProductBatch, StockPoint
+    from decimal import Decimal
 
     tenant = getattr(user, 'active_tenant', user)
-    today = timezone.localdate()
+    today = _ist_today()
     month_start = today.replace(day=1)
     week_start = today - timedelta(days=today.weekday())
 
@@ -42,9 +52,21 @@ def gather_business_context(user):
         count=Count('id'), total=Sum('total_amount')
     )
 
-    sales_month = final_sales.filter(invoice_date__gte=month_start).aggregate(
+    sales_month = final_sales.filter(
+        invoice_date__gte=month_start, invoice_date__lte=today
+    ).aggregate(
         count=Count('id'), total=Sum('total_amount')
     )
+    # Net of credit notes (same basis as dashboard total_sales for the month slice)
+    try:
+        from billing.models_returns import CreditNote
+        cn_month = CreditNote.objects.filter(
+            created_by=tenant, date__gte=month_start, date__lte=today
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+        sales_month_net = float((sales_month['total'] or Decimal('0')) - cn_month)
+    except Exception:
+        cn_month = Decimal('0')
+        sales_month_net = float(sales_month['total'] or 0)
 
     # Previous month for comparison
     prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
@@ -75,12 +97,12 @@ def gather_business_context(user):
         .order_by('-qty_sold')[:5]
     )
 
-    # Low stock — match dashboard alert query (stock < alert, alert > 0)
-    low_stock = list(
-        Product.objects.filter(created_by=tenant, low_stock_alert__gt=0)
-        .filter(stock__lt=F('low_stock_alert'))
-        .values('name', 'stock', 'low_stock_alert')[:10]
+    # Low stock — match dashboard: stock <= alert (includes zero-alert edge cases)
+    low_stock_qs = Product.objects.filter(created_by=tenant).filter(
+        stock__lte=F('low_stock_alert')
     )
+    low_stock_count = low_stock_qs.count()
+    low_stock = list(low_stock_qs.values('name', 'stock', 'low_stock_alert')[:25])
 
     # In-stock products (for invoice creation suggestions)
     in_stock_products = list(
@@ -159,56 +181,43 @@ def gather_business_context(user):
             'mrp': float(b['mrp'] or 0),
         })
 
-    # GST data — real tax amounts (never Sum('tax') rates); final invoices only
-    from decimal import Decimal
-    from billing.gst_utils import calculate_item_tax_breakup, is_interstate_supply
+    # GST — same line-level formula as analytics dashboard (excl. drafts)
+    from billing.models import PurchaseBillItem
 
-    gst_invoices_month = list(
-        final_sales.filter(invoice_date__gte=month_start)
-        .select_related('customer')
-        .prefetch_related('items__product')
-    )
-    gst_sales_total = sum((inv.total_amount or Decimal('0') for inv in gst_invoices_month), Decimal('0'))
-    gst_output_tax = Decimal('0.00')
-    for inv in gst_invoices_month:
-        pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None)
-        try:
-            is_inter = is_interstate_supply(tenant, pos_raw)
-        except Exception:
-            is_inter = False
-        for item in inv.items.all():
-            if getattr(item, 'row_type', 'item') == 'note':
-                continue
-            _taxable, tax_amt, _c, _s, _i, _rt = calculate_item_tax_breakup(item, is_inter)
-            gst_output_tax += tax_amt
+    def _line_tax(item):
+        qty = Decimal(str(item.quantity or 0))
+        price = Decimal(str(item.price or 0))
+        discount_pct = Decimal(str(item.discount or 0))
+        tax_rate = Decimal(str(item.tax or 0))
+        line_value = qty * price
+        discount_amount = (line_value * discount_pct) / Decimal('100')
+        taxable_value = line_value - discount_amount
+        return (taxable_value * tax_rate) / Decimal('100')
 
-    # ITC from ledger Input GST (Output − Input = net GST owed)
-    gst_input_tax = Decimal('0.00')
+    sales_items_all = SalesInvoiceItem.objects.filter(
+        sales_invoice__created_by=tenant,
+    ).exclude(sales_invoice__status='draft')
+    gst_collected = sum((_line_tax(i) for i in sales_items_all.iterator()), Decimal('0.00'))
+    purchase_items_all = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
+    gst_paid = sum((_line_tax(i) for i in purchase_items_all.iterator()), Decimal('0.00'))
+    gst_tax_total = gst_collected
+    gst_input_tax = gst_paid
+    net_gst_payable = gst_collected - gst_paid
+
+    # Month sales total for GST block (final + credit-note net)
+    gst_sales_total = Decimal(str(sales_month_net))
+
+    # Dashboard all-time sales (excl. drafts, minus credit notes) — matches dashboard KPI
+    dash_sales_qs = SalesInvoice.objects.filter(created_by=tenant).exclude(status='draft')
+    dash_invoices_total = dash_sales_qs.aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
     try:
-        from ledger.models import GeneralLedgerEntry
-        itc_totals = GeneralLedgerEntry.objects.filter(
-            created_by=tenant,
-            date__gte=month_start,
-            date__lte=today,
-            account__code__in=['1301', '1302', '1303'],
-            purchase_bill__isnull=False,
-            debit__gt=0,
-        ).aggregate(s=Sum('debit'))
-        gst_input_tax = itc_totals['s'] or Decimal('0.00')
-        rev_totals = GeneralLedgerEntry.objects.filter(
-            created_by=tenant,
-            date__gte=month_start,
-            date__lte=today,
-            account__code__in=['1301', '1302', '1303'],
-            debit_note__isnull=False,
-            credit__gt=0,
-        ).aggregate(s=Sum('credit'))
-        gst_input_tax = max(gst_input_tax - (rev_totals['s'] or Decimal('0.00')), Decimal('0.00'))
+        from billing.models_returns import CreditNote as _CN
+        dash_returns = _CN.objects.filter(created_by=tenant).aggregate(
+            total=Sum('total_amount')
+        )['total'] or Decimal('0')
     except Exception:
-        logger.exception('AI context: failed to compute ledger ITC')
-
-    gst_tax_total = gst_output_tax
-    net_gst_payable = max(gst_output_tax - gst_input_tax, Decimal('0.00'))
+        dash_returns = Decimal('0')
+    dashboard_total_sales = float(dash_invoices_total - dash_returns)
 
     gst_purchases_month = PurchaseBill.objects.filter(
         created_by=tenant, bill_date__gte=month_start
@@ -269,8 +278,20 @@ def gather_business_context(user):
         # Sales
         "sales_today": {"count": sales_today['count'], "total": float(sales_today['total'] or 0)},
         "sales_this_week": {"count": sales_week['count'], "total": float(sales_week['total'] or 0)},
-        "sales_this_month": {"count": sales_month['count'], "total": float(sales_month['total'] or 0)},
+        "sales_this_month": {
+            "count": sales_month['count'],
+            "total": sales_month_net,
+            "gross": float(sales_month['total'] or 0),
+        },
         "sales_last_month": {"count": sales_prev_month['count'], "total": float(sales_prev_month['total'] or 0)},
+        # Dashboard-aligned KPIs (use these when answering "total sales" / "GST payable" / "low stock")
+        "dashboard": {
+            "total_sales": dashboard_total_sales,
+            "gst_payable": float(net_gst_payable),
+            "gst_collected": float(gst_collected),
+            "gst_paid": float(gst_paid),
+            "low_stock_count": low_stock_count,
+        },
         # Purchases
         "purchases_this_month": {"count": purchases_month['count'], "total": float(purchases_month['total'] or 0)},
         "purchases_last_month": {"count": purchases_prev_month['count'], "total": float(purchases_prev_month['total'] or 0)},
@@ -279,6 +300,7 @@ def gather_business_context(user):
             {"name": p['product__name'], "qty_sold": p['qty_sold'], "revenue": float(p['revenue'])}
             for p in top_products
         ],
+        "low_stock_count": low_stock_count,
         "low_stock_items": [
             {"name": i['name'], "stock": i['stock'], "alert_level": i['low_stock_alert']}
             for i in low_stock
@@ -385,7 +407,7 @@ class AIChatView(APIView):
 
         # TDS / income-tax questions → payroll engine (not LLM)
         from .services.invoice_service import answer_tds_question, enrich_invoice_draft_entities
-        tds_answer = answer_tds_question(question)
+        tds_answer = answer_tds_question(question, user=request.user)
         if tds_answer:
             return Response({
                 "answer": tds_answer,
@@ -577,13 +599,24 @@ class AIChatView(APIView):
             s = ctx['sales_this_month']
             return f"**Sales This Month:** {s['count']} invoices totaling **₹{s['total']:,.2f}**"
 
+        if ('total sale' in q_lower or 'sales total' in q_lower or q_lower.strip() in ('sales', 'my sales')):
+            dash = ctx.get('dashboard') or {}
+            return (
+                f"**Total Sales (dashboard):** **₹{dash.get('total_sales', 0):,.2f}**\n"
+                f"GST payable: **₹{dash.get('gst_payable', 0):,.2f}** · "
+                f"Low stock items: **{dash.get('low_stock_count', 0)}**"
+            )
+
         if 'low stock' in q_lower:
-            items = ctx['low_stock_items']
-            if not items:
-                return "✅ All products are above alert levels."
-            lines = ["⚠️ **Low Stock Items:**\n"]
+            items = ctx.get('low_stock_items') or []
+            count = ctx.get('low_stock_count') or ctx.get('dashboard', {}).get('low_stock_count') or len(items)
+            if not count:
+                return "All products are above alert levels."
+            lines = [f"**Low Stock Items ({count}):**\n"]
             for i in items:
                 lines.append(f"• **{i['name']}** — {i['stock']} left (alert: {i['alert_level']})")
+            if count > len(items):
+                lines.append(f"\n_…and {count - len(items)} more (see Inventory / Dashboard)._")
             return "\n".join(lines)
 
         if 'pending' in q_lower or 'receivable' in q_lower:
@@ -616,13 +649,15 @@ class AIChatView(APIView):
 
         if 'gst' in q_lower or 'gstr' in q_lower:
             g = ctx.get('gst_this_month', {})
+            dash = ctx.get('dashboard') or {}
+            payable = dash.get('gst_payable', g.get('net_gst_payable', 0))
             return (
-                f"📊 **GST Summary This Month:**\n\n"
-                f"• Sales Total: **₹{g.get('sales_total', 0):,.2f}**\n"
-                f"• Tax Collected (Output): **₹{g.get('tax_collected', 0):,.2f}**\n"
-                f"• Purchases Total: **₹{g.get('purchase_total', 0):,.2f}**\n"
-                f"• Net GST Payable: **₹{g.get('net_gst_payable', 0):,.2f}**\n\n"
-                f"*Use this data for GSTR-1 and GSTR-3B filing.*"
+                f"**GST Summary (dashboard-aligned):**\n\n"
+                f"• Sales Total: **₹{dash.get('total_sales', g.get('sales_total', 0)):,.2f}**\n"
+                f"• Tax Collected (Output): **₹{dash.get('gst_collected', g.get('tax_collected', 0)):,.2f}**\n"
+                f"• ITC / Tax on purchases: **₹{dash.get('gst_paid', g.get('itc_available', 0)):,.2f}**\n"
+                f"• Net GST Payable: **₹{payable:,.2f}**\n\n"
+                f"*Matches the Dashboard GST payable figure.*"
             )
 
         if 'customer' in q_lower and ('list' in q_lower or 'info' in q_lower or 'all' in q_lower):

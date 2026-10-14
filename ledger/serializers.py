@@ -6,14 +6,32 @@ class AccountSerializer(serializers.ModelSerializer):
     """Serializer for Chart of Accounts"""
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     parent_account_name = serializers.CharField(source='parent_account.name', read_only=True)
+    current_balance = serializers.SerializerMethodField()
     
     class Meta:
         model = Account
         fields = [
             'id', 'code', 'name', 'account_type', 'parent_account', 'parent_account_name',
-            'description', 'is_active', 'created_by', 'created_at'
+            'description', 'is_active', 'created_by', 'created_at', 'current_balance',
         ]
-        read_only_fields = ['id', 'parent_account_name', 'created_by', 'created_at']
+        read_only_fields = [
+            'id', 'parent_account_name', 'created_by', 'created_at', 'current_balance',
+        ]
+
+    def get_current_balance(self, obj):
+        request = self.context.get('request')
+        tenant = None
+        if request and hasattr(request, 'user'):
+            tenant = getattr(request.user, 'active_tenant', request.user)
+        if tenant is None:
+            tenant = getattr(obj, 'created_by', None)
+        try:
+            from ledger.services import AccountingService
+            bal_info = AccountingService.get_account_balance(obj, tenant)
+            bal = bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info
+            return str(bal)
+        except Exception:
+            return '0.00'
     
     def create(self, validated_data):
         user = self.context['request'].user

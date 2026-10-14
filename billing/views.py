@@ -569,9 +569,12 @@ def sales_summary_analytics(request):
     return Response(
         {
             'success': True,
+            # Period revenue is net of credit notes in the same date filter
             'total_revenue': float(total_revenue - total_returns),
             'total_invoices': total_invoices,
-            'this_month_revenue': float(this_month_revenue - month_returns),
+            # MTD card must match the sum of October (etc.) final invoices in the list
+            'this_month_revenue': float(this_month_revenue),
+            'this_month_revenue_net': float(this_month_revenue - month_returns),
             'this_month_invoices': this_month_invoices,
         }
     )

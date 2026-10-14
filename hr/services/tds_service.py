@@ -178,6 +178,31 @@ def compute_tax_on_income(taxable_income, regime='new', fy_string=None, month=No
     return base_tax, rebate_applied or marginal_relief_applied, rebate_amount, cess, total_annual_tax
 
 
+def project_annual_gross(
+    current_month_gross,
+    ytd_gross,
+    remaining_months,
+    month_idx_in_fy,
+    previous_income=Decimal('0.00'),
+):
+    """
+    Project FY annual gross for Sec 192 withholding.
+
+    When YTD payslips are empty/missing mid-FY, assume elapsed months at the
+    current monthly gross so we do not under-project into a false Sec 87A zero.
+    When real YTD exists, prefer it (trustworthy payslip history).
+    """
+    current_gross = Decimal(str(current_month_gross)).quantize(Decimal('0.01'))
+    ytd = Decimal(str(ytd_gross or 0)).quantize(Decimal('0.01'))
+    prev = Decimal(str(previous_income or 0)).quantize(Decimal('0.01'))
+    remaining = max(1, int(remaining_months))
+    elapsed = max(0, int(month_idx_in_fy) - 1)
+    assumed_past = (current_gross * Decimal(str(elapsed))).quantize(Decimal('0.01'))
+    past_gross = ytd if ytd > Decimal('0.00') else assumed_past
+    projected_remaining = (current_gross * Decimal(str(remaining))).quantize(Decimal('0.01'))
+    return (past_gross + projected_remaining + prev).quantize(Decimal('0.01'))
+
+
 def compute_dynamic_tds(employee, current_month_gross, month, year):
     """
     Computes dynamic monthly Tax Deducted at Source (TDS under Section 192) for an employee.
@@ -261,10 +286,15 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
         other_exemptions = Decimal('0.00')
         total_exemptions = standard_deduction
 
-    # 3. Projected Annual Gross Income
+    # 3. Projected Annual Gross Income (mid-FY empty YTD uses assumed past months)
     current_gross = Decimal(str(current_month_gross)).quantize(Decimal('0.01'))
-    projected_remaining_gross = (current_gross * Decimal(str(remaining_months))).quantize(Decimal('0.01'))
-    projected_annual_gross = (ytd_gross + projected_remaining_gross + previous_income).quantize(Decimal('0.01'))
+    projected_annual_gross = project_annual_gross(
+        current_gross,
+        ytd_gross,
+        remaining_months,
+        month_idx,
+        previous_income=previous_income,
+    )
 
     # 4. Net Taxable Income
     net_taxable_income = max(Decimal('0.00'), projected_annual_gross - total_exemptions).quantize(Decimal('0.01'))
@@ -277,17 +307,46 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
     )
 
     # 6. Monthly TDS Spreading
+    # When YTD gross was assumed (no payslips mid-FY), also assume levelized YTD TDS
+    # so the current month matches full-year levelized withholding (preview parity),
+    # instead of catching up the full annual tax over remaining months only.
+    elapsed = max(0, month_idx - 1)
+    effective_ytd_tds = ytd_tds
+    if (
+        ytd_gross <= Decimal('0.00')
+        and elapsed > 0
+        and ytd_tds <= Decimal('0.00')
+        and total_annual_tax > Decimal('0.00')
+    ):
+        effective_ytd_tds = (
+            total_annual_tax * Decimal(str(elapsed)) / Decimal('12')
+        ).quantize(Decimal('0.01'))
+
     if total_annual_tax <= Decimal('0.00'):
         monthly_tds = Decimal('0.00')
     else:
-        total_tax_paid = ytd_tds + previous_tds
+        total_tax_paid = effective_ytd_tds + previous_tds
         remaining_tax = max(Decimal('0.00'), total_annual_tax - total_tax_paid)
         monthly_tds = (remaining_tax / Decimal(str(remaining_months))).quantize(Decimal('0.01'))
+
+    nil_tax_87a = (
+        rebate_applied
+        and monthly_tds == Decimal('0.00')
+        and total_annual_tax == Decimal('0.00')
+    )
+    rebate_threshold = (
+        cfg['new_rebate_threshold'] if regime == 'new' else cfg['old_rebate_threshold']
+    )
+    marginal_relief = (
+        rebate_applied
+        and net_taxable_income > rebate_threshold
+        and total_annual_tax > Decimal('0.00')
+    )
 
     # 7. Descriptive Rationale
     regime_label = "New Regime (Sec 115BAC)" if regime == 'new' else "Old Tax Regime"
     if monthly_tds == Decimal('0.00'):
-        if rebate_applied:
+        if nil_tax_87a:
             reason = (
                 f"TDS skipped ({regime_label}): Projected taxable income (Rs. {net_taxable_income:,.2f}) "
                 f"is within Section 87A rebate threshold (Annual tax: Rs. 0.00)."
@@ -315,6 +374,8 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
         'cess': cess,
         'rebate_applied': rebate_applied,
         'rebate_amount': rebate_amount,
+        'nil_tax_87a': nil_tax_87a,
+        'marginal_relief': marginal_relief,
         'ytd_gross': ytd_gross,
         'ytd_tds': ytd_tds,
         'remaining_months': remaining_months,
@@ -324,9 +385,7 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
         'total_exemptions': total_exemptions,
         'reason': reason,
         'q4_unverified_dropped': q4_unverified_dropped,
-        'rebate_threshold': (
-            cfg['new_rebate_threshold'] if regime == 'new' else cfg['old_rebate_threshold']
-        ),
+        'rebate_threshold': rebate_threshold,
     }
 
 

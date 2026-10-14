@@ -143,6 +143,9 @@ class PurchaseBill(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    def __str__(self):
+        return f"{self.bill_number} — {self.vendor_name}"
+
     def refresh_payment_status(self, save=True):
         if self.amount_paid <= 0:
             status_value = BillPaymentStatus.PENDING

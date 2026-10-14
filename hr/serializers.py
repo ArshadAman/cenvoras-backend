@@ -203,7 +203,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
         total_employer = employer_epf + employer_eps + employer_esi
 
         is_rebate = rebate_applied  # True for full rebate or marginal relief
-        marginal_relief = rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
+        marginal_relief = bool(tds_data.get('marginal_relief')) or (
+            rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
+        )
+        nil_tax_87a = bool(tds_data.get('nil_tax_87a')) or (
+            rebate_applied and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00')
+        )
 
         # Clean display dictionary for earnings (Title Case, no duplicate lower/upper keys)
         earnings_dict = {
@@ -246,13 +251,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'total_employer_contribution': str(total_employer),
         }
 
-        if is_rebate and annual_tax == Decimal('0.00'):
+        if nil_tax_87a:
             tds_reason_str = 'Zero tax under Section 87A rebate limit'
         elif marginal_relief:
             excess = taxable - rebate_threshold
             tds_reason_str = f'Marginal Relief applied (Sec 87A): Income exceeds threshold by ₹{excess:,.2f}. Tax capped at excess + 4% cess = ₹{annual_tax:,.2f}/year.'
         else:
-            tds_reason_str = ''
+            tds_reason_str = tds_data.get('reason') or ''
 
         tds_dict = {
             'monthly_tds': str(estimated_tds),
@@ -261,6 +266,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'taxable_income': str(taxable),
             'standard_deduction': str(std_ded),
             'rebate_applied': is_rebate,
+            'nil_tax_87a': nil_tax_87a,
             'marginal_relief': marginal_relief,
             'reason': tds_reason_str,
         }
@@ -299,6 +305,17 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError("Assigned user does not belong to the active tenant.")
         return value
 
+    def validate_work_state(self, value):
+        """Persist full state name so PT slabs match (KA / 29 → Karnataka)."""
+        state = (value or '').strip()
+        if not state:
+            return state
+        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
+        code = normalize_state_code(state)
+        if code and code in CODE_TO_STATE_NAME:
+            return CODE_TO_STATE_NAME[code]
+        return state
+
     def create(self, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
@@ -310,11 +327,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 tenant = getattr(request.user, 'active_tenant', request.user)
             company_state = getattr(tenant, 'state', None) if tenant else None
             if company_state:
-                from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
-                code = normalize_state_code(company_state)
-                validated_data['work_state'] = (
-                    CODE_TO_STATE_NAME.get(code, company_state) if code else company_state
-                )
+                validated_data['work_state'] = self.validate_work_state(company_state)
+        elif validated_data.get('work_state'):
+            validated_data['work_state'] = self.validate_work_state(validated_data['work_state'])
         employee = super().create(validated_data)
         if employee.employment_type != 'contract':
             self._handle_salary_assignment(employee, salary_data)
@@ -325,6 +340,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
+        if 'work_state' in validated_data and validated_data.get('work_state'):
+            validated_data['work_state'] = self.validate_work_state(validated_data['work_state'])
         employee = super().update(instance, validated_data)
         if employee.employment_type != 'contract':
             if salary_data is not None:
@@ -943,18 +960,19 @@ class PayslipSerializer(serializers.ModelSerializer):
     def get_lop_amount(self, obj):
         """
         Informational docked amount implied by proration (full CTC − prorated gross).
-        Not a separate deduction — gross is already post-LOP.
+        Uses payable days (= working − LOP), not present-only (paid leave is payable).
         """
         if obj.lop_days > 0 and obj.total_working_days:
             working_days = Decimal(str(obj.total_working_days))
-            present_days = Decimal(str(obj.present_days or 0))
-            if working_days > 0 and present_days < working_days:
-                # Reverse-engineer full-month gross from prorated gross
+            lop_days = Decimal(str(obj.lop_days))
+            payable_days = working_days - lop_days
+            if working_days > 0 and payable_days > 0 and lop_days > 0:
                 full_gross = (
-                    (Decimal(str(obj.gross_salary)) * working_days / present_days)
-                    if present_days > 0 else Decimal(str(obj.gross_salary))
-                )
+                    Decimal(str(obj.gross_salary)) * working_days / payable_days
+                ).quantize(Decimal('0.01'))
                 return str((full_gross - Decimal(str(obj.gross_salary))).quantize(Decimal('0.01')))
+            if payable_days <= 0:
+                return str(Decimal(str(obj.gross_salary)).quantize(Decimal('0.01')))
         return '0.00'
 
 

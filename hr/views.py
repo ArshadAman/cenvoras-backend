@@ -843,6 +843,29 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         absent_count = 0
         holiday_count = 0
 
+        # Paid leave days from approved leave apps (same engine as payroll)
+        try:
+            from hr.services.payroll_engine import (
+                get_attendance_breakdown,
+                get_hrms_settings as _get_hrms_settings,
+                get_total_working_days,
+            )
+            settings_obj = _get_hrms_settings(tenant)
+            working_days = int(get_total_working_days(
+                month, year, settings_obj.lop_calculation_rule,
+                weekend_rule=getattr(settings_obj, 'weekend_rule', 'sunday_only'),
+                default_working_days=getattr(settings_obj, 'default_working_days', None),
+            ))
+            breakdown = get_attendance_breakdown(emp, month, year, working_days, settings_obj)
+            paid_leave_days = float(breakdown.get('paid_leave_days') or 0)
+            unpaid_leave_days = float(
+                breakdown.get('unpaid_leave_days')
+                or len(breakdown.get('unpaid_leave_dates') or [])
+            )
+        except Exception:
+            paid_leave_days = 0.0
+            unpaid_leave_days = 0.0
+
         for d in range(1, num_days + 1):
             cur_date = datetime.date(year, month, d)
             is_weekend = cur_date.isoweekday() in [7]
@@ -864,6 +887,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             days_list.append({
                 'date': cur_date.isoformat(),
                 'day': cur_date.strftime('%a'),
+                'day_name': cur_date.strftime('%a'),
                 'day_number': d,
                 'status': day_status,
                 'check_in': rec.check_in.strftime('%H:%M') if rec and rec.check_in else None,
@@ -890,6 +914,8 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             'present_days': present_count,
             'half_days': half_day_count,
             'leave_days': leave_count,
+            'paid_leave_days': paid_leave_days,
+            'unpaid_leave_days': unpaid_leave_days,
             'absent_days': absent_count,
             'weekends_holidays': holiday_count,
             'effective_present_days': str(effective_present),
@@ -907,14 +933,16 @@ class AttendanceViewSet(viewsets.ModelViewSet):
 
         record = AttendanceRecord.objects.filter(employee=employee, date=date).first()
         if not record:
+            # CREATE audit is written by the global audit_log signal — do not double-log.
             record = AttendanceRecord.objects.create(tenant=tenant, employee=employee, date=date, status=att_status)
-            audit_service.log_create(request, record, changes={'status': att_status})
             return Response(self.get_serializer(record).data, status=status.HTTP_201_CREATED)
         else:
             before = {'status': record.status}
             record.status = att_status
             record.save()
-            audit_service.log_update(request, record, before=before, after={'status': att_status})
+            # UPDATE audit via signal; keep explicit log only when signal has no diff
+            if before.get('status') != att_status:
+                pass  # post_save signal records the change
             return Response(self.get_serializer(record).data, status=status.HTTP_200_OK)
 
     def update(self, request, *args, **kwargs):
@@ -1432,12 +1460,26 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             raise ValidationError(
                 "payment_account_id is required. Select a Bank account for salary disbursement."
             )
-        from ledger.models import Account
+        from ledger.models import Account, AccountType
         from ledger.services import AccountingService
         try:
             payment_account = Account.objects.get(id=payment_account_id, created_by=instance.tenant)
         except Account.DoesNotExist:
             raise ValidationError("Specified payment bank account not found.")
+
+        code = str(getattr(payment_account, 'code', '') or '')
+        name_l = (getattr(payment_account, 'name', '') or '').lower()
+        is_cash_or_bank = (
+            code in ('1001', '1002')
+            or 'bank' in name_l
+            or name_l.strip() == 'cash'
+            or name_l.startswith('cash ')
+        )
+        if payment_account.account_type != AccountType.ASSET or not is_cash_or_bank:
+            raise ValidationError(
+                "Select a Bank or Cash account for salary disbursement. "
+                "Receivables and other asset accounts are not allowed."
+            )
 
         total_net = instance.total_net or Decimal('0.00')
         bal_info = AccountingService.get_account_balance(payment_account, instance.tenant)
@@ -1448,7 +1490,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
                 f"Available ₹{balance}, required ₹{total_net}."
             )
         warnings = []
-        if str(getattr(payment_account, 'code', '') or '') == '1001' and total_net > Decimal('10000.00'):
+        if code == '1001' and total_net > Decimal('10000.00'):
             warnings.append(
                 "Section 40A(3): Cash salary disbursement exceeds ₹10,000. Prefer Bank transfer."
             )

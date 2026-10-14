@@ -445,33 +445,14 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         )
         member.set_password(password)
         member.save()
-        self._write_team_audit('CREATE', member, changes={
-            'email': member.email,
-            'role': member.role,
-            'permissions': member.permissions,
-        })
+        # AuditLog CREATE is written by the global post_save signal — avoid double-logging here.
         return member
 
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
-        before = {
-            'role': instance.role,
-            'permissions': instance.permissions,
-            'first_name': instance.first_name,
-            'last_name': instance.last_name,
-        }
         instance = super().update(instance, validated_data)
         if password:
             instance.set_password(password)
             instance.save()
-        self._write_team_audit('UPDATE', instance, changes={
-            'before': before,
-            'after': {
-                'role': instance.role,
-                'permissions': instance.permissions,
-                'first_name': instance.first_name,
-                'last_name': instance.last_name,
-                'password_changed': bool(password),
-            },
-        })
+        # AuditLog UPDATE is written by the global post_save signal — avoid double-logging here.
         return instance

@@ -104,6 +104,24 @@ class DynamicTDSEngineTests(TestCase):
         self.assertEqual(tds_data['total_annual_tax'], Decimal('150800.00'))
         self.assertEqual(tds_data['monthly_tds'], Decimal('12566.67'))
         self.assertEqual(tds_data['remaining_months'], 12)
+        self.assertFalse(tds_data['nil_tax_87a'])
+
+    def test_fy2026_18l_october_empty_ytd_same_monthly_tds(self):
+        """Mid-FY with no prior payslips must project ₹18L and levelized TDS ≈ ₹12,566.67 (preview parity)."""
+        tds_data = compute_dynamic_tds(self.emp, Decimal('150000.00'), month=10, year=2026)
+        self.assertEqual(tds_data['remaining_months'], 6)
+        self.assertEqual(tds_data['projected_annual_gross'], Decimal('1800000.00'))
+        self.assertEqual(tds_data['net_taxable_income'], Decimal('1725000.00'))
+        self.assertEqual(tds_data['total_annual_tax'], Decimal('150800.00'))
+        self.assertEqual(tds_data['monthly_tds'], Decimal('12566.67'))
+        self.assertFalse(tds_data['nil_tax_87a'])
+
+    def test_fy2026_12l_october_still_nil_tax(self):
+        """₹1L/mo → ₹12L gross → taxable ₹11.25L → still within 87A → TDS ₹0 mid-FY."""
+        tds_data = compute_dynamic_tds(self.emp, Decimal('100000.00'), month=10, year=2026)
+        self.assertEqual(tds_data['projected_annual_gross'], Decimal('1200000.00'))
+        self.assertEqual(tds_data['monthly_tds'], Decimal('0.00'))
+        self.assertTrue(tds_data['nil_tax_87a'])
 
     def test_taxable_employee_new_regime(self):
         """FY 2026-27: Monthly ₹1,20,000 → annual ₹14.40L → taxable ₹13.65L.

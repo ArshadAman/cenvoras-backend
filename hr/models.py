@@ -1103,7 +1103,7 @@ class HRDocument(models.Model):
     )
     title = models.CharField(max_length=255)
     document_type = models.CharField(max_length=30, choices=DOC_TYPES, default='other')
-    file = models.FileField(upload_to=tenant_kyc_upload_path, null=True, blank=True)
+    file = models.FileField(upload_to=tenant_kyc_upload_path, max_length=500, null=True, blank=True)
     file_url = models.URLField(max_length=500, blank=True, null=True)
     notes = models.TextField(blank=True)
     uploaded_by = models.ForeignKey(

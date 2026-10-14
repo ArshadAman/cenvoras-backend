@@ -57,6 +57,7 @@ def sales_summary(request):
 
     tenant = getattr(request.user, 'active_tenant', request.user)
     from django.db.models import Q
+    from billing.sales_metrics import aggregate_sales_metric, sales_mtd
     qs = SalesInvoice.objects.filter(
         Q(created_by=tenant) | Q(created_by__parent=tenant)
     ).filter(status='final')
@@ -64,21 +65,14 @@ def sales_summary(request):
         qs = qs.filter(invoice_date__gte=date_from)
     if date_to:
         qs = qs.filter(invoice_date__lte=date_to)
-        
-    total_invoices = qs.aggregate(total=Sum('total_amount'))['total'] or 0
-    
-    # Subtract Returns (Credit Notes)
-    from billing.models_returns import CreditNote
-    returns_qs = CreditNote.objects.filter(
-        Q(created_by=tenant) | Q(created_by__parent=tenant)
-    )
-    if date_from:
-        returns_qs = returns_qs.filter(date__gte=date_from)
-    if date_to:
-        returns_qs = returns_qs.filter(date__lte=date_to)
-    total_returns = returns_qs.aggregate(total=Sum('total_amount'))['total'] or 0
-    
-    total_sales = total_invoices - total_returns
+
+    # Default (no dates) = shared MTD metric so sales summary matches dashboard/AI
+    if not date_from and not date_to:
+        mtd = sales_mtd(tenant)
+        total_sales = mtd['net']
+    else:
+        metric = aggregate_sales_metric(tenant, date_from=date_from, date_to=date_to)
+        total_sales = metric['net']
 
     items = SalesInvoiceItem.objects.filter(sales_invoice__in=qs)
     sales_by_product = items.values('product__name').annotate(total=Sum('amount')).order_by('-total')
@@ -370,18 +364,16 @@ def dashboard_summary(request):
         from decimal import Decimal
 
         from django.db.models import Q
-        # Sales
-        sales_qs = SalesInvoice.objects.filter(
-            Q(created_by=tenant) | Q(created_by__parent=tenant)
-        ).exclude(status='draft')
-        total_invoices = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        from billing.sales_metrics import sales_mtd
+        # Single sales KPI: IST MTD final invoices net of credit notes (team-scoped)
+        mtd = sales_mtd(tenant)
+        total_sales = Decimal(str(mtd['net']))
 
-        # Subtract returns
-        from billing.models_returns import CreditNote
-        total_returns = CreditNote.objects.filter(
-            Q(created_by=tenant) | Q(created_by__parent=tenant)
-        ).aggregate(total=Sum('total_amount'))['total'] or 0
-        total_sales = total_invoices - total_returns
+        # Chart still uses final invoices over time (not drafts)
+        sales_qs = SalesInvoice.objects.filter(
+            Q(created_by=tenant) | Q(created_by__parent=tenant),
+            status='final',
+        )
 
         # Purchases
         purchase_qs = PurchaseBill.objects.filter(
@@ -461,7 +453,9 @@ def dashboard_summary(request):
         ]
 
         return {
-            'total_sales': total_sales,
+            'total_sales': float(total_sales),
+            'sales_mtd': mtd,
+            'sales_label': mtd.get('label'),
             'total_purchases': total_purchases,
             'total_inventory_value': total_inventory_value,
             'low_stock_count': low_stock_count,

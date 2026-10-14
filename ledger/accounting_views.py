@@ -1004,7 +1004,9 @@ def get_ledger_stats(request):
     # Usually, dashboard wants "Net Sales".
     net_sales = float(total_invoices) - float(total_returns)
     
-    net_balance = entries.aggregate(balance=Sum('debit') - Sum('credit'))['balance'] or 0
+    # Split aggregates — Sum(debit)-Sum(credit) can fail / confuse some backends
+    _bal = entries.aggregate(d=Sum('debit'), c=Sum('credit'))
+    net_balance = Decimal(str(_bal.get('d') or 0)) - Decimal(str(_bal.get('c') or 0))
     
     # Customer specific logic
     from billing.models import Customer, SalesInvoice, BillPaymentStatus

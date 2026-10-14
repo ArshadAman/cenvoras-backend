@@ -178,14 +178,17 @@ class EmployeeSerializer(serializers.ModelSerializer):
         esi = (gross * Decimal('0.0075')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
         
         from hr.services.payroll_engine import compute_pt
+        from hr.services.work_state import resolve_work_state
         import datetime as _dt
         from hr.services.tds_service import compute_dynamic_tds
-        pt = compute_pt(gross, obj.work_state)
+        resolved_state = resolve_work_state(employee=obj, tenant=obj.tenant)
+        pt = compute_pt(gross, resolved_state, employee=obj, tenant=obj.tenant)
 
         today = _dt.date.today()
         tds_data = compute_dynamic_tds(obj, gross, today.month, today.year)
         std_ded = tds_data['standard_deduction']
-        annual_gross = tds_data['projected_annual_gross']
+        projected_annual_gross = tds_data['projected_annual_gross']
+        annual_ctc = (ctc * Decimal('12')).quantize(Decimal('0.01'))
         taxable = tds_data['net_taxable_income']
         rebate_applied = tds_data['rebate_applied']
         annual_tax = tds_data['total_annual_tax']
@@ -206,9 +209,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
         marginal_relief = bool(tds_data.get('marginal_relief')) or (
             rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
         )
-        nil_tax_87a = bool(tds_data.get('nil_tax_87a')) or (
-            rebate_applied and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00')
-        )
+        # 87A Nil only when engine says so AND monthly TDS is truly zero
+        nil_tax_87a = bool(tds_data.get('nil_tax_87a')) and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00')
+        if not nil_tax_87a and rebate_applied and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00'):
+            nil_tax_87a = True
 
         # Clean display dictionary for earnings (Title Case, no duplicate lower/upper keys)
         earnings_dict = {
@@ -265,6 +269,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'annual_net_tax': str(annual_tax),
             'taxable_income': str(taxable),
             'standard_deduction': str(std_ded),
+            'projected_annual_gross': str(projected_annual_gross),
             'rebate_applied': is_rebate,
             'nil_tax_87a': nil_tax_87a,
             'marginal_relief': marginal_relief,
@@ -273,10 +278,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
         return {
             'monthly_ctc': str(ctc),
-            'annual_ctc': str((ctc * Decimal('12')).quantize(Decimal('0.01'))),
+            'annual_ctc': str(annual_ctc),
             'gross_salary': str(gross),
             'monthly_gross': str(gross),
-            'annual_gross': str(annual_gross),
+            # Annual CTC (12× monthly) — do not confuse with mid-FY TDS projection
+            'annual_gross': str(annual_ctc),
+            'work_state_resolved': resolved_state,
             'estimated_net_salary': str(net_pay),
             'monthly_net_take_home': str(net_pay),
             'net_take_home_monthly': str(net_pay),
@@ -320,16 +327,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
         # Default work_state from company/tenant state for PT slabs (full name)
-        if not (validated_data.get('work_state') or '').strip():
-            request = self.context.get('request')
-            tenant = None
-            if request and hasattr(request, 'user'):
-                tenant = getattr(request.user, 'active_tenant', request.user)
-            company_state = getattr(tenant, 'state', None) if tenant else None
-            if company_state:
-                validated_data['work_state'] = self.validate_work_state(company_state)
-        elif validated_data.get('work_state'):
-            validated_data['work_state'] = self.validate_work_state(validated_data['work_state'])
+        from hr.services.work_state import resolve_work_state
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        resolved = resolve_work_state(tenant=tenant, work_state=validated_data.get('work_state'))
+        if resolved:
+            validated_data['work_state'] = resolved
         employee = super().create(validated_data)
         if employee.employment_type != 'contract':
             self._handle_salary_assignment(employee, salary_data)
@@ -340,8 +343,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
         declaration_data = self.initial_data.get('tax_declaration')
-        if 'work_state' in validated_data and validated_data.get('work_state'):
-            validated_data['work_state'] = self.validate_work_state(validated_data['work_state'])
+        from hr.services.work_state import resolve_work_state
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else instance.tenant
+        incoming = validated_data.get('work_state', instance.work_state)
+        resolved = resolve_work_state(employee=instance, tenant=tenant, work_state=incoming)
+        if resolved:
+            validated_data['work_state'] = resolved
         employee = super().update(instance, validated_data)
         if employee.employment_type != 'contract':
             if salary_data is not None:
@@ -959,20 +967,22 @@ class PayslipSerializer(serializers.ModelSerializer):
 
     def get_lop_amount(self, obj):
         """
-        Informational docked amount implied by proration (full CTC − prorated gross).
-        Uses payable days (= working − LOP), not present-only (paid leave is payable).
+        Docked amount = monthly CTC × lop_days / total_working_days.
+        Prefer value persisted at payroll compute time in deduction_reasons.
         """
+        raw = (obj.deduction_reasons or {}).get('Loss of Pay (LOP)')
+        if isinstance(raw, dict) and raw.get('amount') is not None:
+            try:
+                return str(Decimal(str(raw['amount'])).quantize(Decimal('0.01')))
+            except Exception:
+                pass
         if obj.lop_days > 0 and obj.total_working_days:
             working_days = Decimal(str(obj.total_working_days))
             lop_days = Decimal(str(obj.lop_days))
-            payable_days = working_days - lop_days
-            if working_days > 0 and payable_days > 0 and lop_days > 0:
-                full_gross = (
-                    Decimal(str(obj.gross_salary)) * working_days / payable_days
-                ).quantize(Decimal('0.01'))
-                return str((full_gross - Decimal(str(obj.gross_salary))).quantize(Decimal('0.01')))
-            if payable_days <= 0:
-                return str(Decimal(str(obj.gross_salary)).quantize(Decimal('0.01')))
+            assignment = obj.employee.salary_assignments.order_by('-effective_from', '-id').first()
+            if assignment and working_days > 0:
+                ctc = Decimal(str(assignment.monthly_ctc or 0))
+                return str((ctc * lop_days / working_days).quantize(Decimal('0.01')))
         return '0.00'
 
 
@@ -984,6 +994,35 @@ class HRDocumentSerializer(serializers.ModelSerializer):
         model = HRDocument
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'uploaded_by']
+
+    def validate_employee(self, employee):
+        request = self.context.get('request')
+        if not request:
+            return employee
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        if employee.tenant_id != getattr(tenant, 'id', None):
+            raise serializers.ValidationError('Employee does not belong to this account.')
+        return employee
+
+    def validate(self, attrs):
+        file_obj = attrs.get('file')
+        file_url = attrs.get('file_url')
+        if not file_obj and not file_url and not self.instance:
+            raise serializers.ValidationError({'file': 'Upload a file or provide a document URL.'})
+        if file_obj is not None:
+            # Soft size guard (10 MB) — clear 400 instead of MEDIA/server 500
+            size = getattr(file_obj, 'size', None)
+            if size is not None and size > 10 * 1024 * 1024:
+                raise serializers.ValidationError({'file': 'File too large (max 10 MB).'})
+        return attrs
+
+    def create(self, validated_data):
+        try:
+            return super().create(validated_data)
+        except Exception as exc:
+            raise serializers.ValidationError(
+                {'file': f'Could not save document: {exc}'}
+            ) from exc
 
 
 class HRMSSettingsSerializer(serializers.ModelSerializer):

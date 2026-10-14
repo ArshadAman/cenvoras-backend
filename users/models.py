@@ -143,8 +143,9 @@ class User(AbstractUser):
     
     def mark_profile_completed(self):
         """Mark profile completed only when required fields are filled; clear otherwise."""
+        from users.address_utils import is_meaningful_address
         required_ok = bool(
-            (self.business_name or '').strip() and (self.business_address or '').strip()
+            (self.business_name or '').strip() and is_meaningful_address(self.business_address)
         )
         if self.profile_completed != required_ok:
             self.profile_completed = required_ok

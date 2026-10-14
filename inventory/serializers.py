@@ -29,22 +29,18 @@ class ProductSerializer(serializers.ModelSerializer):
         if sale_price in (None, ''):
             raise serializers.ValidationError({'sale_price': 'Sale price is required.'})
 
-        # Validate HSN/SAC code (CA Audit Issue 5)
+        # Validate HSN/SAC via shared helper (same messages as invoice/purchase)
         hsn_sac = attrs.get('hsn_sac_code')
         if hsn_sac is None and self.instance is not None:
             hsn_sac = self.instance.hsn_sac_code
-        hsn_sac_str = str(hsn_sac or '').strip()
-        if not hsn_sac_str or hsn_sac_str.upper() == 'N/A':
-            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is required.'})
-        clean_digits = re.sub(r'\D', '', hsn_sac_str)
         request = self.context.get('request')
         user = request.user if request else None
         tenant = getattr(user, 'active_tenant', user) if user else None
-        from billing.gst_utils import get_required_hsn_digits
-        min_digits = get_required_hsn_digits(tenant) if tenant else 4
-        if len(clean_digits) < min_digits:
-            raise serializers.ValidationError({'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'})
-        attrs['hsn_sac_code'] = hsn_sac_str
+        from billing.gst_utils import validate_hsn_sac_code
+        try:
+            attrs['hsn_sac_code'] = validate_hsn_sac_code(hsn_sac, tenant)
+        except ValueError as e:
+            raise serializers.ValidationError({'hsn_sac_code': str(e)})
 
         cost_price = attrs.get('price')
         if cost_price is None:

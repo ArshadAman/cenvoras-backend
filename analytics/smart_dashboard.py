@@ -86,25 +86,32 @@ class SmartDashboard:
             return 100 if today > 0 else 0
         return round(((today - yesterday) / yesterday) * 100, 1)
     
+    def _ledger_account_balance(self, code):
+        """GL balance for Cash (1001) / Bank (1002) — same source as ledger UI."""
+        try:
+            from ledger.models import Account
+            from ledger.services import AccountingService
+            acc = Account.objects.filter(
+                Q(created_by=self.owner) | Q(created_by__parent=self.owner),
+                code=code,
+            ).first()
+            if not acc:
+                return 0.0
+            bal_info = AccountingService.get_account_balance(acc, self.owner)
+            return float(bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info)
+        except Exception:
+            return 0.0
+
     def _get_cash_collections(self):
-        """Today's cash collections."""
-        result = Payment.objects.filter(
-            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
-            date=self.today,
-            mode='cash'
-        ).aggregate(total=Sum('amount'))
-        return float(result['total'] or 0)
+        """Cash-in-hand = ledger Cash account (1001) balance, not today's collections."""
+        return self._ledger_account_balance('1001')
     
     def _get_bank_collections(self):
-        """Today's bank/UPI collections."""
-        result = Payment.objects.filter(
-            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
-            date=self.today,
-            mode__in=['upi', 'bank_transfer', 'bank', 'cheque']
-        ).aggregate(total=Sum('amount'))
-        return float(result['total'] or 0)
+        """Bank balance = ledger Bank account (1002)."""
+        return self._ledger_account_balance('1002')
 
     def _get_collections_total(self, on_date=None):
+        # Kept for legacy callers; liquid balance now uses GL cash+bank
         payments = Payment.objects.filter(Q(created_by=self.owner) | Q(created_by__parent=self.owner))
         if on_date is not None:
             payments = payments.filter(date=on_date)
@@ -118,8 +125,7 @@ class SmartDashboard:
         return float(result['total'] or 0)
 
     def _get_net_liquid_balance(self):
-        net_balance = self._get_collections_total() - self._get_purchase_paid_total()
-        return round(net_balance, 2)
+        return round(self._get_cash_collections() + self._get_bank_collections(), 2)
     
     def _get_net_profit_today(self):
         """Estimated net profit = Sales - Cost of Goods Sold"""

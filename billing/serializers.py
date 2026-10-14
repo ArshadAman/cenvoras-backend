@@ -453,25 +453,19 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         if qty <= 0 and free_qty <= 0:
             raise serializers.ValidationError({'quantity': 'Quantity or Free Quantity must be greater than 0.'})
 
-        # CA Audit (Issue 5): Validate HSN/SAC code (mandatory, min 4 digits, never blank or N/A)
+        # Shared HSN/SAC validation (same messages as product form)
         hsn_sac = data.get('hsn_sac_code')
         product = data.get('product')
         if not hsn_sac and product and getattr(product, 'hsn_sac_code', None):
             hsn_sac = product.hsn_sac_code
-        hsn_str = str(hsn_sac or '').strip()
-        if not hsn_str or hsn_str.upper() == 'N/A':
-            raise serializers.ValidationError({'hsn_sac_code': 'HSN/SAC code is mandatory for each invoice item.'})
-        clean_digits = re.sub(r'\D', '', hsn_str)
         request = self.context.get('request')
         user = request.user if request else None
         tenant = getattr(user, 'active_tenant', user) if user else None
-        from billing.gst_utils import get_required_hsn_digits
-        min_digits = get_required_hsn_digits(tenant) if tenant else 4
-        if len(clean_digits) < min_digits:
-            raise serializers.ValidationError({
-                'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'
-            })
-        data['hsn_sac_code'] = hsn_str
+        from billing.gst_utils import validate_hsn_sac_code
+        try:
+            data['hsn_sac_code'] = validate_hsn_sac_code(hsn_sac, tenant)
+        except ValueError as e:
+            raise serializers.ValidationError({'hsn_sac_code': str(e)})
         return data
     price = serializers.DecimalField(required=False, allow_null=True, max_digits=14, decimal_places=4, default=0)
     discount = serializers.DecimalField(required=False, allow_null=True, default=0, max_digits=8, decimal_places=2)
@@ -646,6 +640,12 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                     error_msg = 'Only Pro and above plans can create new inventory products from billing forms.'
                     print("DEBUG SalesInvoiceItemSerializer: Error -", error_msg)
                     raise serializers.ValidationError({'product': error_msg})
+                # Validate HSN before product-create gate so missing HSN surfaces clearly
+                from billing.gst_utils import validate_hsn_sac_code
+                try:
+                    hsn_preview = validate_hsn_sac_code(data.get('hsn_sac_code'), user)
+                except ValueError as e:
+                    raise serializers.ValidationError({'hsn_sac_code': str(e)})
                 # Require explicit confirm — never silently create catalog products from bare names
                 confirm_create = data.get('confirm_create_product') in (True, 'true', 'True', '1', 1)
                 if not confirm_create:
@@ -654,19 +654,6 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
                             f'Product "{product_value}" was not found. '
                             'Confirm catalog create (confirm_create_product=true) or pass a product UUID.'
                         )
-                    })
-                # Validate HSN before any DB write so failed invoices cannot create orphan products
-                hsn_preview = str(data.get('hsn_sac_code') or '').strip()
-                if not hsn_preview or hsn_preview.upper() == 'N/A':
-                    raise serializers.ValidationError({
-                        'hsn_sac_code': 'HSN/SAC code is mandatory for each invoice item.'
-                    })
-                clean_digits = re.sub(r'\D', '', hsn_preview)
-                from billing.gst_utils import get_required_hsn_digits
-                min_digits = get_required_hsn_digits(user) if user else 4
-                if len(clean_digits) < min_digits:
-                    raise serializers.ValidationError({
-                        'hsn_sac_code': 'HSN required, 4 digits (turnover ≤ ₹5 Cr) / 6 digits'
                     })
                 # Create new product (stock starts at 0; skip initial sale deduction)
                 print("DEBUG SalesInvoiceItemSerializer: Creating new product:", product_value)

@@ -426,6 +426,26 @@ def get_required_hsn_digits(tenant=None):
     return 4
 
 
+# Single shared HSN copy for product, invoice, and purchase forms (BE + FE must match).
+HSN_REQUIRED_MSG = 'HSN/SAC code is required.'
+HSN_DIGITS_MSG = 'HSN/SAC code must be at least 4 digits (6 digits if turnover > ₹5 Cr).'
+
+
+def validate_hsn_sac_code(code, tenant=None):
+    """
+    Validate HSN/SAC. Returns cleaned string or raises ValueError with HSN_*_MSG.
+    """
+    import re
+    hsn_str = str(code or '').strip()
+    if not hsn_str or hsn_str.upper() == 'N/A':
+        raise ValueError(HSN_REQUIRED_MSG)
+    clean_digits = re.sub(r'\D', '', hsn_str)
+    min_digits = get_required_hsn_digits(tenant) if tenant else 4
+    if len(clean_digits) < min_digits:
+        raise ValueError(HSN_DIGITS_MSG)
+    return hsn_str
+
+
 def clean_hsn_sac_code(code, default_service=False):
     """Cleans HSN/SAC code ensuring it is never 'N/A' or blank."""
     if not code:

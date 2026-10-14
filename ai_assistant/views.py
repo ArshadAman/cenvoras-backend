@@ -52,21 +52,11 @@ def gather_business_context(user):
         count=Count('id'), total=Sum('total_amount')
     )
 
-    sales_month = final_sales.filter(
-        invoice_date__gte=month_start, invoice_date__lte=today
-    ).aggregate(
-        count=Count('id'), total=Sum('total_amount')
-    )
-    # Net of credit notes (same basis as dashboard total_sales for the month slice)
-    try:
-        from billing.models_returns import CreditNote
-        cn_month = CreditNote.objects.filter(
-            created_by=tenant, date__gte=month_start, date__lte=today
-        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
-        sales_month_net = float((sales_month['total'] or Decimal('0')) - cn_month)
-    except Exception:
-        cn_month = Decimal('0')
-        sales_month_net = float(sales_month['total'] or 0)
+    from billing.sales_metrics import sales_mtd
+    mtd = sales_mtd(tenant)
+    sales_month = {'count': mtd['count'], 'total': Decimal(str(mtd['gross']))}
+    sales_month_net = float(mtd['net'])
+    cn_month = Decimal(str(mtd['returns']))
 
     # Previous month for comparison
     prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
@@ -207,17 +197,8 @@ def gather_business_context(user):
     # Month sales total for GST block (final + credit-note net)
     gst_sales_total = Decimal(str(sales_month_net))
 
-    # Dashboard all-time sales (excl. drafts, minus credit notes) — matches dashboard KPI
-    dash_sales_qs = SalesInvoice.objects.filter(created_by=tenant).exclude(status='draft')
-    dash_invoices_total = dash_sales_qs.aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
-    try:
-        from billing.models_returns import CreditNote as _CN
-        dash_returns = _CN.objects.filter(created_by=tenant).aggregate(
-            total=Sum('total_amount')
-        )['total'] or Decimal('0')
-    except Exception:
-        dash_returns = Decimal('0')
-    dashboard_total_sales = float(dash_invoices_total - dash_returns)
+    # Dashboard KPI = same shared MTD sales metric
+    dashboard_total_sales = float(mtd['net'])
 
     gst_purchases_month = PurchaseBill.objects.filter(
         created_by=tenant, bill_date__gte=month_start

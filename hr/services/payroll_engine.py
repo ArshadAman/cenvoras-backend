@@ -300,16 +300,20 @@ def _normalize_pt_state_name(work_state):
     return state
 
 
-def compute_pt(gross_salary, work_state, month=None, on_date=None):
+def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None):
     """
     State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
     Karnataka February special: ₹300 when gross is in the taxable band (gross >= ₹25,000).
     Accepts full name, GST state code (29), or abbreviation (KA).
+    Empty work_state falls back to tenant/company state via resolve_work_state.
     """
     import datetime
+    from hr.services.work_state import resolve_work_state
 
     gross = Decimal(str(gross_salary))
-    state = _normalize_pt_state_name(work_state)
+    state = resolve_work_state(employee=employee, tenant=tenant, work_state=work_state)
+    if not state:
+        state = _normalize_pt_state_name(work_state)
     if not state:
         return Decimal('0.00')
 
@@ -513,11 +517,15 @@ def compute_payslip_for_employee(employee, payroll_run):
     import datetime as _dt
     import calendar as _cal
     pt_day = min(28, _cal.monthrange(int(year), int(month))[1])
+    from hr.services.work_state import resolve_work_state
+    resolved_pt_state = resolve_work_state(employee=employee, tenant=tenant)
     pt_val = compute_pt(
         gross_with_earnings,
-        employee.work_state,
+        resolved_pt_state,
         month=int(month),
         on_date=_dt.date(int(year), int(month), pt_day),
+        employee=employee,
+        tenant=tenant,
     )
 
     # Custom deductions total
@@ -612,7 +620,22 @@ def compute_payslip_for_employee(employee, payroll_run):
         deductions['PT'] = str(pt_val)
         deduction_reasons['PT'] = {
             'amount': str(pt_val),
-            'reason': f"State statutory Professional Tax slab deduction for {employee.work_state or 'registered state'}"
+            'reason': f"State statutory Professional Tax slab deduction for {resolved_pt_state or 'registered state'}"
+        }
+
+    # LOP docked amount = monthly CTC × lop_days / working_days (same denominator as proration)
+    lop_days_dec = Decimal(str(breakdown.get('lop_days') or 0))
+    working_days_dec = Decimal(str(working_days or 0))
+    monthly_ctc_base = Decimal(str(assignment.monthly_ctc or 0))
+    lop_amount = Decimal('0.00')
+    if lop_days_dec > 0 and working_days_dec > 0 and monthly_ctc_base > 0:
+        lop_amount = (monthly_ctc_base * lop_days_dec / working_days_dec).quantize(Decimal('0.01'))
+        deduction_reasons['Loss of Pay (LOP)'] = {
+            'amount': str(lop_amount),
+            'reason': (
+                f"{lop_days_dec} day(s) LOP docked from monthly CTC ₹{monthly_ctc_base} "
+                f"over {int(working_days_dec)} working days"
+            ),
         }
 
     # 6. Custom Structure Deductions

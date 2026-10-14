@@ -285,15 +285,31 @@ def compute_tds(gross_salary, regime='new', month=None, year=None):
     return monthly_tax.quantize(Decimal('0.01'))
 
 
+def _normalize_pt_state_name(work_state):
+    """Map KA / 29 / Karnataka → full state name used by ProfessionalTaxSlab rows."""
+    state = (work_state or '').strip()
+    if not state:
+        return ''
+    try:
+        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
+        code = normalize_state_code(state)
+        if code and code in CODE_TO_STATE_NAME:
+            return CODE_TO_STATE_NAME[code]
+    except Exception:
+        pass
+    return state
+
+
 def compute_pt(gross_salary, work_state, month=None, on_date=None):
     """
     State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
     Karnataka February special: ₹300 when gross is in the taxable band (gross >= ₹25,000).
+    Accepts full name, GST state code (29), or abbreviation (KA).
     """
     import datetime
 
     gross = Decimal(str(gross_salary))
-    state = (work_state or '').strip()
+    state = _normalize_pt_state_name(work_state)
     if not state:
         return Decimal('0.00')
 

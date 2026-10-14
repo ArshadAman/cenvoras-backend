@@ -87,6 +87,17 @@ def audit_log_save(sender, instance, created, **kwargs):
     if action == 'UPDATE' and not changes:
         return # Nothing changed
 
+    # CREATE: keep a short human summary, not a full model dump (avoids raw JSON in UI)
+    if action == 'CREATE' and isinstance(changes, dict) and len(changes) > 8:
+        summary_keys = (
+            'name', 'full_name', 'email', 'bill_number', 'invoice_number',
+            'total_amount', 'status', 'role', 'employee_code', 'title',
+        )
+        slim = {k: changes[k] for k in summary_keys if k in changes}
+        if not slim:
+            slim = {k: changes[k] for k in list(changes.keys())[:4]}
+        changes = slim
+
     AuditLog.objects.create(
         tenant=getattr(user, 'active_tenant', None) if user and getattr(user, 'is_authenticated', False) else None,
         user=user if user and getattr(user, 'is_authenticated', False) else None,

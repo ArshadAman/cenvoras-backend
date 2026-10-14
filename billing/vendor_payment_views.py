@@ -16,11 +16,38 @@ from ledger.models import Account, AccountType, GeneralLedgerEntry
 from ledger.services import AccountingService
 
 
+# Default rates (simplified): 194C uses 2% (non-individual / company rate).
 TDS_SECTION_RATES = {
-    '194C': Decimal('1.00'),   # contractors (individuals) — simplified default
+    '194C': Decimal('2.00'),   # contractors — company/default rate (individuals are 1%)
     '194J': Decimal('10.00'),  # professional fees
     '194Q': Decimal('0.10'),   # purchase of goods
 }
+
+
+def _bill_taxable_total(bill):
+    """GST-exclusive taxable value of a purchase bill (TDS base under 194C/J/Q)."""
+    total = Decimal('0.00')
+    for item in bill.items.all():
+        qty = Decimal(str(getattr(item, 'quantity', 0) or 0))
+        price = Decimal(str(getattr(item, 'price', 0) or 0))
+        line = (qty * price).quantize(Decimal('0.01'))
+        if line <= 0:
+            amt = Decimal(str(getattr(item, 'amount', 0) or 0))
+            tax_pct = Decimal(str(getattr(item, 'tax', 0) or 0))
+            if tax_pct > 0 and amt > 0:
+                line = (amt * Decimal('100') / (Decimal('100') + tax_pct)).quantize(Decimal('0.01'))
+            else:
+                line = amt
+        total += line
+    return total.quantize(Decimal('0.01'))
+
+
+def _is_cash_or_bank_account(account):
+    code = str(getattr(account, 'code', '') or '')
+    name = (getattr(account, 'name', '') or '').lower()
+    if code in ('1001', '1002'):
+        return True
+    return 'bank' in name or name.strip() == 'cash' or name.startswith('cash ')
 
 
 @api_view(['GET'])
@@ -96,6 +123,12 @@ def vendor_payment_create(request):
     except Account.DoesNotExist:
         return Response({'message': 'payment account not found'}, status=status.HTTP_400_BAD_REQUEST)
 
+    if getattr(payment_account, 'account_type', None) != AccountType.ASSET or not _is_cash_or_bank_account(payment_account):
+        return Response(
+            {'message': 'Select a Bank or Cash account for vendor payment (receivables and other accounts are not allowed).'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     mode = (request.data.get('mode') or 'bank_transfer').strip().lower()
     pay_date = request.data.get('date') or str(date.today())
     tds_section = (request.data.get('tds_section') or '').strip().upper() or None
@@ -110,13 +143,33 @@ def vendor_payment_create(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     if tds_section and tds_amount <= 0:
-        # Auto-compute from section default rate on payment amount
+        # Auto-compute on GST-exclusive taxable base (proportional for partial pays)
         rate = TDS_SECTION_RATES[tds_section]
-        tds_amount = (amount * rate / Decimal('100')).quantize(Decimal('0.01'))
+        bill_total = Decimal(str(bill.total_amount or 0))
+        taxable_total = _bill_taxable_total(bill)
+        if bill_total > 0 and taxable_total > 0:
+            tds_base = (amount * taxable_total / bill_total).quantize(Decimal('0.01'))
+        else:
+            tds_base = amount
+        tds_amount = (tds_base * rate / Decimal('100')).quantize(Decimal('0.01'))
     if tds_amount >= amount:
         return Response({'message': 'tds_amount must be less than payment amount'}, status=status.HTTP_400_BAD_REQUEST)
 
     net_paid = (amount - tds_amount).quantize(Decimal('0.01'))
+
+    bal_info = AccountingService.get_account_balance(payment_account, tenant)
+    balance = Decimal(str(bal_info.get('balance', 0) if isinstance(bal_info, dict) else bal_info))
+    if balance < net_paid:
+        return Response(
+            {
+                'message': (
+                    f'Insufficient balance in {payment_account.name} ({payment_account.code}). '
+                    f'Available ₹{balance}, required ₹{net_paid}.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     accounts = AccountingService.get_or_create_default_accounts(tenant)
 
     with transaction.atomic():

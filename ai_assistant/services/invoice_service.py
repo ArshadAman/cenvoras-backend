@@ -176,35 +176,99 @@ def create_invoice_from_ai(user, entities, request=None):
 
 
 _AMOUNT_RE = re.compile(
-    r'(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*(lakh|lac|lacs|lakhs|cr|crore|crores)?',
+    # Accept "18L" / "18lakh" / "18 lakh" / "₹18,00,000"
+    r'(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*(lakh|lac|lacs|lakhs|l(?![a-z])|cr|crore|crores)?',
     re.I,
 )
 
 
-def answer_tds_question(question):
+def answer_tds_question(question, user=None):
     """
     If the question is about TDS / income tax on a salary figure, answer via
     preview_monthly_tds / compute_tax_on_income. Returns None if not a TDS Q.
+    When an employee name is mentioned, prefer their CTC from HR.
     """
     q = (question or '').strip()
     q_lower = q.lower()
-    tds_hints = ('tds', 'income tax', 'tax on', 'taxable', 'new regime', 'old regime', 'section 192')
+    tds_hints = ('tds', 'income tax', 'tax on', 'taxable', 'new regime', 'old regime', 'section 192', 'salary')
     if not any(h in q_lower for h in tds_hints):
         return None
 
-    from hr.services.tds_service import preview_monthly_tds, compute_tax_on_income
+    from hr.services.tds_service import preview_monthly_tds, compute_tax_on_income, compute_dynamic_tds
 
     regime = 'old' if 'old regime' in q_lower else 'new'
-    matches = list(_AMOUNT_RE.finditer(q.replace(',', '')))
-    if not matches:
-        # bare patterns like "12L" / "12 lakh"
-        m = re.search(r'(\d+(?:\.\d+)?)\s*(lakh|lac|lacs|lakhs|cr|crore|crores)', q_lower)
+    annual = None
+    monthly = None
+    source_note = 'assumed from question figure'
+
+    # Prefer live employee CTC when a name is referenced
+    if user is not None:
+        try:
+            from hr.models import Employee, EmployeeSalaryAssignment
+            tenant = getattr(user, 'active_tenant', user)
+            emp = None
+            for candidate in Employee.objects.filter(tenant=tenant, status='active'):
+                name = (candidate.full_name or '').strip().lower()
+                if name and name in q_lower:
+                    emp = candidate
+                    break
+            if emp is None:
+                # also match "18L employee" / employee_code
+                for candidate in Employee.objects.filter(tenant=tenant, status='active'):
+                    code = (candidate.employee_code or '').strip().lower()
+                    if code and code in q_lower:
+                        emp = candidate
+                        break
+            if emp is not None:
+                assignment = EmployeeSalaryAssignment.objects.filter(
+                    employee=emp
+                ).order_by('-effective_from').first()
+                if assignment and assignment.monthly_ctc:
+                    monthly = Decimal(str(assignment.monthly_ctc)).quantize(Decimal('0.01'))
+                    annual = (monthly * Decimal('12')).quantize(Decimal('0.01'))
+                    regime = (emp.tax_regime or regime or 'new').lower()
+                    source_note = f"from {emp.full_name}'s CTC"
+                    today = __import__('datetime').date.today()
+                    tds_data = compute_dynamic_tds(emp, monthly, today.month, today.year)
+                    return (
+                        f"**TDS estimate ({regime} regime, FY {tds_data['financial_year']})**\n\n"
+                        f"• Employee: **{emp.full_name}**\n"
+                        f"• Monthly CTC / gross: **₹{monthly:,.2f}**\n"
+                        f"• Projected annual gross: **₹{tds_data['projected_annual_gross']:,.2f}**\n"
+                        f"• Net taxable income: **₹{tds_data['net_taxable_income']:,.2f}**\n"
+                        f"• Annual tax (incl. 4% cess): **₹{tds_data['total_annual_tax']:,.2f}**\n"
+                        f"• Monthly TDS: **₹{tds_data['monthly_tds']:,.2f}**\n\n"
+                        f"_Computed by the payroll TDS engine ({source_note})._"
+                    )
+        except Exception:
+            logger.exception('TDS Q: employee CTC lookup failed')
+
+    q_norm = q.replace(',', '')
+    matches = list(_AMOUNT_RE.finditer(q_norm))
+    # Prefer matches that include an explicit unit (18L / 18 lakh).
+    # If the question also has a bare monthly figure near "salary", still prefer
+    # the lakh/crore amount for annual CTC questions ("₹18L employee", etc.).
+    unit_match = next((m for m in matches if m.group(2)), None)
+    salary_near = None
+    for m_cand in matches:
+        start = max(0, m_cand.start() - 24)
+        window = q_norm[start:m_cand.end() + 12].lower()
+        if 'salary' in window or 'ctc' in window or 'gross' in window:
+            if not m_cand.group(2):
+                salary_near = m_cand
+                break
+    # Annual unit wins for "18L TDS"; otherwise salary-near bare amount; else first match
+    m = unit_match or salary_near or (matches[0] if matches else None)
+    if m is None:
+        m = re.search(
+            r'(\d+(?:\.\d+)?)\s*(lakh|lac|lacs|lakhs|l(?![a-z])|cr|crore|crores)',
+            q_lower,
+        )
         if not m:
             return None
         amount = Decimal(m.group(1))
-        unit = m.group(2)
+        unit = (m.group(2) or '').lower()
     else:
-        m = matches[0]
         amount = Decimal(m.group(1).replace(',', ''))
         unit = (m.group(2) or '').lower()
 
@@ -235,7 +299,7 @@ def answer_tds_question(question):
 
     return (
         f"**TDS estimate ({regime} regime, FY {preview['financial_year']})**\n\n"
-        f"• Assumed annual gross / base: **₹{annual:,.2f}**\n"
+        f"• Assumed annual gross / base: **₹{annual:,.2f}** ({source_note})\n"
         f"• Net taxable income: **₹{taxable:,.2f}**\n"
         f"• Sec 87A rebate: **₹{rebate:,.2f}**\n"
         f"• Annual tax (incl. 4% cess): **₹{annual_tax:,.2f}**\n"

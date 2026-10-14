@@ -342,23 +342,27 @@ def view_profile(request):
     total_fields = 7  # email, phone, business_name, first_name, last_name, business_address, gstin
     completed_fields = 0
     
-    if user.email: completed_fields += 1
-    if user.phone: completed_fields += 1
-    if tenant.business_name: completed_fields += 1
-    if user.first_name: completed_fields += 1
-    if user.last_name: completed_fields += 1
-    if tenant.business_address: completed_fields += 1
-    if tenant.gstin: completed_fields += 1
+    if (user.email or '').strip(): completed_fields += 1
+    if (user.phone or '').strip(): completed_fields += 1
+    if (tenant.business_name or '').strip(): completed_fields += 1
+    if (user.first_name or '').strip(): completed_fields += 1
+    if (user.last_name or '').strip(): completed_fields += 1
+    has_address = bool((tenant.business_address or '').strip())
+    if has_address: completed_fields += 1
+    if (tenant.gstin or '').strip(): completed_fields += 1
     
     completion_percentage = int((completed_fields / total_fields) * 100)
-    if not (tenant.business_address or '').strip():
-        completion_percentage = min(completion_percentage, 99)
+    # Address is required for 100% — never report complete without it
+    if not has_address:
+        completion_percentage = min(completion_percentage, 85)
         if tenant.profile_completed:
             tenant.profile_completed = False
             tenant.save(update_fields=['profile_completed'])
     else:
         # Keep flag aligned with required business fields
         tenant.mark_profile_completed()
+        if not tenant.profile_completed:
+            completion_percentage = min(completion_percentage, 99)
     
     # Calculate account stats
     days_since_signup = (timezone.now() - user.date_joined).days

@@ -40,6 +40,22 @@ def log_create(request, instance, model_name=None, changes=None):
     )
 
 
+def _normalize_update_changes(before, after):
+    """Convert before/after blobs into per-field {old, new} for audit UI."""
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    keys = set(before.keys()) | set(after.keys())
+    out = {}
+    for key in keys:
+        if str(key).startswith('_'):
+            continue
+        old_v = before.get(key)
+        new_v = after.get(key)
+        if old_v != new_v:
+            out[key] = {'old': old_v, 'new': new_v}
+    return out or {'before': before, 'after': after}
+
+
 def log_update(request, instance, before, after, model_name=None):
     """
     Record an UPDATE audit log entry for an HR model instance.
@@ -59,7 +75,7 @@ def log_update(request, instance, before, after, model_name=None):
         model_name=model_name or instance.__class__.__name__,
         object_id=str(instance.pk),
         object_repr=str(instance)[:255],
-        changes={'before': before, 'after': after},
+        changes=_normalize_update_changes(before, after),
         ip_address=_get_client_ip(request),
     )
 

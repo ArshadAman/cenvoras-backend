@@ -65,8 +65,12 @@ class SalesMetricParityTests(TestCase):
 
         # Sales analytics MTD card
         sales_an = self.client.get('/api/billing/sales-invoices/analytics/')
-        if sales_an.status_code == 200 and 'this_month_revenue_net' in (sales_an.data or {}):
-            self.assertEqual(float(sales_an.data['this_month_revenue_net']), float(mtd['net']))
+        self.assertEqual(sales_an.status_code, status.HTTP_200_OK, sales_an.data)
+        self.assertEqual(float(sales_an.data['this_month_revenue']), float(mtd['net']))
+        self.assertEqual(float(sales_an.data['this_month_revenue_net']), float(mtd['net']))
+        led = self.client.get('/api/ledger/accounts/stats/')
+        self.assertEqual(led.status_code, status.HTTP_200_OK, led.data)
+        self.assertEqual(float(led.data['total_invoices']), float(mtd['net']))
 
 
 class Vendor194CRateTests(TestCase):

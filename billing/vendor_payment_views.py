@@ -58,18 +58,27 @@ def _extract_pan_from_gstin(gstin):
 
 
 def _vendor_pan(bill):
-    """Return PAN if available from bill/vendor GSTIN; else None (triggers 206AA)."""
+    """Return PAN from vendor.pan, else GSTIN; None triggers Sec 206AA 20%."""
+    vendor = getattr(bill, 'vendor', None)
+    if vendor is not None:
+        pan = (getattr(vendor, 'pan', None) or '').strip().upper()
+        if len(pan) == 10:
+            return pan
+        from_gstin = _extract_pan_from_gstin(getattr(vendor, 'gstin', None))
+        if from_gstin:
+            return from_gstin
     gstin = (getattr(bill, 'vendor_gstin', None) or '').strip().upper()
-    if not gstin and getattr(bill, 'vendor', None):
-        gstin = (getattr(bill.vendor, 'gstin', None) or '').strip().upper()
     return _extract_pan_from_gstin(gstin)
 
 
 def _is_individual_or_huf_vendor(bill):
     """
     194C: 1% for individual/HUF, 2% for others.
-    Prefer bill.gst_treatment; else GSTIN 5th character (P=individual, H=HUF).
+    Prefer PAN 4th char (P/H) when present; else gst_treatment; else GSTIN.
     """
+    pan = _vendor_pan(bill)
+    if pan and len(pan) >= 4:
+        return pan[3] in ('P', 'H')
     treatment = (getattr(bill, 'gst_treatment', None) or '').strip().lower()
     if treatment in ('individual', 'huf', 'unregistered', 'consumer'):
         return True

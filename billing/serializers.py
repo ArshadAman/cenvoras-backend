@@ -1349,7 +1349,7 @@ class VendorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vendor
         fields = [
-            'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
+            'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state',
             'created_by', 'created_at', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
@@ -1364,6 +1364,15 @@ class VendorSerializer(serializers.ModelSerializer):
             if queryset.exists():
                 raise serializers.ValidationError("A vendor with this email already exists.")
         return value
+
+    def validate_pan(self, value):
+        pan = (value or '').strip().upper()
+        if not pan:
+            return None
+        import re
+        if not re.fullmatch(r'^[A-Z]{5}[0-9]{4}[A-Z]$', pan):
+            raise serializers.ValidationError('Invalid PAN format (e.g. ABCDE1234F).')
+        return pan
 
     def validate_gstin(self, value):
         gstin = (value or '').strip().upper()
@@ -1390,6 +1399,9 @@ class VendorSerializer(serializers.ModelSerializer):
             code = get_state_code_from_gstin(gstin)
             if code and code in CODE_TO_STATE_NAME:
                 validated_data['state'] = CODE_TO_STATE_NAME[code]
+        # Auto-fill PAN from GSTIN when PAN blank
+        if gstin and len(gstin) >= 12 and not (validated_data.get('pan') or '').strip():
+            validated_data['pan'] = gstin[2:12]
 
         try:
             vendor = Vendor.objects.create(**validated_data)
@@ -1399,6 +1411,11 @@ class VendorSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop('meta', None)
+        gstin = (validated_data.get('gstin') if 'gstin' in validated_data else instance.gstin) or ''
+        gstin = str(gstin).strip().upper()
+        pan = validated_data.get('pan') if 'pan' in validated_data else instance.pan
+        if gstin and len(gstin) >= 12 and not (pan or '').strip():
+            validated_data['pan'] = gstin[2:12]
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

@@ -70,6 +70,12 @@ class Vendor(models.Model):
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     gstin = models.CharField(max_length=15, blank=True, null=True)
+    pan = models.CharField(
+        max_length=10,
+        blank=True,
+        null=True,
+        help_text="Vendor PAN (for TDS 194C 1%/2% and Sec 206AA). Auto-filled from GSTIN when present.",
+    )
     address = models.TextField(blank=True, null=True)
     
     state = models.CharField(

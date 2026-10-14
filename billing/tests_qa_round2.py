@@ -143,12 +143,49 @@ class Vendor194CRateTests(TestCase):
         """Single payment ≤ ₹30k with FY aggregate ≤ ₹1L → no 194C deduction."""
         self._pay('29AABCU9999F1Z5', Decimal('0.00'), taxable=Decimal('1000.00'))
 
+    def test_194c_pan_only_individual_1_percent(self):
+        """Vendor with PAN (no GSTIN), 4th letter P → 194C @ 1% when above threshold."""
+        gst_amt = (Decimal('50000.00') * Decimal('18') / Decimal('100')).quantize(Decimal('0.01'))
+        total = Decimal('50000.00') + gst_amt
+        vendor = Vendor.objects.create(
+            name='PAN Indiv', gstin='', pan='AAPPU0939F', state='Karnataka', created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number='PB-PAN-P',
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin='',
+            total_amount=total,
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill, product=self.product,
+            quantity=1, price=Decimal('50000.00'), tax=Decimal('18.00'),
+            amount=total, hsn_sac_code='998311',
+        )
+        AccountingService.create_purchase_bill_entries(bill)
+        res = self.client.post(
+            '/api/billing/vendor-payments/',
+            {
+                'bill_id': str(bill.id),
+                'amount': str(total),
+                'payment_account_id': str(self.bank.id),
+                'mode': 'bank_transfer',
+                'tds_section': '194C',
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(Decimal(str(res.data['tds_amount'])), Decimal('500.00'))
+        self.assertTrue(res.data['vendor_has_pan'])
+
     def test_194c_no_pan_20_percent(self):
         """No GSTIN/PAN → Sec 206AA 20% when threshold met."""
         gst_amt = (Decimal('50000.00') * Decimal('18') / Decimal('100')).quantize(Decimal('0.01'))
         total = Decimal('50000.00') + gst_amt
         vendor = Vendor.objects.create(
-            name='NoPAN Vendor', gstin='', state='Karnataka', created_by=self.tenant,
+            name='NoPAN Vendor', gstin='', pan='', state='Karnataka', created_by=self.tenant,
         )
         bill = PurchaseBill.objects.create(
             created_by=self.tenant,

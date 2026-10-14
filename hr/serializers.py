@@ -172,15 +172,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
         special = Decimal(str(components.get('Special Allowance') or components.get('special_allowance') or (ctc - basic - hra - da))).quantize(Decimal('0.01'))
 
         gross = ctc
-        # PF 12%
-        epf = (basic * Decimal('0.12')).quantize(Decimal('0.01'))
-        # ESI 0.75% if gross <= 21k
-        esi = (gross * Decimal('0.0075')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
-        
-        from hr.services.payroll_engine import compute_pt
+        from hr.services.payroll_engine import compute_pt, compute_pf, compute_esi, get_hrms_settings
         from hr.services.work_state import resolve_work_state
         import datetime as _dt
         from hr.services.tds_service import compute_dynamic_tds
+        hrms = get_hrms_settings(obj.tenant)
+        pf_parts = compute_pf(basic, hrms)
+        esi_parts = compute_esi(gross, hrms)
+        epf = pf_parts['employee_pf']
+        esi = esi_parts['employee_esi']
         resolved_state = resolve_work_state(employee=obj, tenant=obj.tenant)
         pt = compute_pt(gross, resolved_state, employee=obj, tenant=obj.tenant)
 
@@ -199,20 +199,18 @@ class EmployeeSerializer(serializers.ModelSerializer):
         net_pay = max(Decimal('0.00'), gross - total_deductions)
         annual_net_pay = (net_pay * Decimal('12')).quantize(Decimal('0.01'))
 
-        # Employer contributions
-        employer_epf = (basic * Decimal('0.0367')).quantize(Decimal('0.01'))
-        employer_eps = min(basic * Decimal('0.0833'), Decimal('1250.00')).quantize(Decimal('0.01'))
-        employer_esi = (gross * Decimal('0.0325')).quantize(Decimal('0.01')) if gross <= Decimal('21000.00') else Decimal('0.00')
+        # Employer contributions — same engine as payroll
+        employer_epf = pf_parts['employer_epf']
+        employer_eps = pf_parts['employer_eps']
+        employer_esi = esi_parts['employer_esi']
         total_employer = employer_epf + employer_eps + employer_esi
 
         is_rebate = rebate_applied  # True for full rebate or marginal relief
         marginal_relief = bool(tds_data.get('marginal_relief')) or (
             rebate_applied and taxable > rebate_threshold and annual_tax > Decimal('0.00')
         )
-        # 87A Nil only when engine says so AND monthly TDS is truly zero
-        nil_tax_87a = bool(tds_data.get('nil_tax_87a')) and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00')
-        if not nil_tax_87a and rebate_applied and estimated_tds == Decimal('0.00') and annual_tax == Decimal('0.00'):
-            nil_tax_87a = True
+        # 87A Nil only from TDS engine — do not widen badge from rebate alone
+        nil_tax_87a = bool(tds_data.get('nil_tax_87a'))
 
         # Clean display dictionary for earnings (Title Case, no duplicate lower/upper keys)
         earnings_dict = {
@@ -281,8 +279,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'annual_ctc': str(annual_ctc),
             'gross_salary': str(gross),
             'monthly_gross': str(gross),
-            # Annual CTC (12× monthly) — do not confuse with mid-FY TDS projection
+            # Contracted annual CTC (12×) — tax projection lives in tds_details.projected_annual_gross
             'annual_gross': str(annual_ctc),
+            'projected_annual_gross': str(projected_annual_gross),
+            'work_state': resolved_state,
             'work_state_resolved': resolved_state,
             'estimated_net_salary': str(net_pay),
             'monthly_net_take_home': str(net_pay),
@@ -301,6 +301,20 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'tds_details': tds_dict,
             'tax_regime': obj.tax_regime,
         }
+
+    def to_representation(self, instance):
+        """Persist blank work_state from company state so list/detail show PT state."""
+        from hr.services.work_state import resolve_work_state
+        if not (getattr(instance, 'work_state', None) or '').strip():
+            resolved = resolve_work_state(employee=instance, tenant=getattr(instance, 'tenant', None))
+            if resolved:
+                type(instance).objects.filter(pk=instance.pk).update(work_state=resolved)
+                instance.work_state = resolved
+        data = super().to_representation(instance)
+        data['work_state_resolved'] = resolve_work_state(
+            employee=instance, tenant=getattr(instance, 'tenant', None)
+        )
+        return data
 
     def validate_user(self, value):
         if value:

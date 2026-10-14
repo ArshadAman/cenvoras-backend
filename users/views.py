@@ -597,19 +597,23 @@ def profile_setup_view(request):
 
 def _get_profile_next_steps(user):
     """Helper function to determine what user should do next"""
+    from users.address_utils import is_meaningful_address
     steps = []
     
-    if not user.business_name:
+    if not (user.business_name or '').strip():
         steps.append("Add business/shop name")
-    if not user.business_address:
-        steps.append("Add business address for invoice generation")
+    if not is_meaningful_address(user.business_address):
+        steps.append("Add a real business address for invoice generation")
     if not user.gstin:
         steps.append("Add GST number for tax-compliant invoices (optional)")
     if not (user.first_name and user.last_name):
         steps.append("Complete your full name")
     
-    if not steps:
+    # Never claim complete while profile_completed is false (e.g. placeholder address)
+    if not steps and getattr(user, 'profile_completed', False):
         steps.append("Profile complete! Start managing your business.")
+    elif not steps:
+        steps.append("Finish required business details to complete your profile")
     
     return steps
 

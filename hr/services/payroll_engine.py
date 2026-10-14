@@ -501,13 +501,19 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
 
-    # Basic component lookup for PF
+    # Basic component lookup for PF — same fallback as salary card (50% CTC / computed Basic)
     basic_comp = assignment.salary_structure.components.filter(is_basic=True).first()
     if basic_comp:
         base_basic_str = assignment.computed_components.get(basic_comp.name, '0.0')
         basic_salary = (Decimal(str(base_basic_str)) * proration_factor).quantize(Decimal('0.01'))
     else:
-        basic_salary = Decimal('0.0')
+        comps = assignment.computed_components or {}
+        raw_basic = comps.get('Basic') or comps.get('basic')
+        if raw_basic is not None and str(raw_basic).strip() != '':
+            base_basic = Decimal(str(raw_basic))
+        else:
+            base_basic = (Decimal(str(assignment.monthly_ctc or 0)) * Decimal('0.50')).quantize(Decimal('0.01'))
+        basic_salary = (base_basic * proration_factor).quantize(Decimal('0.01'))
 
     # Statutory Calculations
     pf_details = compute_pf(basic_salary, settings)

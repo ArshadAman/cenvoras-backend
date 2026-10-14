@@ -753,11 +753,12 @@ class AccountingService:
     
     @classmethod
     def get_account_balance(cls, account, user, date_to=None):
-        """Get balance for a specific account"""
+        """Get balance for a specific account (tenant + team entries)."""
         user = getattr(user, 'active_tenant', user)
         entries = GeneralLedgerEntry.objects.filter(
             account=account,
-            created_by=user
+        ).filter(
+            Q(created_by=user) | Q(created_by__parent=user)
         )
         
         if date_to:

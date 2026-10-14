@@ -570,8 +570,9 @@ def sales_summary_analytics(request):
             # Period revenue is net of credit notes in the same date filter
             'total_revenue': float(total_revenue - total_returns),
             'total_invoices': total_invoices,
-            # MTD = shared sales_metrics (dashboard / AI parity)
-            'this_month_revenue': float(mtd['gross']),
+            # MTD net = shared sales_metrics (dashboard / AI / sales page parity)
+            'this_month_revenue': float(mtd['net']),
+            'this_month_revenue_gross': float(mtd['gross']),
             'this_month_revenue_net': float(mtd['net']),
             'this_month_invoices': int(mtd['count']),
             'sales_mtd': mtd,

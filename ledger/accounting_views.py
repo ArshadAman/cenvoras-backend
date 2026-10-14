@@ -1,3 +1,4 @@
+from datetime import timedelta
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -1003,6 +1004,13 @@ def get_ledger_stats(request):
     # Adjust total_invoices for net sales if desired, or keep separate. 
     # Usually, dashboard wants "Net Sales".
     net_sales = float(total_invoices) - float(total_returns)
+    # Default (no date/customer filter): use shared sales_mtd so ledger matches dashboard/AI
+    if not date_from_str and not date_to_str and not customer_id:
+        try:
+            from billing.sales_metrics import sales_mtd
+            net_sales = float(sales_mtd(user)['net'])
+        except Exception:
+            pass
     
     # Split aggregates — Sum(debit)-Sum(credit) can fail / confuse some backends
     _bal = entries.aggregate(d=Sum('debit'), c=Sum('credit'))

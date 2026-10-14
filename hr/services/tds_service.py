@@ -178,25 +178,61 @@ def compute_tax_on_income(taxable_income, regime='new', fy_string=None, month=No
     return base_tax, rebate_applied or marginal_relief_applied, rebate_amount, cess, total_annual_tax
 
 
+def _joining_month_idx_in_fy(joining_date, fy_start_year):
+    """
+    FY month index (1=Apr … 12=Mar) of the first payable month for this joiner.
+    Returns 1 if joined before / on FY start; None if joining_date missing.
+    """
+    if not joining_date:
+        return None
+    try:
+        join = joining_date if hasattr(joining_date, 'year') else datetime.date.fromisoformat(str(joining_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    fy_start = datetime.date(int(fy_start_year), 4, 1)
+    if join <= fy_start:
+        return 1
+    if join.month >= 4:
+        if join.year != int(fy_start_year):
+            # Joined in a later FY — not employed this FY yet
+            return None
+        return join.month - 3
+    # Jan–Mar of fy_end_year
+    if join.year != int(fy_start_year) + 1:
+        return None
+    return join.month + 9
+
+
 def project_annual_gross(
     current_month_gross,
     ytd_gross,
     remaining_months,
     month_idx_in_fy,
     previous_income=Decimal('0.00'),
+    joining_date=None,
+    fy_start_year=None,
 ):
     """
     Project FY annual gross for Sec 192 withholding.
 
-    When YTD payslips are empty/missing mid-FY, assume elapsed months at the
-    current monthly gross so we do not under-project into a false Sec 87A zero.
-    When real YTD exists, prefer it (trustworthy payslip history).
+    When YTD payslips exist, prefer them. When YTD is empty mid-FY:
+    - Mid-year joiners: only project salary payable from joining month onward
+      (no assumed pre-joining months).
+    - Full-year employees (joined on/before FY start): assume elapsed months at
+      current monthly gross so missing payslips do not under-project into a
+      false Sec 87A zero.
     """
     current_gross = Decimal(str(current_month_gross)).quantize(Decimal('0.01'))
     ytd = Decimal(str(ytd_gross or 0)).quantize(Decimal('0.01'))
     prev = Decimal(str(previous_income or 0)).quantize(Decimal('0.01'))
     remaining = max(1, int(remaining_months))
     elapsed = max(0, int(month_idx_in_fy) - 1)
+
+    join_idx = _joining_month_idx_in_fy(joining_date, fy_start_year) if fy_start_year else None
+    if join_idx is not None:
+        # Months on payroll before current month within this FY
+        elapsed = max(0, min(elapsed, int(month_idx_in_fy) - int(join_idx)))
+
     assumed_past = (current_gross * Decimal(str(elapsed))).quantize(Decimal('0.01'))
     past_gross = ytd if ytd > Decimal('0.00') else assumed_past
     projected_remaining = (current_gross * Decimal(str(remaining))).quantize(Decimal('0.01'))
@@ -286,14 +322,19 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
         other_exemptions = Decimal('0.00')
         total_exemptions = standard_deduction
 
-    # 3. Projected Annual Gross Income (mid-FY empty YTD uses assumed past months)
+    # 3. Projected Annual Gross Income
+    # Mid-FY empty YTD: assume past months only for months actually employed
+    # (date_of_joining); mid-year joiners do not get pre-joining months imputed.
     current_gross = Decimal(str(current_month_gross)).quantize(Decimal('0.01'))
+    joining_date = getattr(employee, 'date_of_joining', None)
     projected_annual_gross = project_annual_gross(
         current_gross,
         ytd_gross,
         remaining_months,
         month_idx,
         previous_income=previous_income,
+        joining_date=joining_date,
+        fy_start_year=fy_start_year,
     )
 
     # 4. Net Taxable Income
@@ -307,10 +348,14 @@ def compute_dynamic_tds(employee, current_month_gross, month, year):
     )
 
     # 6. Monthly TDS Spreading
-    # When YTD gross was assumed (no payslips mid-FY), also assume levelized YTD TDS
-    # so the current month matches full-year levelized withholding (preview parity),
-    # instead of catching up the full annual tax over remaining months only.
-    elapsed = max(0, month_idx - 1)
+    # When YTD gross was assumed for pre-current employment months (full-year
+    # employee, no payslips), also assume levelized YTD TDS for preview parity.
+    # Mid-year joiners have elapsed=0 → no assumed YTD TDS catch-up.
+    join_idx = _joining_month_idx_in_fy(joining_date, fy_start_year)
+    if join_idx is not None:
+        elapsed = max(0, min(max(0, month_idx - 1), month_idx - int(join_idx)))
+    else:
+        elapsed = max(0, month_idx - 1)
     effective_ytd_tds = ytd_tds
     if (
         ytd_gross <= Decimal('0.00')
@@ -401,26 +446,52 @@ def preview_monthly_tds(
     section_24b=Decimal('0.00'),
     hra_exemption=Decimal('0.00'),
     other_exemptions=Decimal('0.00'),
+    date_of_joining=None,
 ):
     """
-    Employee-screen / calculator preview using the same FY slabs and remaining-months
-    spreading as payroll (no YTD payslips).
+    Employee-screen / calculator preview using the same FY slabs as payroll.
+
+    Without date_of_joining: offer-letter style full-year (12×) levelized projection.
+    With mid-year joining: project only salary payable from join through FY end,
+    and spread remaining tax over remaining pay cycles (same as compute_dynamic_tds).
     """
     today = datetime.date.today()
     month = int(month or today.month)
     year = int(year or today.year)
     fy_info = get_financial_year_info(month, year)
     fy_str = fy_info['fy_string']
-    # Calculator / offer-letter preview assumes full-year levelized employment.
-    # Live payroll uses compute_dynamic_tds (YTD + true remaining months).
-    remaining_months = 12
+    fy_start_year = fy_info['fy_start_year']
+    month_idx = fy_info['month_idx_in_fy']
+    remaining_months = fy_info['remaining_months']
     cfg = resolve_tax_fy_config(fy_string=fy_str)
     regime = (regime or 'new').lower()
 
     gross = Decimal(str(monthly_gross)).quantize(Decimal('0.01'))
     prev_income = Decimal(str(previous_income or 0))
     prev_tds = Decimal(str(previous_tds or 0))
-    projected_annual_gross = (gross * Decimal('12') + prev_income).quantize(Decimal('0.01'))
+
+    join_idx = _joining_month_idx_in_fy(date_of_joining, fy_start_year)
+    if join_idx is None:
+        # Offer / unknown join — full-year levelized employment
+        remaining_months = 12
+        projected_annual_gross = (gross * Decimal('12') + prev_income).quantize(Decimal('0.01'))
+    else:
+        # Payable months in FY from max(join, current) through March
+        first_payable_idx = max(int(join_idx), int(month_idx))
+        payable_months = max(1, 13 - first_payable_idx)
+        # If already past join and previewing current month, include remaining from current
+        if int(join_idx) <= int(month_idx):
+            payable_months = remaining_months
+            # Plus any assumed months from join to month before current (no YTD in preview)
+            elapsed_employed = max(0, int(month_idx) - int(join_idx))
+            projected_annual_gross = (
+                gross * Decimal(str(elapsed_employed + remaining_months)) + prev_income
+            ).quantize(Decimal('0.01'))
+        else:
+            remaining_months = payable_months
+            projected_annual_gross = (gross * Decimal(str(payable_months)) + prev_income).quantize(
+                Decimal('0.01')
+            )
 
     if regime == 'old':
         standard_deduction = cfg['old_std_deduction']

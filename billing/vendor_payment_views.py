@@ -23,6 +23,12 @@ TDS_SECTION_RATES = {
     '194Q': Decimal('0.10'),   # purchase of goods
 }
 
+# Sec 194C: deduct only when a single payment > ₹30,000 or FY aggregate > ₹1,00,000.
+TDS_194C_SINGLE_THRESHOLD = Decimal('30000.00')
+TDS_194C_AGGREGATE_THRESHOLD = Decimal('100000.00')
+# Sec 206AA: higher rate when deductee PAN is not available.
+TDS_NO_PAN_RATE = Decimal('20.00')
+
 
 def _bill_taxable_total(bill):
     """GST-exclusive taxable value of a purchase bill (TDS base under 194C/J/Q)."""
@@ -40,6 +46,23 @@ def _bill_taxable_total(bill):
                 line = amt
         total += line
     return total.quantize(Decimal('0.01'))
+
+
+def _extract_pan_from_gstin(gstin):
+    gstin = (gstin or '').strip().upper()
+    if len(gstin) >= 12:
+        pan = gstin[2:12]
+        if len(pan) == 10 and pan[0:5].isalpha() and pan[5:9].isdigit() and pan[9].isalpha():
+            return pan
+    return None
+
+
+def _vendor_pan(bill):
+    """Return PAN if available from bill/vendor GSTIN; else None (triggers 206AA)."""
+    gstin = (getattr(bill, 'vendor_gstin', None) or '').strip().upper()
+    if not gstin and getattr(bill, 'vendor', None):
+        gstin = (getattr(bill.vendor, 'gstin', None) or '').strip().upper()
+    return _extract_pan_from_gstin(gstin)
 
 
 def _is_individual_or_huf_vendor(bill):
@@ -61,28 +84,91 @@ def _is_individual_or_huf_vendor(bill):
     return False
 
 
+def _fy_bounds(as_of=None):
+    as_of = as_of or date.today()
+    if as_of.month >= 4:
+        return date(as_of.year, 4, 1), date(as_of.year + 1, 3, 31)
+    return date(as_of.year - 1, 4, 1), date(as_of.year, 3, 31)
+
+
+def _vendor_fy_taxable_paid(tenant, bill, as_of=None, extra_taxable=Decimal('0.00')):
+    """
+    GST-exclusive taxable already paid to this vendor in the FY (pro-rata on amount_paid),
+    plus optional extra_taxable for the payment being previewed/created.
+    """
+    as_of = as_of or date.today()
+    fy_start, fy_end = _fy_bounds(as_of)
+    vendor = getattr(bill, 'vendor', None)
+    qs = PurchaseBill.objects.filter(
+        created_by=tenant,
+        bill_date__gte=fy_start,
+        bill_date__lte=fy_end,
+    )
+    if vendor is not None:
+        qs = qs.filter(vendor=vendor)
+    else:
+        qs = qs.filter(vendor_name=bill.vendor_name)
+
+    total = Decimal('0.00')
+    for b in qs.prefetch_related('items'):
+        bill_total = Decimal(str(b.total_amount or 0))
+        paid = Decimal(str(b.amount_paid or 0))
+        if bill_total <= 0 or paid <= 0:
+            continue
+        taxable = _bill_taxable_total(b)
+        if taxable <= 0:
+            continue
+        total += (taxable * paid / bill_total).quantize(Decimal('0.01'))
+    return (total + Decimal(str(extra_taxable or 0))).quantize(Decimal('0.01'))
+
+
+def _194c_threshold_met(single_taxable, fy_aggregate_including_current):
+    """True when Sec 194C withholding is required for this payment."""
+    single = Decimal(str(single_taxable or 0))
+    agg = Decimal(str(fy_aggregate_including_current or 0))
+    return single > TDS_194C_SINGLE_THRESHOLD or agg > TDS_194C_AGGREGATE_THRESHOLD
+
+
 def _tds_rate_for_section(section, bill):
     section = (section or '').strip().upper()
     if section == '194C':
+        if _vendor_pan(bill) is None:
+            return TDS_NO_PAN_RATE
         return Decimal('1.00') if _is_individual_or_huf_vendor(bill) else Decimal('2.00')
     return TDS_SECTION_RATES.get(section, Decimal('0.00'))
 
 
-def _compute_tds_preview(bill, amount, tds_section):
-    """Return (rate, tds_amount, taxable_base, net_paid) for a payment amount."""
+def _compute_tds_preview(bill, amount, tds_section, tenant=None):
+    """Return (rate, tds_amount, taxable_base, net_paid, meta) for a payment amount."""
     amount = Decimal(str(amount or 0)).quantize(Decimal('0.01'))
+    meta = {
+        'threshold_met': True,
+        'fy_aggregate': Decimal('0.00'),
+        'vendor_has_pan': _vendor_pan(bill) is not None,
+    }
     if not tds_section or amount <= 0:
-        return Decimal('0.00'), Decimal('0.00'), Decimal('0.00'), amount
-    rate = _tds_rate_for_section(tds_section, bill)
+        return Decimal('0.00'), Decimal('0.00'), Decimal('0.00'), amount, meta
+
     bill_total = Decimal(str(bill.total_amount or 0))
     taxable_total = _bill_taxable_total(bill)
     if bill_total > 0 and taxable_total > 0:
         tds_base = (amount * taxable_total / bill_total).quantize(Decimal('0.01'))
     else:
         tds_base = amount
+
+    section = (tds_section or '').strip().upper()
+    if section == '194C':
+        tenant = tenant or getattr(bill, 'created_by', None)
+        fy_agg = _vendor_fy_taxable_paid(tenant, bill, extra_taxable=tds_base) if tenant else tds_base
+        meta['fy_aggregate'] = fy_agg
+        meta['threshold_met'] = _194c_threshold_met(tds_base, fy_agg)
+        if not meta['threshold_met']:
+            return Decimal('0.00'), Decimal('0.00'), tds_base, amount, meta
+
+    rate = _tds_rate_for_section(tds_section, bill)
     tds_amount = (tds_base * rate / Decimal('100')).quantize(Decimal('0.01'))
     net_paid = (amount - tds_amount).quantize(Decimal('0.01'))
-    return rate, tds_amount, tds_base, net_paid
+    return rate, tds_amount, tds_base, net_paid, meta
 
 
 def _is_cash_or_bank_account(account):
@@ -116,8 +202,9 @@ def unpaid_purchase_bills(request):
             taxable_balance = (due * taxable_total / bill_total).quantize(Decimal('0.01'))
         else:
             taxable_balance = due
-        rate_194c = _tds_rate_for_section('194C', bill)
-        tds_194c = (taxable_balance * rate_194c / Decimal('100')).quantize(Decimal('0.01'))
+        rate_194c, tds_194c, _base, _net, meta = _compute_tds_preview(
+            bill, due, '194C', tenant=tenant
+        )
         rows.append({
             'id': str(bill.id),
             'bill_number': bill.bill_number,
@@ -127,6 +214,9 @@ def unpaid_purchase_bills(request):
             'vendor_gstin': bill.vendor_gstin,
             'gst_treatment': getattr(bill, 'gst_treatment', None),
             'is_individual_or_huf': _is_individual_or_huf_vendor(bill),
+            'vendor_has_pan': meta['vendor_has_pan'],
+            'tds_threshold_met_194c': meta['threshold_met'],
+            'fy_taxable_aggregate': str(meta['fy_aggregate']),
             'total_amount': str(bill.total_amount),
             'amount_paid': str(bill.amount_paid),
             'balance_due': str(due),
@@ -200,11 +290,14 @@ def vendor_payment_create(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     tds_rate = Decimal('0.00')
-    if tds_section and tds_amount <= 0:
-        tds_rate, tds_amount, _tds_base, _net = _compute_tds_preview(bill, amount, tds_section)
-    elif tds_section:
-        tds_rate = _tds_rate_for_section(tds_section, bill)
-    if tds_amount >= amount:
+    threshold_met = True
+    if tds_section:
+        # Always recompute from rules (ignore client tds_amount for threshold/no-PAN honesty)
+        tds_rate, tds_amount, _tds_base, _net, meta = _compute_tds_preview(
+            bill, amount, tds_section, tenant=tenant
+        )
+        threshold_met = meta.get('threshold_met', True)
+    if tds_amount >= amount and tds_amount > 0:
         return Response({'message': 'tds_amount must be less than payment amount'}, status=status.HTTP_400_BAD_REQUEST)
 
     net_paid = (amount - tds_amount).quantize(Decimal('0.01'))
@@ -285,6 +378,8 @@ def vendor_payment_create(request):
         'tds_section': tds_section,
         'tds_rate': str(tds_rate),
         'tds_amount': str(tds_amount),
+        'tds_threshold_met': threshold_met,
+        'vendor_has_pan': _vendor_pan(bill) is not None,
         'amount_paid': str(bill.amount_paid),
         'payment_status': bill.payment_status,
     }, status=status.HTTP_201_CREATED)

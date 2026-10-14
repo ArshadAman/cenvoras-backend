@@ -165,11 +165,23 @@ class EmployeeSerializer(serializers.ModelSerializer):
             return None
         ctc = latest.monthly_ctc
         components = dict(latest.computed_components or {})
-        
+        meta_basic_pct = components.pop('_basic_pct', None)
+        meta_hra_pct = components.pop('_hra_pct', None)
+
         basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))
         hra = Decimal(str(components.get('HRA') or components.get('hra') or (basic * Decimal('0.50')))).quantize(Decimal('0.01'))
         da = Decimal(str(components.get('DA') or components.get('da') or '0.00')).quantize(Decimal('0.01'))
         special = Decimal(str(components.get('Special Allowance') or components.get('special_allowance') or (ctc - basic - hra - da))).quantize(Decimal('0.01'))
+        try:
+            basic_pct_out = Decimal(str(meta_basic_pct)) if meta_basic_pct is not None else (
+                (basic * Decimal('100') / ctc).quantize(Decimal('0.01')) if ctc > 0 else Decimal('50.00')
+            )
+            hra_pct_out = Decimal(str(meta_hra_pct)) if meta_hra_pct is not None else (
+                (hra * Decimal('100') / basic).quantize(Decimal('0.01')) if basic > 0 else Decimal('50.00')
+            )
+        except Exception:
+            basic_pct_out = Decimal('50.00')
+            hra_pct_out = Decimal('50.00')
 
         gross = ctc
         from hr.services.payroll_engine import compute_pt, compute_pf, compute_esi, get_hrms_settings
@@ -282,6 +294,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             # Contracted annual CTC (12×) — tax projection lives in tds_details.projected_annual_gross
             'annual_gross': str(annual_ctc),
             'projected_annual_gross': str(projected_annual_gross),
+            'basic_pct': str(basic_pct_out),
+            'hra_pct': str(hra_pct_out),
             'work_state': resolved_state,
             'work_state_resolved': resolved_state,
             'estimated_net_salary': str(net_pay),
@@ -436,6 +450,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 )
 
         custom_components = salary_data.get('components') or {}
+        basic_pct_raw = salary_data.get('basic_pct')
+        hra_pct_raw = salary_data.get('hra_pct')
         latest_existing = employee.salary_assignments.order_by('-effective_from', '-id').first()
         prev_salary = latest_existing.monthly_ctc if latest_existing else Decimal('0.00')
 
@@ -466,9 +482,64 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 monthly_ctc=ctc,
             )
 
-        if custom_components:
+        # Prefer explicit Basic/HRA % from the compensation form (do not mutate shared
+        # SalaryStructure — store per-assignment computed_components snapshot).
+        computed_from_pct = None
+        if basic_pct_raw is not None and str(basic_pct_raw).strip() != '':
+            try:
+                basic_pct = Decimal(str(basic_pct_raw))
+                hra_pct = Decimal(str(hra_pct_raw if hra_pct_raw is not None and str(hra_pct_raw).strip() != '' else '50'))
+                basic_amt = (ctc * basic_pct / Decimal('100')).quantize(Decimal('0.01'))
+                hra_amt = (basic_amt * hra_pct / Decimal('100')).quantize(Decimal('0.01'))
+                # Preserve other fixed allowances from payload when present
+                extra = Decimal('0.00')
+                extras = {}
+                da_val = Decimal('0.00')
+                for k, v in (custom_components or {}).items():
+                    if str(k).startswith('_'):
+                        continue
+                    norm = k.strip().lower().replace('_', ' ')
+                    if norm in ('basic', 'hra', 'special allowance'):
+                        continue
+                    try:
+                        val = Decimal(str(v)).quantize(Decimal('0.01'))
+                    except Exception:
+                        continue
+                    if val <= 0:
+                        continue
+                    if norm == 'da':
+                        da_val = val
+                        continue
+                    canon = k.strip()
+                    if norm == 'conveyance allowance':
+                        canon = 'Conveyance Allowance'
+                    elif norm == 'medical allowance':
+                        canon = 'Medical Allowance'
+                    extras[canon] = str(val)
+                    extra += val
+                special = max(Decimal('0.00'), ctc - basic_amt - hra_amt - da_val - extra).quantize(Decimal('0.01'))
+                computed_from_pct = {
+                    'Basic': str(basic_amt),
+                    'HRA': str(hra_amt),
+                    **extras,
+                }
+                if da_val > 0:
+                    computed_from_pct['DA'] = str(da_val)
+                # Set after extras so a stale Special Allowance key cannot overwrite
+                computed_from_pct['Special Allowance'] = str(special)
+                computed_from_pct['_basic_pct'] = str(basic_pct.quantize(Decimal('0.01')))
+                computed_from_pct['_hra_pct'] = str(hra_pct.quantize(Decimal('0.01')))
+            except Exception:
+                computed_from_pct = None
+
+        if computed_from_pct is not None:
+            assignment.computed_components = computed_from_pct
+            assignment.save(update_fields=['computed_components'])
+        elif custom_components:
             computed = {}
             for k, v in custom_components.items():
+                if str(k).startswith('_'):
+                    continue
                 norm_lower = k.strip().lower().replace('_', ' ')
                 canonical_name = k.strip()
                 if norm_lower == 'basic':
@@ -484,6 +555,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     computed[canonical_name] = str(Decimal(str(v)).quantize(Decimal('0.01')))
                 except Exception:
                     computed[canonical_name] = str(v)
+            # Derive % metadata for FE reload
+            try:
+                b = Decimal(str(computed.get('Basic') or 0))
+                h = Decimal(str(computed.get('HRA') or 0))
+                if ctc > 0 and b > 0:
+                    computed['_basic_pct'] = str((b * Decimal('100') / ctc).quantize(Decimal('0.01')))
+                    computed['_hra_pct'] = str((h * Decimal('100') / b).quantize(Decimal('0.01'))) if b > 0 else '0.00'
+            except Exception:
+                pass
             assignment.computed_components = computed
             assignment.save(update_fields=['computed_components'])
         else:

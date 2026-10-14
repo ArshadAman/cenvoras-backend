@@ -493,21 +493,23 @@ class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
         self.assertEqual(Decimal(str(bill.amount_paid)), Decimal("1180.00"))
 
     def test_vendor_payment_tds_194c_on_taxable_not_gst_inclusive(self):
-        """194C @ 2% must use GST-exclusive taxable (₹20 on ₹1,000), not ₹23.60 on ₹1,180."""
+        """194C @ 2% must use GST-exclusive taxable (₹1,000 on ₹50,000), not GST-inclusive."""
         from ledger.services import AccountingService as AS
         bank = AS.get_or_create_default_accounts(self.tenant).get("1002")
         GeneralLedgerEntry.objects.create(
             date=date.today(),
             account=bank,
-            debit=Decimal("50000.00"),
+            debit=Decimal("100000.00"),
             credit=Decimal("0.00"),
             description="Seed",
             reference="SEED-BANK-TDS",
             created_by=self.tenant,
         )
         vendor = Vendor.objects.create(
-            name="TDS Vendor", gstin="29TDSVE1234F1Z5", state="Karnataka", created_by=self.tenant
+            name="TDS Vendor", gstin="29AABCU1234F1Z5", state="Karnataka", created_by=self.tenant
         )
+        taxable = Decimal("50000.00")
+        total = Decimal("59000.00")  # +18% GST
         bill = PurchaseBill.objects.create(
             created_by=self.tenant,
             bill_number="PB-TDS-001",
@@ -515,15 +517,15 @@ class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
             vendor=vendor,
             vendor_name=vendor.name,
             vendor_gstin=vendor.gstin,
-            total_amount=Decimal("1180.00"),
+            total_amount=total,
         )
         PurchaseBillItem.objects.create(
             purchase_bill=bill,
             product=self.product,
             quantity=1,
-            price=Decimal("1000.00"),
+            price=taxable,
             tax=Decimal("18.00"),
-            amount=Decimal("1180.00"),
+            amount=total,
             hsn_sac_code="847130",
         )
         AccountingService.create_purchase_bill_entries(bill)
@@ -531,7 +533,7 @@ class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
             "/api/billing/vendor-payments/",
             {
                 "bill_id": str(bill.id),
-                "amount": "1180.00",
+                "amount": str(total),
                 "payment_account_id": str(bank.id),
                 "mode": "bank_transfer",
                 "tds_section": "194C",
@@ -539,7 +541,7 @@ class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
-        self.assertEqual(Decimal(str(res.data["tds_amount"])), Decimal("20.00"))
+        self.assertEqual(Decimal(str(res.data["tds_amount"])), Decimal("1000.00"))
 
     def test_vendor_payment_blocks_overdraft(self):
         from ledger.services import AccountingService as AS

@@ -26,14 +26,15 @@ class SeedPTSlabsCommandTests(TestCase):
         # Check that slabs were created
         self.assertGreater(ProfessionalTaxSlab.objects.count(), 0)
         
-        # Check for the 8 specific states
+        # 8 legacy states + Odisha (repealed → ₹0)
         states = ProfessionalTaxSlab.objects.values_list('state_name', flat=True).distinct()
         expected_states = {
-            "Maharashtra", "Karnataka", "West Bengal", "Tamil Nadu", 
-            "Andhra Pradesh", "Telangana", "Gujarat", "Madhya Pradesh"
+            "Maharashtra", "Karnataka", "West Bengal", "Tamil Nadu",
+            "Andhra Pradesh", "Telangana", "Gujarat", "Madhya Pradesh", "Odisha",
         }
         self.assertEqual(set(states), expected_states)
-        self.assertEqual(len(set(states)), 8)
+        odisha = ProfessionalTaxSlab.objects.get(state_name='Odisha', lower_bound=0)
+        self.assertEqual(odisha.pt_amount, Decimal('0.00'))
         
         # Check specific edge cases
         # Maharashtra highest slab

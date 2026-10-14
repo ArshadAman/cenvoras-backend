@@ -107,7 +107,7 @@ class DynamicTDSEngineTests(TestCase):
         self.assertFalse(tds_data['nil_tax_87a'])
 
     def test_fy2026_18l_october_empty_ytd_same_monthly_tds(self):
-        """Mid-FY with no prior payslips must project ₹18L and levelized TDS ≈ ₹12,566.67 (preview parity)."""
+        """Full-year employee (joined Apr) mid-FY with no payslips: still project ₹18L levelized."""
         tds_data = compute_dynamic_tds(self.emp, Decimal('150000.00'), month=10, year=2026)
         self.assertEqual(tds_data['remaining_months'], 6)
         self.assertEqual(tds_data['projected_annual_gross'], Decimal('1800000.00'))
@@ -120,6 +120,21 @@ class DynamicTDSEngineTests(TestCase):
         """₹1L/mo → ₹12L gross → taxable ₹11.25L → still within 87A → TDS ₹0 mid-FY."""
         tds_data = compute_dynamic_tds(self.emp, Decimal('100000.00'), month=10, year=2026)
         self.assertEqual(tds_data['projected_annual_gross'], Decimal('1200000.00'))
+        self.assertEqual(tds_data['monthly_tds'], Decimal('0.00'))
+        self.assertTrue(tds_data['nil_tax_87a'])
+
+    def test_mid_year_october_joiner_projects_only_payable_months(self):
+        """
+        Oct joiner @ ₹1,66,667/mo → ~₹10L FY gross → within 87A → monthly TDS ₹0.
+        Must not impute Apr–Sep salary when date_of_joining is mid-FY.
+        """
+        self.emp.date_of_joining = datetime.date(2026, 10, 1)
+        self.emp.save(update_fields=['date_of_joining'])
+        monthly = Decimal('166667.00')
+        tds_data = compute_dynamic_tds(self.emp, monthly, month=10, year=2026)
+        self.assertEqual(tds_data['remaining_months'], 6)
+        # 166667 * 6 = 1,000,002
+        self.assertEqual(tds_data['projected_annual_gross'], Decimal('1000002.00'))
         self.assertEqual(tds_data['monthly_tds'], Decimal('0.00'))
         self.assertTrue(tds_data['nil_tax_87a'])
 
@@ -303,3 +318,41 @@ class DynamicTDSEngineTests(TestCase):
         self.assertEqual(assignment.computed_components['Basic'], '37500.00')
         self.assertEqual(assignment.computed_components['HRA'], '18750.00')
         self.assertEqual(assignment.computed_components['Special Allowance'], '18750.00')
+
+    def test_update_employee_persists_basic_hra_pct(self):
+        """Basic/HRA % from edit form must update computed_components (not stay at structure 50/50)."""
+        EmployeeSalaryAssignment.objects.create(
+            tenant=self.tenant,
+            employee=self.emp,
+            salary_structure=self.struct,
+            effective_from=datetime.date(2026, 4, 1),
+            monthly_ctc=Decimal('100000.00'),
+            computed_components={
+                'Basic': '50000.00', 'HRA': '25000.00', 'Special Allowance': '25000.00',
+                '_basic_pct': '50.00', '_hra_pct': '50.00',
+            },
+        )
+        res = self.client.patch(
+            f'/api/hr/employees/{self.emp.id}/',
+            {
+                'salary': {
+                    'monthly_ctc': 100000,
+                    'basic_pct': 80,
+                    'hra_pct': 40,
+                    'components': {'Basic': 80000, 'HRA': 32000},
+                }
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        assignment = self.emp.salary_assignments.order_by('-effective_from', '-id').first()
+        # 80% Basic + 40%-of-Basic HRA = 112% of CTC → Special Allowance floors at 0
+        self.assertEqual(assignment.computed_components['Basic'], '80000.00')
+        self.assertEqual(assignment.computed_components['HRA'], '32000.00')
+        self.assertEqual(assignment.computed_components['Special Allowance'], '0.00')
+        self.assertEqual(assignment.computed_components['_basic_pct'], '80.00')
+        self.assertEqual(assignment.computed_components['_hra_pct'], '40.00')
+        self.assertEqual(res.data['salary_details']['basic_pct'], '80.00')
+        self.assertEqual(res.data['salary_details']['hra_pct'], '40.00')
+        # Reload must not fall back to structure 50/50
+        self.assertNotEqual(res.data['salary_details']['earnings']['Basic'], '50000.00')

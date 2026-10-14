@@ -382,9 +382,14 @@ def compute_gross(employee, month, year):
     custom_deductions_map = {}
 
     for comp_name, value_str in assignment.computed_components.items():
+        if str(comp_name).startswith('_'):
+            continue  # metadata (e.g. _basic_pct) — not an earning
         comp_obj = structure_components.get(comp_name)
         comp_type = comp_obj.type if comp_obj else 'earning'
-        val = Decimal(str(value_str))
+        try:
+            val = Decimal(str(value_str))
+        except Exception:
+            continue
 
         if comp_type == 'deduction':
             # Custom deduction defined in salary structure (e.g. Canteen, Transport)

@@ -333,7 +333,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         purchase_bill.refresh_payment_status(save=True)
 
         tenant_id = getattr(user, 'id', None)
-            transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
+        transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         if tenant_id:
             try:
                 from inventory.views import invalidate_tenant_catalog

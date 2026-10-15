@@ -46,15 +46,15 @@ class GSTRate(models.Model):
     """GST rates for different product categories and HSN codes."""
     GST_RATE_CHOICES = [
         (0, '0%'),
+        (3, '3%'),
         (5, '5%'),
-        (12, '12%'),
         (18, '18%'),
-        (28, '28%'),
+        (40, '40%'),
     ]
     
     category = models.CharField(max_length=200, db_index=True)  # e.g., "Electronics and Accessories"
     hsn_codes = models.CharField(max_length=500, blank=True, help_text="Comma-separated HSN codes")  # e.g., "8471,8517,9030"
-    rate = models.IntegerField(choices=GST_RATE_CHOICES)  # 5, 12, 18, 28
+    rate = models.IntegerField(choices=GST_RATE_CHOICES)  # 0, 3, 5, 18, 40
     slug = models.SlugField(max_length=150, unique=True, db_index=True)  # For URL: "gst-18-electronics"
     
     # SEO metadata

@@ -160,7 +160,7 @@ class TenantLearnedHsnGst(models.Model):
     class Meta:
         unique_together = [('tenant', 'hsn_code')]
         indexes = [
-            models.Index(fields=['tenant', 'hsn_code']),
+            models.Index(fields=['tenant', 'hsn_code'], name='billing_ten_tenant__7de794_idx'),
         ]
         ordering = ['-usage_count', '-updated_at']
 

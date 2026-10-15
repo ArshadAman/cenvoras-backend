@@ -98,3 +98,27 @@ def bulk_restore_products(request):
         'message': f"Successfully restored {restored_count} product(s) to active inventory."
     }, status=status.HTTP_200_OK)
 
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def restore_product(request, pk):
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        product = Product.objects.get(id=pk, created_by=tenant)
+    except Product.DoesNotExist:
+        return Response({'error': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    product.is_active = True
+    product.save(update_fields=['is_active'])
+
+    from inventory.views import invalidate_tenant_catalog
+    tenant_id = getattr(tenant, 'id', request.user.id)
+    invalidate_tenant_catalog(tenant_id)
+
+    return Response({
+        'success': True,
+        'message': f"Successfully restored '{product.name}' to active inventory.",
+        'product_id': str(product.id),
+        'is_active': True,
+    }, status=status.HTTP_200_OK)
+

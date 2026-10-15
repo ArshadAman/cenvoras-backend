@@ -137,7 +137,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
                 qs = qs.filter(is_active=True)
             elif str(is_active_param).lower() in ('false', '0'):
                 qs = qs.filter(is_active=False)
-        if not include_archived:
+        elif not include_archived:
             qs = qs.filter(is_active=True)
 
         manufacturer = self.request.query_params.get('manufacturer')
@@ -978,5 +978,24 @@ def expiry_dashboard_summary(request):
 
     return Response(cache_get_or_set(cache_key, CACHE_TTL_MEDIUM, build_summary))
 
-from .bulk_delete import bulk_delete_products, bulk_restore_products
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def manufacturer_list(request):
+    """Return distinct manufacturer names across all tenant products."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    manufacturers = (
+        Product.objects
+        .filter(created_by=tenant)
+        .exclude(manufacturer__isnull=True)
+        .exclude(manufacturer='')
+        .values_list('manufacturer', flat=True)
+        .distinct()
+        .order_by('manufacturer')
+    )
+    clean = sorted(list({str(m).strip() for m in manufacturers if m and str(m).strip()}))
+    return Response(clean)
+
+
+from .bulk_delete import bulk_delete_products, bulk_restore_products, restore_product
 

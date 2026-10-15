@@ -114,6 +114,15 @@ def increase_stock_on_purchase(sender, instance, created, **kwargs):
                 )
                 StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') + qty_to_add)
 
+    try:
+        if user:
+            from inventory.views import invalidate_tenant_catalog
+            tenant_id = getattr(user, 'id', None)
+            if tenant_id:
+                invalidate_tenant_catalog(tenant_id)
+    except Exception:
+        pass
+
 
 @receiver(pre_save, sender=SalesInvoiceItem)
 def track_sale_item_pre_save(sender, instance, **kwargs):
@@ -294,17 +303,36 @@ def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
     qty_to_revert = _get_item_effective_qty(instance)
     Product.objects.filter(pk=instance.product_id).update(stock=F('stock') - qty_to_revert)
     
-    if instance.batch and instance.purchase_bill:
+    if instance.purchase_bill:
         try:
             bill = instance.purchase_bill
             target_warehouse = _get_target_warehouse(bill, bill.created_by)
             if target_warehouse:
-                StockPoint.objects.filter(
-                    batch=instance.batch, 
-                    warehouse=target_warehouse
-                ).update(quantity=Greatest(F('quantity') - qty_to_revert, 0))
+                if instance.batch:
+                    StockPoint.objects.filter(
+                        batch=instance.batch, 
+                        warehouse=target_warehouse
+                    ).update(quantity=Greatest(F('quantity') - qty_to_revert, 0))
+                else:
+                    from inventory.models import ProductBatch
+                    default_batch = ProductBatch.objects.filter(product_id=instance.product_id, batch_number='DEFAULT').first()
+                    if default_batch:
+                        StockPoint.objects.filter(
+                            batch=default_batch,
+                            warehouse=target_warehouse
+                        ).update(quantity=Greatest(F('quantity') - qty_to_revert, 0))
         except Exception as e:
             logger.error("Error reverting StockPoint on Purchase Delete: %s", e)
+
+    try:
+        user = getattr(instance.purchase_bill, 'created_by', None) if instance.purchase_bill else None
+        if user:
+            from inventory.views import invalidate_tenant_catalog
+            tenant_id = getattr(user, 'id', None)
+            if tenant_id:
+                invalidate_tenant_catalog(tenant_id)
+    except Exception:
+        pass
 
 
 @receiver(post_delete, sender=SalesInvoiceItem)

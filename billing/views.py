@@ -110,6 +110,11 @@ def purchase_bill_update_delete(request, pk):
         )
         if serializer.is_valid():
             serializer.save()
+            try:
+                from inventory.views import invalidate_tenant_catalog
+                invalidate_tenant_catalog(getattr(tenant, 'id', None))
+            except Exception:
+                pass
             return Response({'success': True, 'message': 'Purchase bill updated successfully.', 'data': serializer.data})
         return Response(
             {'success': False, 'message': 'Validation error.', 'errors': serializer.errors},
@@ -122,6 +127,11 @@ def purchase_bill_update_delete(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
     bill.delete()
+    try:
+        from inventory.views import invalidate_tenant_catalog
+        invalidate_tenant_catalog(getattr(tenant, 'id', None))
+    except Exception:
+        pass
     return Response({'success': True, 'message': 'Purchase bill deleted successfully.'}, status=status.HTTP_204_NO_CONTENT)
 
 

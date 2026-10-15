@@ -98,9 +98,9 @@ class MockHSNGSTProvider(HSNGSTProvider):
             },
             {
                 "category": "Precious Metals and Jewellery",
-                "rate": 5,
+                "rate": 3,
                 "hsn_codes": "7113,7107",
-                "notes": "Gold and precious metals at concessional rate. Hallmark certification required.",
+                "notes": "Gold and precious metals at 3% concessional GST. Hallmark certification required.",
             },
             {
                 "category": "Food and Beverages",
@@ -109,10 +109,10 @@ class MockHSNGSTProvider(HSNGSTProvider):
                 "notes": "Most food items are 5% GST. Alcohol has different treatment.",
             },
             {
-                "category": "Motor Vehicles",
-                "rate": 28,
+                "category": "Motor Vehicles / Sin Goods",
+                "rate": 40,
                 "hsn_codes": "8704,8703",
-                "notes": "Highest GST rate. Applicable to cars, commercial vehicles.",
+                "notes": "Highest GST slab (replaces former 28%). Cars, commercial vehicles, and sin/luxury categories.",
             },
         ]
 

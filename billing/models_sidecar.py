@@ -129,9 +129,43 @@ class InvoiceSettings(models.Model):
     show_item_storage_condition = models.BooleanField(default=False)
     show_item_internal_reference = models.BooleanField(default=False)
     show_item_purchase_price = models.BooleanField(default=False)
+
+    # Cenvora footer on printed invoices (staff-gated toggle grant)
+    show_cenvora_footer = models.BooleanField(
+        default=True,
+        help_text="Show 'Made with Cenvora' footer on invoices. Default True for non-business plans.",
+    )
+    allow_cenvora_footer_toggle = models.BooleanField(
+        default=False,
+        help_text="When True, tenant may turn show_cenvora_footer on/off. Only staff/superuser may set this.",
+    )
     
     def __str__(self):
         return f"Invoice Settings for {self.user}"
+
+
+class TenantLearnedHsnGst(models.Model):
+    """HSN → GST rate pairs learned from a tenant's invoice/purchase lines."""
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='learned_hsn_gst',
+    )
+    hsn_code = models.CharField(max_length=20, db_index=True)
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    usage_count = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('tenant', 'hsn_code')]
+        indexes = [
+            models.Index(fields=['tenant', 'hsn_code']),
+        ]
+        ordering = ['-usage_count', '-updated_at']
+
+    def __str__(self):
+        return f"{self.hsn_code} → {self.gst_rate}% ({self.tenant_id})"
 
 # =============================================================================
 # NEW VOUCHER TYPES (Non-Accounting)

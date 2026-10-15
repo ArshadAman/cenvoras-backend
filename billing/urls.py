@@ -86,6 +86,7 @@ urlpatterns = [
     path('delivery-challans/<uuid:pk>/pdf/', views_sidecar.delivery_challan_pdf_download, name='delivery_challan_pdf_download'),
     
     path('invoice-settings/', views_sidecar.invoice_settings_view, name='invoice_settings_view'),
+    path('learned-hsn-gst/', views_sidecar.learned_hsn_gst_view, name='learned_hsn_gst_view'),
     
     # GST Compliance
     path('gst/hsn-summary/', gst_views.hsn_summary_report, name='hsn_summary_report'),

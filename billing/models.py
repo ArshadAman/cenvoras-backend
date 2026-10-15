@@ -395,6 +395,6 @@ class SalesInvoiceItem(models.Model):
         ordering = ['created_at', 'id']
 
 # Import Sidecar Models to ensure they are registered
-from .models_sidecar import TransactionMeta, InvoiceSettings, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem
+from .models_sidecar import TransactionMeta, InvoiceSettings, TenantLearnedHsnGst, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from .models_gst_shield import GSTR2BImport, GSTR2BRecord, VendorLegalNotice

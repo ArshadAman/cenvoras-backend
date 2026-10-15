@@ -333,13 +333,18 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         purchase_bill.refresh_payment_status(save=True)
 
         tenant_id = getattr(user, 'id', None)
-        transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
+            transaction.on_commit(lambda bill_id=purchase_bill.id: _rebuild_purchase_bill_ledger(bill_id))
         if tenant_id:
             try:
                 from inventory.views import invalidate_tenant_catalog
                 transaction.on_commit(lambda tid=tenant_id: invalidate_tenant_catalog(tid))
             except Exception:
                 pass
+        try:
+            from billing.hsn_learn import learn_hsn_gst_from_item_dicts
+            learn_hsn_gst_from_item_dicts(user, items_data)
+        except Exception:
+            pass
         return purchase_bill
 
     def update(self, instance, validated_data):
@@ -399,6 +404,12 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             try:
                 from inventory.views import invalidate_tenant_catalog
                 transaction.on_commit(lambda tid=tenant_id: invalidate_tenant_catalog(tid))
+            except Exception:
+                pass
+        if items_data is not None:
+            try:
+                from billing.hsn_learn import learn_hsn_gst_from_item_dicts
+                learn_hsn_gst_from_item_dicts(user, items_data)
             except Exception:
                 pass
         
@@ -1198,6 +1209,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     current_balance=F('current_balance') + sales_invoice.total_amount
                 )
 
+            try:
+                from billing.hsn_learn import learn_hsn_gst_from_item_dicts
+                learn_hsn_gst_from_item_dicts(sales_invoice.created_by, items_data)
+            except Exception:
+                pass
+
             transaction.on_commit(lambda invoice_id=sales_invoice.id: _rebuild_sales_invoice_ledger(invoice_id))
             return sales_invoice
         except Exception as e:
@@ -1349,6 +1366,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             or old_total_amount != new_total_amount
         ):
             transaction.on_commit(lambda invoice_id=instance.id: _rebuild_sales_invoice_ledger(invoice_id))
+
+        if items_data is not None:
+            try:
+                from billing.hsn_learn import learn_hsn_gst_from_item_dicts
+                learn_hsn_gst_from_item_dicts(instance.created_by, items_data)
+            except Exception:
+                pass
 
         return instance
 

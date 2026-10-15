@@ -1295,18 +1295,58 @@ def invoice_settings_view(request):
     try:
         settings = InvoiceSettings.objects.get(user=tenant)
     except InvoiceSettings.DoesNotExist:
-        settings = InvoiceSettings.objects.create(user=tenant)
+        show_footer = True
+        try:
+            from subscription.services import get_effective_plan_code
+            show_footer = get_effective_plan_code(tenant) != 'business'
+        except Exception:
+            pass
+        settings = InvoiceSettings.objects.create(
+            user=tenant,
+            show_cenvora_footer=show_footer,
+            allow_cenvora_footer_toggle=False,
+        )
         
     if request.method == 'GET':
         serializer = InvoiceSettingsSerializer(settings)
         return Response(serializer.data)
         
     elif request.method == 'POST':
-        serializer = InvoiceSettingsSerializer(settings, data=request.data)
+        # Partial update so clients can PATCH-like single fields
+        serializer = InvoiceSettingsSerializer(
+            settings, data=request.data, partial=True, context={'request': request}
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def learned_hsn_gst_view(request):
+    """Lookup or list tenant-learned HSN → GST mappings."""
+    tenant = request.user.active_tenant
+    hsn = (request.GET.get('hsn') or request.GET.get('q') or '').strip()
+    from billing.hsn_learn import lookup_learned_gst
+    from billing.models_sidecar import TenantLearnedHsnGst
+
+    if hsn:
+        hit = lookup_learned_gst(tenant, hsn)
+        if not hit:
+            return Response({'data': None})
+        return Response({'data': hit})
+
+    qs = TenantLearnedHsnGst.objects.filter(tenant=tenant).order_by('-usage_count', '-updated_at')[:100]
+    data = [
+        {
+            'hsn_code': row.hsn_code,
+            'gst_rate': float(row.gst_rate),
+            'usage_count': row.usage_count,
+        }
+        for row in qs
+    ]
+    return Response({'data': data})
 
 
 # =============================================================================

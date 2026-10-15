@@ -52,7 +52,24 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
             'show_item_storage_condition',
             'show_item_internal_reference',
             'show_item_purchase_price',
+            'show_cenvora_footer',
+            'allow_cenvora_footer_toggle',
         ]
+        read_only_fields = []
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        is_staff = bool(user and (getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False)))
+
+        if 'allow_cenvora_footer_toggle' in validated_data and not is_staff:
+            validated_data.pop('allow_cenvora_footer_toggle', None)
+
+        if 'show_cenvora_footer' in validated_data and not is_staff:
+            if not instance.allow_cenvora_footer_toggle:
+                validated_data.pop('show_cenvora_footer', None)
+
+        return super().update(instance, validated_data)
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)

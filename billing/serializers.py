@@ -269,18 +269,32 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'items': 'At least one item is required.'})
         return data
 
+    def validate_vendor_gstin(self, value):
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            return validate_gstin_format(value) or None
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+
     @staticmethod
     def _calculate_line_amount(item_data):
-        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
-        price = Decimal(str(item_data.get('price', 0) or 0))
-        discount = Decimal(str(item_data.get('discount', 0) or 0))
-        tax = Decimal(str(item_data.get('tax', 0) or 0))
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_amount(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
-        base_amount = quantity * price
-        discount_amount = (base_amount * discount) / Decimal('100')
-        taxable_amount = base_amount - discount_amount
-        tax_amount = (taxable_amount * tax) / Decimal('100')
-        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+    @staticmethod
+    def _calculate_line_gross(item_data):
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_gross(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -313,9 +327,9 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 )
             validated_data['vendor'] = vendor
         
-        # Recalculate total amount from items to ensure integrity
+        # Recalculate total amount from items to ensure integrity (line amount + tax)
         recalculated_total = sum(
-            (self._calculate_line_amount(item) for item in items_data),
+            (self._calculate_line_gross(item) for item in items_data),
             Decimal('0.00')
         )
         validated_data['total_amount'] = recalculated_total
@@ -389,7 +403,15 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
-            recalculated_total = sum((item.amount for item in instance.items.all()), Decimal('0'))
+            recalculated_total = sum(
+                (self._calculate_line_gross({
+                    'quantity': item.quantity,
+                    'price': item.price,
+                    'discount': item.discount,
+                    'tax': item.tax,
+                }) for item in instance.items.all()),
+                Decimal('0'),
+            )
             instance.total_amount = recalculated_total
             instance.save(update_fields=['total_amount'])
             if instance.amount_paid > instance.total_amount:
@@ -844,16 +866,25 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def _calculate_line_amount(item_data):
         if item_data.get('row_type') == 'note':
             return Decimal('0.00')
-        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
-        price = Decimal(str(item_data.get('price', 0) or 0))
-        discount = Decimal(str(item_data.get('discount', 0) or 0))
-        tax = Decimal(str(item_data.get('tax', 0) or 0))
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_amount(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
-        base_amount = quantity * price
-        discount_amount = (base_amount * discount) / Decimal('100')
-        taxable_amount = base_amount - discount_amount
-        tax_amount = (taxable_amount * tax) / Decimal('100')
-        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+    @staticmethod
+    def _calculate_line_gross(item_data):
+        if item_data.get('row_type') == 'note':
+            return Decimal('0.00')
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_gross(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
     def validate(self, data):
         """
@@ -880,7 +911,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         items = data.get('items')
         if items:
             total_amount = sum(
-                (self._calculate_line_amount(item) for item in items),
+                (self._calculate_line_gross(item) for item in items),
                 Decimal('0.00')
             )
 
@@ -954,6 +985,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer_phone = data.get('customer_phone', '')
         customer_address = data.get('customer_address', '')
         customer_gstin = data.get('customer_gstin', '')
+        if customer_gstin:
+            from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+            try:
+                customer_gstin = validate_gstin_format(customer_gstin)
+                data['customer_gstin'] = customer_gstin
+            except ValueError as exc:
+                raise serializers.ValidationError({
+                    'customer_gstin': str(exc) or GSTIN_INVALID_MSG
+                })
         
         print("DEBUG SalesInvoiceSerializer: Customer name:", customer_name)
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
@@ -1113,7 +1153,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
 
         recalculated_total = sum(
-            (self._calculate_line_amount(item) for item in items_data),
+            (self._calculate_line_gross(item) for item in items_data),
             Decimal('0.00')
         ) if items_data else Decimal(str(provided_total_amount or '0.00'))
         validated_data['total_amount'] = recalculated_total
@@ -1174,7 +1214,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
             round_off = validated_data.get('round_off', Decimal('0.00'))
-            recalculated_total = sum((item.amount for item in sales_invoice.items.all()), Decimal('0')) + Decimal(str(round_off))
+            from billing.sync_service import DocumentSyncService
+            recalculated_total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in sales_invoice.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0'),
+            ) + Decimal(str(round_off or 0))
             sales_invoice.total_amount = recalculated_total
             sales_invoice.round_off = round_off
             if sales_invoice.amount_paid > sales_invoice.total_amount:
@@ -1413,7 +1463,11 @@ class VendorSerializer(serializers.ModelSerializer):
         return pan
 
     def validate_gstin(self, value):
-        gstin = (value or '').strip().upper()
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            gstin = validate_gstin_format(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
         if not gstin:
             return value
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
@@ -1487,6 +1541,13 @@ class CustomerSerializer(serializers.ModelSerializer):
             if queryset.exists():
                 raise serializers.ValidationError("A customer with this email already exists.")
         return value
+
+    def validate_gstin(self, value):
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            return validate_gstin_format(value) or None
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)

@@ -30,16 +30,28 @@ class DocumentSyncService:
 
     @classmethod
     def calculate_line_amount(cls, quantity, price, discount=0, tax=0):
+        """Amount = (Unit Price × Qty) − Disc%. Tax is not included in line amount."""
         qty = Decimal(str(quantity or 0))
         unit_price = Decimal(str(price or 0))
         disc_rate = Decimal(str(discount or 0))
-        tax_rate = Decimal(str(tax or 0))
 
         base = qty * unit_price
         disc_amt = (base * disc_rate) / Decimal('100')
         taxable = base - disc_amt
-        tax_amt = (taxable * tax_rate) / Decimal('100')
-        return (taxable + tax_amt).quantize(Decimal('0.01'))
+        return taxable.quantize(Decimal('0.01'))
+
+    @classmethod
+    def calculate_line_tax(cls, quantity, price, discount=0, tax=0):
+        taxable = cls.calculate_line_amount(quantity, price, discount)
+        tax_rate = Decimal(str(tax or 0))
+        return ((taxable * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
+
+    @classmethod
+    def calculate_line_gross(cls, quantity, price, discount=0, tax=0):
+        return (
+            cls.calculate_line_amount(quantity, price, discount)
+            + cls.calculate_line_tax(quantity, price, discount, tax)
+        ).quantize(Decimal('0.01'))
 
     @classmethod
     def recalculate_document_total(cls, document):
@@ -48,7 +60,16 @@ class DocumentSyncService:
             document._prefetched_objects_cache.clear()
 
         items = list(document.items.all())
-        total = sum(Decimal(str(item.amount or 0)) for item in items)
+        total = Decimal('0.00')
+        for item in items:
+            if getattr(item, 'row_type', 'item') == 'note':
+                continue
+            total += cls.calculate_line_gross(
+                getattr(item, 'quantity', 0),
+                getattr(item, 'price', 0),
+                getattr(item, 'discount', 0),
+                getattr(item, 'tax', 0),
+            )
         round_off = Decimal(str(getattr(document, 'round_off', 0) or 0))
         document.total_amount = (total + round_off).quantize(Decimal('0.01'))
         

@@ -513,6 +513,13 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     converted_invoice_number = serializers.CharField(source='converted_invoice.invoice_number', read_only=True, default='')
 
+    def validate_customer_gstin(self, value):
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            return validate_gstin_format(value) or None
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+
     class Meta:
         model = DeliveryChallan
         fields = [
@@ -589,16 +596,25 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     def _calculate_line_amount(item_data):
         if item_data.get('row_type') == 'note':
             return Decimal('0.00')
-        quantity = Decimal(str(item_data.get('quantity', 0) or 0))
-        price = Decimal(str(item_data.get('price', 0) or 0))
-        discount = Decimal(str(item_data.get('discount', 0) or 0))
-        tax = Decimal(str(item_data.get('tax', 0) or 0))
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_amount(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
-        base_amount = quantity * price
-        discount_amount = (base_amount * discount) / Decimal('100')
-        taxable_amount = base_amount - discount_amount
-        tax_amount = (taxable_amount * tax) / Decimal('100')
-        return (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+    @staticmethod
+    def _calculate_line_gross(item_data):
+        if item_data.get('row_type') == 'note':
+            return Decimal('0.00')
+        from billing.sync_service import DocumentSyncService
+        return DocumentSyncService.calculate_line_gross(
+            item_data.get('quantity', 0),
+            item_data.get('price', 0),
+            item_data.get('discount', 0),
+            item_data.get('tax', 0),
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -635,13 +651,13 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
                 PartyMeta.objects.get_or_create(customer=new_customer)
                 validated_data['customer'] = new_customer
 
-        # Calculate line amounts and total
+        # Calculate line amounts and total (gross = amount after disc + tax)
         total = Decimal('0.00')
         processed_items = []
         for item_data in items_data:
             line_amt = self._calculate_line_amount(item_data)
             item_data['amount'] = line_amt
-            total += line_amt
+            total += self._calculate_line_gross(item_data)
             processed_items.append(item_data)
 
         round_off = validated_data.get('round_off', Decimal('0.00')) or Decimal('0.00')
@@ -881,6 +897,13 @@ class QuotationSerializer(serializers.ModelSerializer):
     challan_number = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     challan_date = serializers.DateField(write_only=True, required=False, allow_null=True)
 
+    def validate_customer_gstin(self, value):
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            return validate_gstin_format(value) or None
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+
     class Meta:
         model = Quotation
         fields = [
@@ -1054,11 +1077,28 @@ class QuotationSerializer(serializers.ModelSerializer):
             )
 
         quotation = Quotation.objects.create(**validated_data)
+        from billing.sync_service import DocumentSyncService
         for item_data in items_data:
+            if item_data.get('row_type') != 'note':
+                item_data['amount'] = DocumentSyncService.calculate_line_amount(
+                    item_data.get('quantity', 0),
+                    item_data.get('price', 0),
+                    item_data.get('discount', 0),
+                    item_data.get('tax', 0),
+                )
             QuotationItem.objects.create(quotation=quotation, **item_data)
 
         if items_data:
-            total = sum(Decimal(str(item.amount)) for item in quotation.items.all())
+            total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in quotation.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0.00'),
+            )
             quotation.total_amount = total + Decimal(str(quotation.round_off or 0))
             quotation.save(update_fields=['total_amount'])
 

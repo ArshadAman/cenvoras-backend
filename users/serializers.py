@@ -35,6 +35,13 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         if User.objects.filter(phone=value).exists():
             raise serializers.ValidationError("Phone number already registered")
         return value
+
+    def validate_gstin(self, value):
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        try:
+            return validate_gstin_format(value) or ''
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
     
     def create(self, validated_data):
         # Remove confirm_password from validated_data
@@ -321,16 +328,24 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'trn': 'UAE Tax Registration Number (TRN) must be exactly 15 digits.'
                 })
-        # GSTIN and State mismatch validation
+        # GSTIN format + state mismatch validation
         gstin = attrs.get('gstin', getattr(user, 'gstin', ''))
         state = attrs.get('state', getattr(user, 'state', ''))
-        if gstin and state:
-            from billing.gst_utils import validate_gstin_state_match
-            is_valid, _gstin_code, _state_code, err_msg = validate_gstin_state_match(gstin, state)
-            if not is_valid:
+        if gstin:
+            from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG, validate_gstin_state_match
+            try:
+                gstin = validate_gstin_format(gstin)
+                attrs['gstin'] = gstin
+            except ValueError as exc:
                 raise serializers.ValidationError({
-                    'gstin': err_msg or "GSTIN state code does not match the selected company state."
+                    'gstin': str(exc) or GSTIN_INVALID_MSG
                 })
+            if state:
+                is_valid, _gstin_code, _state_code, err_msg = validate_gstin_state_match(gstin, state)
+                if not is_valid:
+                    raise serializers.ValidationError({
+                        'gstin': err_msg or "GSTIN state code does not match the selected company state."
+                    })
         
         return attrs
     

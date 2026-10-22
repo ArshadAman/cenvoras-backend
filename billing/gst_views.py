@@ -620,6 +620,11 @@ def gstr1_json_export(request):
         orig_inv_num = orig_inv.invoice_number if orig_inv else 'N/A'
         orig_inv_dt = orig_inv.invoice_date.strftime('%d-%m-%Y') if orig_inv else cn.date.strftime('%d-%m-%Y')
         clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
+        # GSTR-1 'val' is the note value INCLUDING tax, derived from the same item breakup as
+        # txval/iamt/camt/samt. Stored cn.total_amount can be tax-exclusive on legacy notes
+        # (QA: CN-0002 showed val 10,000 with iamt 1,800; CN-0004 showed 11,800).
+        cn_cess = Decimal('0.00')
+        cn_val = (cn_taxable + cn_cgst + cn_sgst + cn_igst + cn_cess).quantize(Decimal('0.01'))
 
         # CA AUDIT (Issue 1): Show val, txval, camt, samt, iamt, note type "C", original inum and idt
         if has_gstin:
@@ -628,7 +633,7 @@ def gstr1_json_export(request):
                 'nt_dt': cn.date.strftime('%d-%m-%Y'),
                 'inum': orig_inv_num,
                 'idt': orig_inv_dt,
-                'val': float(cn.total_amount),
+                'val': float(cn_val),
                 'txval': float(cn_taxable),
                 'camt': float(cn_cgst),
                 'samt': float(cn_sgst),
@@ -649,12 +654,12 @@ def gstr1_json_export(request):
                 })
         else:
             cdnur.append({
-                'typ': 'B2CL' if (is_inter and cn.total_amount > Decimal('250000')) else 'B2CS',
+                'typ': 'B2CL' if (is_inter and cn_val > Decimal('250000')) else 'B2CS',
                 'nt_num': clean_cn_number,
                 'nt_dt': cn.date.strftime('%d-%m-%Y'),
                 'inum': orig_inv_num,
                 'idt': orig_inv_dt,
-                'val': float(cn.total_amount),
+                'val': float(cn_val),
                 'txval': float(cn_taxable),
                 'camt': float(cn_cgst),
                 'samt': float(cn_sgst),

@@ -507,7 +507,9 @@ class SmartDashboard:
     def get_gst_shield(self):
         """Get GST compliance and smart ITC protection information"""
         itc_metrics = self._get_itc_protection_metrics()
-        return {
+        from billing.gst_thresholds import gst_shield
+        rules = gst_shield(self.owner, self.today, getattr(self, 'gst_period', 'month'))
+        legacy = {
             'total_turnover': self._get_gst_turnover(),
             'turnover_limit': 4000000,  # ₹40 Lakh for goods
             'turnover_percent': self._get_turnover_percent(),
@@ -524,6 +526,17 @@ class SmartDashboard:
             'reconciled_bills_count': itc_metrics['reconciled_bills_count'],
             'unmatched_bills_count': itc_metrics['unmatched_bills_count'],
         }
+        # Rudra CA rules (billing.gst_thresholds) override the legacy turnover/ITC fields.
+        legacy.update(rules)
+        if not rules['registered']:
+            legacy['total_turnover'] = float(rules['fy_turnover'])
+            legacy['turnover_limit'] = float(rules['registration_threshold'])
+            legacy['turnover_percent'] = float(rules['threshold_percent'])
+        else:
+            legacy['total_turnover'] = float(rules['fy_turnover'])
+            legacy['safe_itc'] = float(rules['safe_itc'])
+            legacy['at_risk_itc'] = float(rules['at_risk_itc'])
+        return legacy
 
     def _get_itc_protection_metrics(self):
         """Calculates safe vs at-risk ITC and payment-withholding pool"""

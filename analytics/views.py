@@ -775,3 +775,16 @@ def ml_predictions(request):
         return ml.get_all_predictions()
 
     return Response(cache_get_or_set(cache_key, 60 * 60 * 24, build_predictions))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def gst_shield_card(request):
+    """GST Shield card for a period: ?period=month (default, current return period) or fy (FY to date)."""
+    from .smart_dashboard import SmartDashboard
+    period = request.query_params.get('period', 'month')
+    if period not in ('month', 'fy'):
+        period = 'month'
+    dashboard = SmartDashboard(request.user)
+    dashboard.gst_period = period
+    return Response(dashboard.get_gst_shield())

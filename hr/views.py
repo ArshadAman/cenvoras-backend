@@ -1472,31 +1472,29 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         except Account.DoesNotExist:
             raise ValidationError("Specified payment bank account not found.")
 
-        code = str(getattr(payment_account, 'code', '') or '')
-        name_l = (getattr(payment_account, 'name', '') or '').lower()
-        is_cash_or_bank = (
-            code in ('1001', '1002')
-            or 'bank' in name_l
-            or name_l.strip() == 'cash'
-            or name_l.startswith('cash ')
-        )
-        if payment_account.account_type != AccountType.ASSET or not is_cash_or_bank:
+        from hr.services.payroll_engine import get_hrms_settings
+        from hr.services.disbursement import classify_payment_account, cash_40a3_warnings
+        kind = classify_payment_account(payment_account)
+        if kind is None:
             raise ValidationError(
-                "Select a Bank or Cash account for salary disbursement. "
+                "Select a Bank account for salary disbursement. "
                 "Receivables and other asset accounts are not allowed."
             )
+        if kind == 'cash' and not get_hrms_settings(instance.tenant).allow_cash_salary_disbursement:
+            raise ValidationError(
+                "Cash salary disbursement is disabled. Pay from a Bank account, "
+                "or ask an admin to enable cash disbursement in HRMS settings."
+            )
+        code = str(getattr(payment_account, 'code', '') or '')
 
         # Required = sum of payslip nets (same figure credited to GL), not stale run.total_net
         from django.db.models import Sum as _Sum
         payslip_net = instance.payslips.aggregate(s=_Sum('net_salary'))['s']
         total_net = Decimal(str(payslip_net if payslip_net is not None else (instance.total_net or 0))).quantize(Decimal('0.01'))
         from ledger.balance_checks import assert_sufficient_balance
+        # Hard block for Bank and (when enabled) Cash when the balance is insufficient.
         assert_sufficient_balance(payment_account, instance.tenant, total_net)
-        warnings = []
-        if code == '1001' and total_net > Decimal('10000.00'):
-            warnings.append(
-                "Section 40A(3): Cash salary disbursement exceeds ₹10,000. Prefer Bank transfer."
-            )
+        warnings = cash_40a3_warnings(instance) if kind == 'cash' else []
 
         before = {'status': instance.status}
         instance.status = 'paid'

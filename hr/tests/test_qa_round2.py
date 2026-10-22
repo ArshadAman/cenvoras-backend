@@ -201,6 +201,10 @@ class PayrollPayOverdraftTests(TestCase):
         )
         # Accrual so pay path can clear Salaries Payable
         HRAccountingService.post_payroll_accrual(self.run, self.tenant)
+        from hr.services.payroll_engine import get_hrms_settings
+        st = get_hrms_settings(self.tenant)
+        st.allow_cash_salary_disbursement = True  # admin opt-in required for cash
+        st.save()
         res = self.client.post(
             f'/api/hr/payroll-runs/{self.run.id}/pay/',
             {'payment_account_id': str(cash.id)},
@@ -210,6 +214,52 @@ class PayrollPayOverdraftTests(TestCase):
         warnings = res.data.get('warnings') or []
         self.assertTrue(any('40A(3)' in str(w) for w in warnings), warnings)
         self.assertEqual(res.data.get('payment_account_code'), '1001')
+
+    def test_cash_blocked_unless_admin_enables_it(self):
+        from ledger.services import AccountingService
+        from ledger.models import GeneralLedgerEntry
+        cash = AccountingService.get_or_create_default_accounts(self.tenant).get('1001')
+        GeneralLedgerEntry.objects.create(
+            date=datetime.date.today(), account=cash, debit=Decimal('100000.00'), credit=0,
+            description='seed cash', reference='SEED-CASH', created_by=self.tenant,
+        )
+        res = self.client.post(f'/api/hr/payroll-runs/{self.run.id}/pay/',
+                               {'payment_account_id': str(cash.id)}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Cash salary disbursement is disabled', str(res.data))
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, 'approved')
+
+    def test_cash_enabled_but_insufficient_is_hard_blocked(self):
+        from ledger.services import AccountingService
+        from hr.services.payroll_engine import get_hrms_settings
+        st = get_hrms_settings(self.tenant)
+        st.allow_cash_salary_disbursement = True
+        st.save()
+        cash = AccountingService.get_or_create_default_accounts(self.tenant).get('1001')
+        res = self.client.post(f'/api/hr/payroll-runs/{self.run.id}/pay/',
+                               {'payment_account_id': str(cash.id)}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Insufficient balance', str(res.data))
+
+    def test_bank_disbursement_posts_dr_salary_payable_cr_bank(self):
+        from ledger.services import AccountingService
+        from ledger.models import GeneralLedgerEntry
+        from hr.services.hr_accounting_service import HRAccountingService
+        bank = AccountingService.get_or_create_default_accounts(self.tenant).get('1002')
+        GeneralLedgerEntry.objects.create(
+            date=datetime.date.today(), account=bank, debit=Decimal('100000.00'), credit=0,
+            description='seed', reference='SEED-BANK', created_by=self.tenant,
+        )
+        HRAccountingService.post_payroll_accrual(self.run, self.tenant)
+        res = self.client.post(f'/api/hr/payroll-runs/{self.run.id}/pay/',
+                               {'payment_account_id': str(bank.id)}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.assertEqual(res.data['warnings'], [])
+        paid = GeneralLedgerEntry.objects.filter(created_by=self.tenant, reference='PAYROLL-PAID-2026-09')
+        self.assertEqual(paid.get(account__code='2250').debit, Decimal('45000.00'))
+        self.assertEqual(paid.get(account=bank).credit, Decimal('45000.00'))
+        self.assertFalse(paid.filter(account__code='1001').exists())
 
 
 class AttendanceSummaryTests(TestCase):

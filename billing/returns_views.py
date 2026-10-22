@@ -135,6 +135,28 @@ class DebitNoteSerializer(serializers.ModelSerializer):
                   'vendor_name', 'vendor_gstin', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items']
         read_only_fields = ['id', 'debit_note_number', 'created_by', 'created_at']
+        extra_kwargs = {
+            'original_bill': {'required': True, 'allow_null': False},
+        }
+
+    def validate_original_bill(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                'Debit notes must reference an original purchase bill.'
+            )
+        request = self.context.get('request')
+        if request:
+            tenant = getattr(request.user, 'active_tenant', request.user)
+            if getattr(value, 'created_by_id', None) != getattr(tenant, 'id', None):
+                raise serializers.ValidationError('Purchase bill not found for this business.')
+        return value
+
+    def validate(self, attrs):
+        if not attrs.get('original_bill'):
+            raise serializers.ValidationError({
+                'original_bill': 'Debit notes must reference an original purchase bill.'
+            })
+        return attrs
 
     @transaction.atomic
     def create(self, validated_data):

@@ -25,6 +25,22 @@ class ComputePTStateNormalizeTests(TestCase):
     def test_karnataka_below_threshold_nil(self):
         self.assertEqual(compute_pt(Decimal('20000.00'), 'KA'), Decimal('0.00'))
 
+    def test_karnataka_february_taxable_band_is_300(self):
+        """P0: Karnataka PT is ₹300 in February when gross is in the taxable band."""
+        self.assertEqual(
+            compute_pt(Decimal('50000.00'), 'Karnataka', month=2),
+            Decimal('300.00'),
+        )
+        self.assertEqual(
+            compute_pt(Decimal('30000.00'), 'KA', month=2),
+            Decimal('300.00'),
+        )
+        # Below threshold stays nil even in February
+        self.assertEqual(
+            compute_pt(Decimal('20000.00'), 'Karnataka', month=2),
+            Decimal('0.00'),
+        )
+
     def test_empty_state_zero(self):
         self.assertEqual(compute_pt(Decimal('50000.00'), ''), Decimal('0.00'))
         self.assertEqual(compute_pt(Decimal('50000.00'), None), Decimal('0.00'))

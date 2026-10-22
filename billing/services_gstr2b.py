@@ -42,7 +42,13 @@ def parse_gst_date(date_str):
 
 
 def calculate_purchase_bill_tax(bill):
-    """Calculates total tax (CGST + SGST + IGST) and taxable base on a PurchaseBill"""
+    """Calculates total tax (CGST + SGST + IGST) and taxable base on a PurchaseBill.
+
+    Interstate is resolved the same way as ledger posting: GSTIN / supplier state
+    vs buyer state. Explicit gst_treatment interstate/igst/overseas/sez still wins.
+    """
+    from .gst_utils import get_seller_state_code, get_purchase_supplier_state_code
+
     items = bill.items.all()
     if not items.exists():
         # Fallback if no line items
@@ -56,7 +62,16 @@ def calculate_purchase_bill_tax(bill):
     sgst = Decimal('0.00')
     igst = Decimal('0.00')
 
-    is_interstate = (bill.gst_treatment or '').lower() in ['interstate', 'igst', 'overseas', 'sez']
+    treatment = (getattr(bill, 'gst_treatment', None) or '').lower()
+    if treatment in ('interstate', 'igst', 'overseas', 'sez'):
+        is_interstate = True
+    elif treatment in ('intrastate', 'cgst_sgst', 'local'):
+        is_interstate = False
+    else:
+        tenant = getattr(bill, 'created_by', None)
+        buyer_code = get_seller_state_code(tenant) if tenant else None
+        supplier_code = get_purchase_supplier_state_code(bill, buyer_code)
+        is_interstate = bool(buyer_code and supplier_code and buyer_code != supplier_code)
 
     for item in items:
         qty = Decimal(item.quantity or 0)

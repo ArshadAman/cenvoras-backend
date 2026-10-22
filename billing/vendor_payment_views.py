@@ -5,13 +5,14 @@ from decimal import Decimal
 from datetime import date, timedelta
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Sum
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from billing.models import PurchaseBill
+from billing.models_returns import DebitNote
 from ledger.models import Account, AccountType, GeneralLedgerEntry
 from ledger.services import AccountingService
 
@@ -202,7 +203,14 @@ def unpaid_purchase_bills(request):
 
     rows = []
     for bill in qs[:200]:
-        due = (Decimal(str(bill.total_amount or 0)) - Decimal(str(bill.amount_paid or 0))).quantize(Decimal('0.01'))
+        paid = Decimal(str(bill.amount_paid or 0))
+        dn_credit = DebitNote.objects.filter(
+            original_bill=bill, created_by=tenant
+        ).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
+        dn_credit = Decimal(str(dn_credit)).quantize(Decimal('0.01'))
+        due = (
+            Decimal(str(bill.total_amount or 0)) - paid - dn_credit
+        ).quantize(Decimal('0.01'))
         if due <= 0:
             continue
         taxable_total = _bill_taxable_total(bill)
@@ -228,6 +236,7 @@ def unpaid_purchase_bills(request):
             'fy_taxable_aggregate': str(meta['fy_aggregate']),
             'total_amount': str(bill.total_amount),
             'amount_paid': str(bill.amount_paid),
+            'debit_note_credit': str(dn_credit),
             'balance_due': str(due),
             'taxable_balance': str(taxable_balance),
             'tds_rate_194c': str(rate_194c),
@@ -262,7 +271,14 @@ def vendor_payment_create(request):
     except Exception:
         return Response({'message': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
 
-    due = (Decimal(str(bill.total_amount or 0)) - Decimal(str(bill.amount_paid or 0))).quantize(Decimal('0.01'))
+    dn_credit = DebitNote.objects.filter(
+        original_bill=bill, created_by=tenant
+    ).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
+    due = (
+        Decimal(str(bill.total_amount or 0))
+        - Decimal(str(bill.amount_paid or 0))
+        - Decimal(str(dn_credit))
+    ).quantize(Decimal('0.01'))
     if amount <= 0:
         return Response({'message': 'amount must be positive'}, status=status.HTTP_400_BAD_REQUEST)
     if amount > due:

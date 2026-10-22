@@ -581,3 +581,164 @@ class PurchaseGSTAndVendorComplianceTests(FourFixesBase):
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Insufficient balance", str(res.data))
+
+    def test_purchase_register_tax_igst_when_gst_treatment_blank(self):
+        """CA Purchase Register must use GSTIN interstate (same as ledger), not gst_treatment alone."""
+        from billing.services_gstr2b import calculate_purchase_bill_tax
+
+        vendor = Vendor.objects.create(
+            name="MH Reg Vendor",
+            gstin="27REGIS1234F1Z5",
+            state="",
+            created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number="PB-REG-IGST",
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin=vendor.gstin,
+            total_amount=Decimal("11800.00"),
+            gst_treatment="",  # blank — previously forced CGST/SGST in register helper
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill,
+            product=self.product,
+            quantity=1,
+            price=Decimal("10000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("11800.00"),
+            hsn_sac_code="847130",
+        )
+        taxable, tax_amt, cgst, sgst, igst = calculate_purchase_bill_tax(bill)
+        self.assertEqual(taxable, Decimal("10000.00"))
+        self.assertEqual(igst, Decimal("1800.00"))
+        self.assertEqual(cgst, Decimal("0.00"))
+        self.assertEqual(sgst, Decimal("0.00"))
+        self.assertEqual(tax_amt, Decimal("1800.00"))
+
+    def test_debit_note_api_requires_original_bill(self):
+        res = self.client.post(
+            "/api/billing/debit-notes/",
+            {
+                "date": str(date.today()),
+                "vendor_name": "No Bill Vendor",
+                "reason": "return",
+                "total_amount": "118.00",
+                "items": [
+                    {
+                        "product": str(self.product.id),
+                        "quantity": 1,
+                        "price": "100.00",
+                        "tax": "18.00",
+                        "amount": "118.00",
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("original_bill", str(res.data).lower())
+
+    def test_unpaid_bills_net_debit_note_credit(self):
+        vendor = Vendor.objects.create(
+            name="DN Net Vendor",
+            gstin="29DNNET1234F1Z5",
+            state="Karnataka",
+            created_by=self.tenant,
+        )
+        bill = PurchaseBill.objects.create(
+            created_by=self.tenant,
+            bill_number="PB-DN-NET",
+            bill_date=date.today(),
+            vendor=vendor,
+            vendor_name=vendor.name,
+            vendor_gstin=vendor.gstin,
+            total_amount=Decimal("11800.00"),
+            amount_paid=Decimal("0.00"),
+        )
+        PurchaseBillItem.objects.create(
+            purchase_bill=bill,
+            product=self.product,
+            quantity=1,
+            price=Decimal("10000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("11800.00"),
+            hsn_sac_code="847130",
+        )
+        DebitNote.objects.create(
+            debit_note_number="DN-NET-001",
+            date=date.today(),
+            original_bill=bill,
+            vendor_name=vendor.name,
+            vendor_gstin=vendor.gstin,
+            reason="return",
+            total_amount=Decimal("1180.00"),
+            created_by=self.tenant,
+        )
+        res = self.client.get("/api/billing/vendor-payments/unpaid-bills/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        row = next(r for r in res.data["results"] if r["bill_number"] == "PB-DN-NET")
+        self.assertEqual(Decimal(row["debit_note_credit"]), Decimal("1180.00"))
+        self.assertEqual(Decimal(row["balance_due"]), Decimal("10620.00"))
+
+    def test_credit_note_gst_repair_restores_output_gst(self):
+        """CN-0002-style note missing Output GST is repaired for GSTR-1 CDNR fields."""
+        from billing.models_returns import CreditNote, CreditNoteItem
+        from billing.credit_note_gst_repair import (
+            credit_note_needs_gst_repair,
+            repair_credit_note_gst,
+        )
+
+        cn = CreditNote.objects.create(
+            credit_note_number="CN-0002",
+            date=date.today(),
+            customer=self.customer,
+            reason="return",
+            total_amount=Decimal("1180.00"),
+            created_by=self.tenant,
+        )
+        CreditNoteItem.objects.create(
+            credit_note=cn,
+            product=self.product,
+            quantity=1,
+            price=Decimal("1000.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("1180.00"),
+            hsn_sac_code="847130",
+        )
+        # Legacy incomplete posting: AR credit + sales debit only, no Output GST
+        accounts = AccountingService.get_or_create_default_accounts(self.tenant)
+        GeneralLedgerEntry.objects.create(
+            date=cn.date,
+            account=accounts["accounts_receivable"],
+            debit=Decimal("0.00"),
+            credit=Decimal("1180.00"),
+            description="Legacy CN without GST",
+            reference=cn.credit_note_number,
+            credit_note=cn,
+            created_by=self.tenant,
+        )
+        GeneralLedgerEntry.objects.create(
+            date=cn.date,
+            account=accounts["sales_revenue"],
+            debit=Decimal("1180.00"),
+            credit=Decimal("0.00"),
+            description="Legacy CN sales reversal only",
+            reference=cn.credit_note_number,
+            credit_note=cn,
+            created_by=self.tenant,
+        )
+        self.assertTrue(credit_note_needs_gst_repair(cn))
+        repaired, _skipped = repair_credit_note_gst(dry_run=False)
+        self.assertGreaterEqual(repaired, 1)
+        self.assertFalse(credit_note_needs_gst_repair(cn))
+        out_cgst = GeneralLedgerEntry.objects.filter(
+            credit_note=cn, account__code="2201", debit__gt=0
+        ).aggregate(s=Sum("debit"))["s"] or Decimal("0")
+        out_sgst = GeneralLedgerEntry.objects.filter(
+            credit_note=cn, account__code="2202", debit__gt=0
+        ).aggregate(s=Sum("debit"))["s"] or Decimal("0")
+        self.assertEqual(out_cgst, Decimal("90.00"))
+        self.assertEqual(out_sgst, Decimal("90.00"))

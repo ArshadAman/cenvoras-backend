@@ -66,6 +66,35 @@ class WorkStateResolveTests(TestCase):
                     Decimal('200.00'),
                 )
 
+    def test_pt_register_report_endpoint(self):
+        from hr.models import PayrollRun, Payslip
+        client = APIClient()
+        client.force_authenticate(user=self.tenant)
+        emp = Employee.objects.create(
+            tenant=self.tenant, full_name='PT Reg Emp',
+            date_of_birth=datetime.date(1990, 1, 1),
+            date_of_joining=datetime.date(2024, 1, 1),
+            gender='M', employment_type='full_time',
+            department=self.dept, designation=self.desig,
+            work_state='Karnataka', status='active',
+            employee_code='PT001',
+        )
+        run = PayrollRun.objects.create(
+            tenant=self.tenant, month=9, year=2026, status='paid',
+        )
+        Payslip.objects.create(
+            tenant=self.tenant, payroll_run=run, employee=emp,
+            present_days=Decimal('26'), total_working_days=26,
+            lop_days=Decimal('0'), gross_salary=Decimal('50000'),
+            earnings={}, deductions={}, net_salary=Decimal('48000'),
+            professional_tax=Decimal('200.00'),
+        )
+        res = client.get('/api/hr/reports/', {'type': 'pt_register', 'year': 2026, 'month': 9})
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.assertEqual(Decimal(res.data['total_pt_payable']), Decimal('200.00'))
+        self.assertEqual(res.data['count'], 1)
+        self.assertEqual(res.data['lines'][0]['work_state'], 'Karnataka')
+
 
 class LOPAmountTests(TestCase):
     def setUp(self):
@@ -156,6 +185,31 @@ class PayrollPayOverdraftTests(TestCase):
             format='json',
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cash_pay_over_10k_returns_40a3_warning(self):
+        """P0: cash disbursement above ₹10,000 warns under s.40A(3) but still pays when funded."""
+        from ledger.services import AccountingService
+        from ledger.models import GeneralLedgerEntry
+        from hr.services.hr_accounting_service import HRAccountingService
+
+        accounts = AccountingService.get_or_create_default_accounts(self.tenant)
+        cash = accounts.get('1001')
+        GeneralLedgerEntry.objects.create(
+            date=datetime.date.today(), account=cash,
+            debit=Decimal('100000.00'), credit=0,
+            description='seed cash', reference='SEED-CASH', created_by=self.tenant,
+        )
+        # Accrual so pay path can clear Salaries Payable
+        HRAccountingService.post_payroll_accrual(self.run, self.tenant)
+        res = self.client.post(
+            f'/api/hr/payroll-runs/{self.run.id}/pay/',
+            {'payment_account_id': str(cash.id)},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        warnings = res.data.get('warnings') or []
+        self.assertTrue(any('40A(3)' in str(w) for w in warnings), warnings)
+        self.assertEqual(res.data.get('payment_account_code'), '1001')
 
 
 class AttendanceSummaryTests(TestCase):

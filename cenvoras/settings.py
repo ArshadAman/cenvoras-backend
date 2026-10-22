@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import sys
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,6 +20,11 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-local-dev-fall
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes', 'on')
+TESTING = (
+    'test' in sys.argv
+    or os.environ.get('DJANGO_TESTING', '').lower() in ('1', 'true', 'yes')
+    or bool(os.environ.get('PYTEST_CURRENT_TEST'))
+)
 
 if not DEBUG and SECRET_KEY == 'django-insecure-local-dev-fallback':
     raise ValueError('DJANGO_SECRET_KEY must be set in production.')
@@ -359,6 +365,31 @@ CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
     'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
     'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
+    # Used by django-cloudinary-storage default backend. HR docs override prefix
+    # to tenant folders under cenvoras/ (see hr.storage.TenantHRDocumentStorage).
+    'PREFIX': 'cenvoras',
+    'SECURE': True,
+}
+
+_cloudinary_configured = all(
+    CLOUDINARY_STORAGE.get(key)
+    for key in ('CLOUD_NAME', 'API_KEY', 'API_SECRET')
+)
+
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+    },
+    'hr_documents': {
+        'BACKEND': (
+            'hr.storage.TenantHRDocumentStorage'
+            if _cloudinary_configured and not TESTING
+            else 'django.core.files.storage.FileSystemStorage'
+        ),
+    },
 }
 
 # django-dbbackup storage configuration

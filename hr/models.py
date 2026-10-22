@@ -7,6 +7,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from hr.storage import hr_document_storage
+
 
 # ---------------------------------------------------------------------------
 # Task 2.1 models: Department, Designation, Employee, AttendanceRecord
@@ -1069,11 +1071,12 @@ class PayrollException(models.Model):
 
 def tenant_kyc_upload_path(instance, filename):
     import os
-    ext = os.path.splitext(filename)[1]
-    # Tenant-partitioned private storage compliant with DPDPA 2023 & Aadhaar Act
-    tenant_id = getattr(instance, 'tenant_id', 'common')
-    employee_id = getattr(instance, 'employee_id', 'general')
-    return f"tenants/{tenant_id}/employees/{employee_id}/kyc/{uuid.uuid4().hex}{ext}"
+    ext = os.path.splitext(filename)[1].lower()
+    # Tenant-partitioned Cloudinary folder: cenvoras/tenants/<id>/employees/<id>/<type>/<uuid>
+    tenant_id = getattr(instance, 'tenant_id', None) or 'common'
+    employee_id = getattr(instance, 'employee_id', None) or 'general'
+    kind = getattr(instance, 'document_type', None) or 'other'
+    return f"tenants/{tenant_id}/employees/{employee_id}/{kind}/{uuid.uuid4().hex}{ext}"
 
 
 class HRDocument(models.Model):
@@ -1103,7 +1106,13 @@ class HRDocument(models.Model):
     )
     title = models.CharField(max_length=255)
     document_type = models.CharField(max_length=30, choices=DOC_TYPES, default='other')
-    file = models.FileField(upload_to=tenant_kyc_upload_path, max_length=500, null=True, blank=True)
+    file = models.FileField(
+        upload_to=tenant_kyc_upload_path,
+        storage=hr_document_storage,
+        max_length=500,
+        null=True,
+        blank=True,
+    )
     file_url = models.URLField(max_length=500, blank=True, null=True)
     notes = models.TextField(blank=True)
     uploaded_by = models.ForeignKey(
@@ -1119,6 +1128,25 @@ class HRDocument(models.Model):
 
     def __str__(self):
         return f"{self.employee.employee_code} - {self.title}"
+
+    @property
+    def absolute_file_url(self):
+        """Cloudinary (or other remote) URL; never a bare /media/ path in production."""
+        if self.file:
+            try:
+                url = self.file.url
+            except Exception:
+                url = ''
+            if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                return url
+        return self.file_url or ''
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        remote = self.absolute_file_url
+        if remote and self.file_url != remote:
+            type(self).objects.filter(pk=self.pk).update(file_url=remote)
+            self.file_url = remote
 
 
 class HRMSSettings(models.Model):

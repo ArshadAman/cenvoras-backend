@@ -237,7 +237,11 @@ class HRDocumentUploadTests(TestCase):
             format='multipart',
         )
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
-        self.assertTrue(HRDocument.objects.filter(employee=self.emp).exists())
+        doc = HRDocument.objects.get(employee=self.emp)
+        self.assertIn(str(self.tenant.id), doc.file.name)
+        self.assertIn(str(self.emp.id), doc.file.name)
+        self.assertIn('id_proof', doc.file.name)
+        self.assertTrue(res.data.get('file_url') or res.data.get('file'))
 
     def test_bad_employee_400(self):
         other = User.objects.create_user(

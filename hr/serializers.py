@@ -120,7 +120,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 'document_type': d.document_type,
                 'title': d.title,
                 'file_name': d.file.name.split('/')[-1] if d.file else '',
-                'file_url': d.file.url if d.file else (d.file_url or ''),
+                'file_url': d.absolute_file_url or d.file_url or '',
                 'created_at': d.created_at,
             }
             for d in docs
@@ -1082,12 +1082,20 @@ class PayslipSerializer(serializers.ModelSerializer):
 
 class HRDocumentSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.full_name', read_only=True)
+    employee_code = serializers.CharField(source='employee.employee_code', read_only=True, default='')
     uploaded_by_name = serializers.CharField(source='uploaded_by.username', read_only=True, default='')
 
     class Meta:
         model = HRDocument
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'uploaded_by']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        url = instance.absolute_file_url or instance.file_url or ''
+        data['file_url'] = url
+        data['file'] = url
+        return data
 
     def validate_employee(self, employee):
         request = self.context.get('request')

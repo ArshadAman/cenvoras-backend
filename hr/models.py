@@ -1179,6 +1179,11 @@ class HRMSSettings(models.Model):
     esi_employer_rate = models.DecimalField(max_digits=5, decimal_places=3, default=3.25)
     esi_wage_ceiling = models.DecimalField(max_digits=10, decimal_places=2, default=21000.0)
 
+    allow_cash_salary_disbursement = models.BooleanField(
+        default=False,
+        help_text='Admin opt-in: allow paying salaries from Cash. Off by default; salaries go Dr Salaries Payable / Cr Bank.',
+    )
+
     auto_send_offer_letter = models.BooleanField(
         default=False,
         help_text="Automatically email an official offer letter to newly onboarded employees from the company."

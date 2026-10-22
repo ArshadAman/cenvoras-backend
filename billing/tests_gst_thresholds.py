@@ -165,3 +165,54 @@ class TurnoverAndShieldTests(FourFixesBase):
         res = self.client.get('/api/analytics/gst-shield/?period=fy')
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data['period'], 'fy')
+
+
+class NetSignTests(TurnoverAndShieldTests.__mro__[1]):
+    """Net = Collected − ITC, sign preserved (payable > 0, credit < 0, zero)."""
+    today = datetime.date(2026, 10, 22)
+    _inv = TurnoverAndShieldTests._inv
+    _cn = TurnoverAndShieldTests._cn
+
+    def _bill(self, n, price):
+        v, _ = Vendor.objects.get_or_create(name='V', gstin='29AAAAA0000A1Z5', state='Karnataka', created_by=self.tenant)
+        b = PurchaseBill.objects.create(created_by=self.tenant, bill_number=n, bill_date=datetime.date(2026, 10, 2),
+                                        vendor=v, vendor_name=v.name, vendor_gstin=v.gstin,
+                                        total_amount=Decimal(price) * Decimal('1.18'), gstr2b_status='matched')
+        PurchaseBillItem.objects.create(purchase_bill=b, product=self.product, quantity=1, price=Decimal(price),
+                                        tax=Decimal('18'), amount=Decimal(price) * Decimal('1.18'), hsn_sac_code='847130')
+
+    def _net(self):
+        m = gst_shield(self.tenant, self.today, 'month')
+        self.assertEqual(Decimal(m['net_payable']), Decimal(m['output_tax']) - Decimal(m['itc']))
+        return m
+
+    def test_payable(self):
+        self._inv('I1', datetime.date(2026, 10, 5), '10000.00'); self._bill('B1', '4000')
+        m = self._net()
+        self.assertEqual((m['output_tax'], m['itc'], m['net_payable']), ('1800.00', '720.00', '1080.00'))
+
+    def test_credit(self):
+        self._inv('I1', datetime.date(2026, 10, 5), '10000.00'); self._bill('B1', '20000')
+        m = self._net()
+        self.assertEqual((m['output_tax'], m['itc'], m['net_payable']), ('1800.00', '3600.00', '-1800.00'))
+
+    def test_zero(self):
+        self._inv('I1', datetime.date(2026, 10, 5), '10000.00'); self._bill('B1', '10000')
+        self.assertEqual(self._net()['net_payable'], '0.00')
+
+    def test_credit_notes_exceeding_sales_give_negative_collected(self):
+        # CN in October against a September invoice: collected for the month goes negative,
+        # net = −CN tax − ITC (this is the live "Net credit ₹21.4K" shape).
+        self._inv('I-SEP', datetime.date(2026, 9, 5), '50000.00')
+        self._cn('CN-OCT', datetime.date(2026, 10, 6), '10000.00'); self._bill('B1', '10000')
+        m = self._net()
+        self.assertEqual((m['output_tax'], m['output_tax_gross'], m['credit_note_tax']), ('-1800.00', '0.00', '1800.00'))
+        self.assertEqual(m['net_payable'], '-3600.00')
+
+    def test_prior_fy_breakdown(self):
+        self._inv('I-P', datetime.date(2025, 6, 1), '30000.00')
+        self._cn('CN-P', datetime.date(2025, 7, 1), '40000.00')
+        m = gst_shield(self.tenant, self.today, 'month')
+        self.assertEqual((m['prior_fy_start'], m['prior_fy_end']), ('2025-04-01', '2026-03-31'))
+        self.assertEqual((m['prior_fy_gross_taxable'], m['prior_fy_credit_note_taxable'], m['prior_fy_turnover']),
+                         ('30000.00', '40000.00', '0.00'))

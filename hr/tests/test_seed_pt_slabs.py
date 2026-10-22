@@ -44,7 +44,7 @@ class SeedPTSlabsCommandTests(TestCase):
         
         # Karnataka: nil below ₹25,000; ₹200 above
         ka_bottom = ProfessionalTaxSlab.objects.get(state_name='Karnataka', lower_bound=0)
-        self.assertEqual(ka_bottom.upper_bound, 24999)
+        self.assertEqual(ka_bottom.upper_bound, Decimal('24999.99'))
         self.assertEqual(ka_bottom.pt_amount, Decimal('0.00'))
         ka_top = ProfessionalTaxSlab.objects.get(state_name='Karnataka', lower_bound=25000)
         self.assertIsNone(ka_top.upper_bound)

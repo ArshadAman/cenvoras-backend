@@ -13,8 +13,6 @@ class Command(BaseCommand):
             ("Maharashtra", 7501, 10000, 175),
             ("Maharashtra", 10001, None, 200),
 
-            ("Karnataka", 0, 24999, 0),
-            ("Karnataka", 25000, None, 200),
 
             ("West Bengal", 0, 10000, 0),
             ("West Bengal", 10001, 15000, 110),
@@ -55,7 +53,22 @@ class Command(BaseCommand):
         # Replace Odisha so any pre-repeal positive slabs do not linger
         ProfessionalTaxSlab.objects.filter(state_name='Odisha').delete()
 
-        count = 0
+        import datetime
+        from decimal import Decimal
+        # Karnataka FY26-27 (Rudra CA sign-off): versioned from 1 Apr 2025.
+        # Nil below ₹25,000 actual monthly gross; ₹200/mo, ₹300 in February.
+        ka_from = datetime.date(2025, 4, 1)
+        for lower, upper, amount, feb in (
+            (Decimal('0'), Decimal('24999.99'), Decimal('0'), None),
+            (Decimal('25000'), None, Decimal('200'), Decimal('300')),
+        ):
+            ProfessionalTaxSlab.objects.create(
+                state_name='Karnataka', lower_bound=lower, upper_bound=upper,
+                pt_amount=amount, february_amount=feb,
+                effective_from=ka_from, effective_to=None,
+            )
+
+        count = 2
         for state, lower, upper, amount in slabs:
             obj, created = ProfessionalTaxSlab.objects.update_or_create(
                 state_name=state,

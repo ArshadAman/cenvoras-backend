@@ -105,6 +105,15 @@ class Employee(models.Model):
     )
     work_location = models.CharField(max_length=255, blank=True, null=True)
     work_state = models.CharField(max_length=100)  # For PT slab lookup
+    # Professional Tax exemptions (Karnataka PT Act s.3 exemptions; signed off by Rudra CA).
+    pt_exempt_disability = models.BooleanField(
+        default=False,
+        help_text='Exempt from Professional Tax: person with 40% or more disability.',
+    )
+    pt_exempt_armed_forces = models.BooleanField(
+        default=False,
+        help_text='Exempt from Professional Tax: member of the armed forces.',
+    )
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active')
 
     TAX_REGIME_CHOICES = [
@@ -1212,6 +1221,13 @@ class ProfessionalTaxSlab(models.Model):
         max_digits=12,
         decimal_places=2,
         help_text='Professional Tax amount (INR) to deduct for this slab.',
+    )
+    february_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Optional February override (e.g. Karnataka ₹300 in Feb). Null = use pt_amount.',
     )
     # Date-versioned slabs (null = open-ended). Additive — do not delete historical rows.
     effective_from = models.DateField(

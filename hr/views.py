@@ -2353,10 +2353,14 @@ class HRDocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def download(self, request, pk=None):
         """
-        Secure authenticated streaming download compliant with DPDPA 2023.
+        Authenticated download. Remote Cloudinary files redirect; local files stream.
         Only tenant HR/Admin or the owner employee can access the document.
         """
         doc = self.get_object()
+        remote_url = doc.absolute_file_url
+        if remote_url.startswith(('http://', 'https://')):
+            from django.shortcuts import redirect
+            return redirect(remote_url)
         if not doc.file:
             if doc.file_url:
                 from django.shortcuts import redirect

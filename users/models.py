@@ -32,6 +32,15 @@ class User(AbstractUser):
     
     # Tax fields
     gstin = models.CharField(max_length=15, blank=True, null=True, help_text="GST Identification Number (optional, for India)")
+    BUSINESS_TYPE_CHOICES = [
+        ('goods_only', 'Goods only'),
+        ('services', 'Services'),
+        ('mixed', 'Goods and services'),
+    ]
+    business_type = models.CharField(
+        max_length=20, choices=BUSINESS_TYPE_CHOICES, blank=True, null=True, default=None,
+        help_text="Drives the GST registration threshold. Null = conservative ₹20L (services) rule.",
+    )
     pan_number = models.CharField(max_length=20, blank=True, null=True, help_text="PAN Number (optional, for India)")
     trn = models.CharField(max_length=15, blank=True, null=True, help_text="Tax Registration Number (15-digit for UAE)")
     is_vat_registered = models.BooleanField(default=False, help_text="Is the business VAT registered? (for UAE)")

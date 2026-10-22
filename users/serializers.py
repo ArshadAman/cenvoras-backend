@@ -150,7 +150,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
+            'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
@@ -194,7 +194,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'pan_number', 'gem_id', 'dl_number', 
+            'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',

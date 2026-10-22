@@ -189,6 +189,12 @@ def _is_cash_or_bank_account(account):
     return 'bank' in name or name.strip() == 'cash' or name.startswith('cash ')
 
 
+def _is_cash_account(account):
+    code = str(getattr(account, 'code', '') or '')
+    name = (getattr(account, 'name', '') or '').strip().lower()
+    return code == '1001' or name == 'cash' or name.startswith('cash ')
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def unpaid_purchase_bills(request):
@@ -394,8 +400,16 @@ def vendor_payment_create(request):
         # Restore Rule 37 ITC if previously reversed and now paid
         _restore_rule37_if_needed(bill, tenant, pay_date)
 
+    warnings = []
+    if _is_cash_account(payment_account) and net_paid > Decimal('10000.00'):
+        warnings.append(
+            "Section 40A(3): Cash payment exceeds ₹10,000 in a day. "
+            "The expense may be disallowed; prefer Bank transfer."
+        )
+
     return Response({
         'message': 'Vendor payment recorded',
+        'warnings': warnings,
         'bill_id': str(bill.id),
         'bill_number': bill.bill_number,
         'amount': str(amount),

@@ -303,12 +303,22 @@ def _normalize_pt_state_name(work_state):
 def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None):
     """
     State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
-    Karnataka February special: ₹300 when gross is in the taxable band (gross >= ₹25,000).
+
+    - gross_salary must be the month's ACTUAL gross (after LOP proration).
+    - The February amount is configurable per slab via ``february_amount``
+      (Karnataka FY26-27: ₹200/mo, ₹300 in Feb for gross >= ₹25,000; signed off by Rudra CA).
+    - Employees flagged ``pt_exempt_disability`` (40%+) or ``pt_exempt_armed_forces`` pay nil.
     Accepts full name, GST state code (29), or abbreviation (KA).
     Empty work_state falls back to tenant/company state via resolve_work_state.
     """
     import datetime
     from hr.services.work_state import resolve_work_state
+
+    if employee is not None and (
+        getattr(employee, 'pt_exempt_disability', False)
+        or getattr(employee, 'pt_exempt_armed_forces', False)
+    ):
+        return Decimal('0.00')
 
     gross = Decimal(str(gross_salary))
     state = resolve_work_state(employee=employee, tenant=tenant, work_state=work_state)
@@ -329,17 +339,16 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
         Q(effective_from__isnull=True) | Q(effective_from__lte=as_of)
     ).filter(
         Q(effective_to__isnull=True) | Q(effective_to__gte=as_of)
-    ).order_by('-lower_bound')
+    ).order_by('-effective_from', '-lower_bound')
 
     slab = qs.first()
     if not slab:
         return Decimal('0.00')
 
     amount = Decimal(str(slab.pt_amount))
-    # Karnataka Feb surcharge: ₹300 for salary in taxable band
-    if state.lower() == 'karnataka' and month == 2 and amount > 0:
-        return Decimal('300.00')
-    return amount
+    if month == 2 and slab.february_amount is not None and amount > 0:
+        return Decimal(str(slab.february_amount)).quantize(Decimal('0.01'))
+    return amount.quantize(Decimal('0.01'))
 
 
 def compute_gross(employee, month, year):

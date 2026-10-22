@@ -477,3 +477,36 @@ def validate_gstin_format(value, required=False):
         raise ValueError(GSTIN_INVALID_MSG)
     return gstin
 
+
+
+def credit_note_tax_breakup(credit_note, seller_state_code=None):
+    """
+    Single source of truth for a credit note's GST split, shared by GSTR-1 CDNR/CDNUR
+    and the Credit Note detail API. All values Decimal.
+
+    Returns dict: pos_code, is_interstate, lines=[{item, taxable, rate, cgst, sgst, igst, tax}],
+    totals={taxable, cgst, sgst, igst, cess, tax, total}.
+    """
+    if seller_state_code is None:
+        user = credit_note.created_by
+        seller_state_code = get_seller_state_code(getattr(user, 'active_tenant', user))
+    orig_inv = credit_note.original_invoice
+    customer = credit_note.customer
+    pos_raw = (customer.state if customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
+    pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+    is_inter = (seller_state_code != pos_code)
+
+    z = Decimal('0.00')
+    totals = {'taxable': z, 'cgst': z, 'sgst': z, 'igst': z, 'cess': z}
+    lines = []
+    for item in credit_note.items.all():
+        taxable, tax, cgst, sgst, igst, rt = calculate_item_tax_breakup(item, is_inter)
+        lines.append({'item': item, 'taxable': taxable, 'rate': Decimal(str(rt)),
+                      'cgst': cgst, 'sgst': sgst, 'igst': igst, 'tax': cgst + sgst + igst})
+        totals['taxable'] += taxable
+        totals['cgst'] += cgst
+        totals['sgst'] += sgst
+        totals['igst'] += igst
+    totals['tax'] = totals['cgst'] + totals['sgst'] + totals['igst'] + totals['cess']
+    totals['total'] = (totals['taxable'] + totals['tax']).quantize(Decimal('0.01'))
+    return {'pos_code': pos_code, 'is_interstate': is_inter, 'lines': lines, 'totals': totals}

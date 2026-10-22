@@ -1,3 +1,4 @@
+from billing.gst_utils import credit_note_tax_breakup
 """
 GST Compliance Views
 - HSN Summary Report
@@ -583,39 +584,32 @@ def gstr1_json_export(request):
     ).select_related('customer', 'original_invoice').prefetch_related('items__product').order_by('date', 'credit_note_number')
 
     for cn in credit_notes:
-        cn_items = list(cn.items.all())
         orig_inv = cn.original_invoice
-        pos_raw = (cn.customer.state if cn.customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
-        pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
-        is_inter = (seller_state_code != pos_code)
+        brk = credit_note_tax_breakup(cn, seller_state_code)
+        pos_code = brk['pos_code']
+        is_inter = brk['is_interstate']
 
         cust_gstin = cn.customer.gstin.strip().upper() if (cn.customer and cn.customer.gstin) else ''
         has_gstin = (len(cust_gstin) == 15)
 
-        cn_items_data = []
-        cn_taxable = Decimal('0.00')
-        cn_cgst = Decimal('0.00')
-        cn_sgst = Decimal('0.00')
-        cn_igst = Decimal('0.00')
-
-        for idx, item in enumerate(cn_items, 1):
-            taxable, tax, cgst, sgst, igst, rt = calculate_item_tax_breakup(item, is_inter)
-            cn_taxable += taxable
-            cn_cgst += cgst
-            cn_sgst += sgst
-            cn_igst += igst
-
-            cn_items_data.append({
+        cn_taxable = brk['totals']['taxable']
+        cn_cgst = brk['totals']['cgst']
+        cn_sgst = brk['totals']['sgst']
+        cn_igst = brk['totals']['igst']
+        cn_items_data = [
+            {
                 'num': idx,
                 'itm_det': {
-                    'txval': float(taxable),
-                    'rt': float(rt),
-                    'camt': float(cgst),
-                    'samt': float(sgst),
-                    'iamt': float(igst),
+                    'txval': float(ln['taxable']),
+                    'rt': float(ln['rate']),
+                    'camt': float(ln['cgst']),
+                    'samt': float(ln['sgst']),
+                    'iamt': float(ln['igst']),
                     'csamt': 0.0,
                 }
-            })
+            }
+            for idx, ln in enumerate(brk['lines'], 1)
+        ]
 
         orig_inv_num = orig_inv.invoice_number if orig_inv else 'N/A'
         orig_inv_dt = orig_inv.invoice_date.strftime('%d-%m-%Y') if orig_inv else cn.date.strftime('%d-%m-%Y')

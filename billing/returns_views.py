@@ -1,3 +1,4 @@
+from decimal import Decimal
 """
 Views for Sales Returns (Credit Notes) and Purchase Returns (Debit Notes).
 """
@@ -27,13 +28,31 @@ class CreditNoteItemSerializer(serializers.ModelSerializer):
 class CreditNoteSerializer(serializers.ModelSerializer):
     items = CreditNoteItemSerializer(many=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
+    original_invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True, default=None)
+    tax_breakup = serializers.SerializerMethodField()
 
     class Meta:
         model = CreditNote
-        fields = ['id', 'credit_note_number', 'date', 'original_invoice',
+        fields = ['id', 'credit_note_number', 'date', 'original_invoice', 'original_invoice_number',
                   'customer', 'customer_name', 'reason', 'notes', 'warehouse',
-                  'total_amount', 'created_by', 'created_at', 'items']
+                  'total_amount', 'created_by', 'created_at', 'items', 'tax_breakup']
         read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at']
+
+    def get_tax_breakup(self, obj):
+        """Same computation as GSTR-1 CDNR (billing.gst_utils.credit_note_tax_breakup). Money as strings."""
+        from billing.gst_utils import credit_note_tax_breakup
+        brk = credit_note_tax_breakup(obj)
+        m = lambda d: str(Decimal(d).quantize(Decimal('0.01')))
+        return {
+            'is_interstate': brk['is_interstate'],
+            'pos_code': brk['pos_code'],
+            'lines': [
+                {'id': str(ln['item'].id), 'taxable': m(ln['taxable']), 'rate': m(ln['rate']),
+                 'cgst': m(ln['cgst']), 'sgst': m(ln['sgst']), 'igst': m(ln['igst']), 'tax': m(ln['tax'])}
+                for ln in brk['lines']
+            ],
+            'totals': {k: m(v) for k, v in brk['totals'].items()},
+        }
 
     @transaction.atomic
     def create(self, validated_data):
@@ -257,7 +276,9 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 def credit_note_list_create(request):
     tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
-        notes = CreditNote.objects.filter(created_by=tenant).order_by('-date')
+        notes = (CreditNote.objects.filter(created_by=tenant)
+                 .select_related('customer', 'original_invoice', 'created_by')
+                 .prefetch_related('items__product').order_by('-date'))
         serializer = CreditNoteSerializer(notes, many=True)
         return Response(serializer.data)
 
@@ -276,7 +297,8 @@ def credit_note_list_create(request):
 def credit_note_detail(request, pk):
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        note = CreditNote.objects.get(pk=pk, created_by=tenant)
+        note = (CreditNote.objects.select_related('customer', 'original_invoice', 'created_by')
+                .prefetch_related('items__product').get(pk=pk, created_by=tenant))
     except CreditNote.DoesNotExist:
         return Response({'error': 'Not found'}, status=404)
 

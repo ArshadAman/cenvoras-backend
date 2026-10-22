@@ -167,7 +167,7 @@ def sales_summary(owner, start, end):
         cn_taxable += tot['taxable']
         cn_tax += tot['tax']
     return {
-        'gross_taxable': taxable, 'credit_note_taxable': cn_taxable,
+        'gross_taxable': taxable, 'credit_note_taxable': cn_taxable, 'credit_note_tax': cn_tax,
         'turnover': max(z, taxable - cn_taxable),
         'output_tax': tax - cn_tax,
         'deals_in_special_goods': special, 'has_interstate_goods': inter_goods,
@@ -230,13 +230,20 @@ def gst_shield(owner, today, period='month'):
 
     prior_start = datetime.date(fy_start.year - 1, 4, 1)
     prior_end = datetime.date(fy_start.year, 3, 31)
-    prior = sales_summary(owner, prior_start, prior_end)['turnover']
+    prior_sales = sales_summary(owner, prior_start, prior_end)
+    prior = prior_sales['turnover']
     comp = composition_limit(state_code, business_type)
     sales = sales_summary(owner, p_start, p_end)
     itc = itc_summary(owner, p_start, p_end)
     net = sales['output_tax'] - itc['itc']
     out.update({
-        'prior_fy_turnover': s(prior), 'prior_fy_label': f'FY {prior_start.year}-{str(prior_end.year)[2:]}',
+        'prior_fy_turnover': s(prior),
+        'prior_fy_start': prior_start.isoformat(), 'prior_fy_end': prior_end.isoformat(),
+        'prior_fy_gross_taxable': s(prior_sales['gross_taxable']),
+        'prior_fy_credit_note_taxable': s(prior_sales['credit_note_taxable']),
+        'output_tax_gross': s(sales['output_tax'] + sales['credit_note_tax']),
+        'credit_note_tax': s(sales['credit_note_tax']),
+        'prior_fy_label': f'FY {prior_start.year}-{str(prior_end.year)[2:]}',
         'composition_limit': s(comp), 'composition_eligible': prior <= comp,
         'qrmp_limit': s(QRMP_LIMIT), 'qrmp_eligible': prior <= QRMP_LIMIT,
         'hsn_digits': 4 if prior <= HSN_6_DIGIT_ABOVE else 6,

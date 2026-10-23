@@ -1,22 +1,16 @@
 from rest_framework import serializers
-from rest_framework.exceptions import APIException
+from rest_framework import serializers
 from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment
 from .models_sidecar import TransactionMeta, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem, InvoiceSettings
 from .serializers_sidecar import TransactionMetaSerializer, SalesOrderSerializer, DeliveryChallanSerializer, PurchaseIndentSerializer, InvoiceSettingsSerializer
 from inventory.models import Product, ProductBatch
 from cenvoras.constants import IndianStates
 from subscription.services import can_auto_create_inventory_product
-from django.db import transaction, IntegrityError
+from django.db import transaction
 from django.db.models import F, Sum
 import re
 import uuid
 from decimal import Decimal
-
-
-def _raise_number_conflict(exc):
-    error = APIException({'error': str(exc), 'details': str(exc)})
-    error.status_code = 409
-    raise error
 
 
 GST_STATE_CODE_TO_ALPHA = {
@@ -265,7 +259,6 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
-        extra_kwargs = {'bill_number': {'required': False, 'allow_blank': True}}
 
     def get_vendor_display(self, obj):
         return obj.vendor.name if obj.vendor else obj.vendor_name
@@ -274,15 +267,6 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         items = data.get('items')
         if self.instance is None and (items is None or len(items) == 0):
             raise serializers.ValidationError({'items': 'At least one item is required.'})
-        request = self.context.get('request')
-        tenant = getattr(getattr(request, 'user', None), 'active_tenant', getattr(request, 'user', None)) if request else None
-        bill_number = data.get('bill_number', getattr(self.instance, 'bill_number', None))
-        if tenant and bill_number:
-            from billing.sequence_service import is_placeholder_number, number_taken, DuplicateDocumentNumber
-            if not is_placeholder_number(bill_number):
-                exclude_pk = self.instance.pk if self.instance else None
-                if number_taken(tenant, 'purchase_bill', bill_number, exclude_pk=exclude_pk):
-                    _raise_number_conflict(DuplicateDocumentNumber(bill_number, 'purchase_bill'))
         return data
 
     def validate_vendor_gstin(self, value):
@@ -352,22 +336,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
-
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
-        bill_number = validated_data.get('bill_number')
-        if is_placeholder_number(bill_number):
-            try:
-                validated_data['bill_number'] = keep_or_allocate_number(
-                    user, 'purchase_bill', bill_number, on_collision='allocate'
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
         
-        try:
-            purchase_bill = PurchaseBill.objects.create(**validated_data)
-        except IntegrityError:
-            from billing.sequence_service import DuplicateDocumentNumber
-            _raise_number_conflict(DuplicateDocumentNumber(validated_data.get('bill_number'), 'purchase_bill'))
+        purchase_bill = PurchaseBill.objects.create(**validated_data)
         for item_data in items_data:
             item_data['amount'] = self._calculate_line_amount(item_data)
             # Ensure price is passed as 'price' to the model (serializer uses 'price' field)
@@ -420,16 +390,6 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                     created_by=user
                 )
             validated_data['vendor'] = vendor
-
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
-        bill_number = validated_data.get('bill_number', instance.bill_number)
-        if is_placeholder_number(bill_number):
-            try:
-                validated_data['bill_number'] = keep_or_allocate_number(
-                    user, 'purchase_bill', bill_number, exclude_pk=instance.pk, on_collision='allocate'
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
         
         # Update the purchase bill fields
         for attr, value in validated_data.items():
@@ -1325,25 +1285,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         old_total_amount = Decimal(str(instance.total_amount or 0))
         resolved_customer = getattr(self, '_customer_obj', None)
         
-        # Check draft-to-final promotion — keep a live unique number
+        # Check draft-to-final promotion
         new_status = validated_data.get('status', old_status)
-        is_draft_to_final = (
-            old_status == 'draft'
-            or (instance.invoice_number and str(instance.invoice_number).startswith('DFT-'))
-        ) and new_status == 'final'
+        is_draft_to_final = (old_status == 'draft' or (instance.invoice_number and instance.invoice_number.startswith('DFT-'))) and new_status == 'final'
         if is_draft_to_final:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
-            candidate = validated_data.get('invoice_number') or instance.invoice_number
-            try:
-                instance.invoice_number = keep_or_allocate_number(
-                    instance.created_by,
-                    'sales_invoice',
-                    candidate,
-                    exclude_pk=instance.pk,
-                    on_collision='allocate',
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
+            from billing.sequence_service import allocate_next_number
+            instance.invoice_number = allocate_next_number(instance.created_by, document_type='sales_invoice', is_draft=False)
             validated_data.pop('invoice_number', None)
 
         # Update the sales invoice fields

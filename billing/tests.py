@@ -1847,7 +1847,7 @@ class InvoicePDFGenerationTests(TestCase):
 
         template_payload = {
             "template": {
-                "layoutType": "professional",
+                "layoutType": "genz",
                 "colors": {
                     "primary": "#7c3aed",
                     "secondary": "#06b6d4",
@@ -2113,7 +2113,8 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertEqual(display_document_number('INV-ABBA-002'), 'INV-002')
         self.assertEqual(display_document_number('INV-002'), 'INV-002')
 
-    def test_draft_and_confirmed_share_one_sequence(self):
+    def test_draft_does_not_consume_final_sequence(self):
+        # 1. Create first final bill
         res1 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
@@ -2123,6 +2124,7 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertEqual(res1.status_code, 201)
         self.assertEqual(res1.data['invoice_number'], 'INV-001')
 
+        # 2. Create second final bill
         res2 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
@@ -2132,6 +2134,7 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertEqual(res2.status_code, 201)
         self.assertEqual(res2.data['invoice_number'], 'INV-002')
 
+        # 3. Create a draft bill
         res_draft = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
@@ -2139,8 +2142,9 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
             "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
         }, format='json')
         self.assertEqual(res_draft.status_code, 201)
-        self.assertEqual(res_draft.data['invoice_number'], 'INV-003')
+        self.assertEqual(res_draft.data['invoice_number'], 'DFT-001')
 
+        # 4. Create another final bill -> MUST BE INV-003, NOT INV-004
         res3 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
@@ -2148,150 +2152,19 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
             "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
         }, format='json')
         self.assertEqual(res3.status_code, 201)
-        self.assertEqual(res3.data['invoice_number'], 'INV-004')
+        self.assertEqual(res3.data['invoice_number'], 'INV-003')
 
+        # 5. Promote draft to final -> MUST BE INV-004
         draft_id = res_draft.data['id']
         res_promote = self.client.put(f"/api/billing/sales-invoices/{draft_id}/edit/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": "INV-003",
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(res_promote.status_code, 200)
-        self.assertEqual(res_promote.data['invoice_number'], 'INV-003')
-
-    def test_keep_live_number_through_draft_and_reconfirm(self):
-        created = self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": "Seq Customer",
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(created.status_code, 201)
-        invoice_id = created.data['id']
-        number = created.data['invoice_number']
-
-        to_draft = self.client.put(f"/api/billing/sales-invoices/{invoice_id}/edit/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": number,
-            "invoice_date": str(date.today()),
-            "status": "draft",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(to_draft.status_code, 200)
-        self.assertEqual(to_draft.data['invoice_number'], number)
-
-        reconfirm = self.client.put(f"/api/billing/sales-invoices/{invoice_id}/edit/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": number,
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(reconfirm.status_code, 200)
-        self.assertEqual(reconfirm.data['invoice_number'], number)
-
-    def test_reconfirm_allocates_next_if_number_stolen(self):
-        first = self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": "Seq Customer",
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        invoice_id = first.data['id']
-        stolen_number = first.data['invoice_number']
-
-        self.client.put(f"/api/billing/sales-invoices/{invoice_id}/edit/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": stolen_number,
-            "invoice_date": str(date.today()),
-            "status": "draft",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-
-        SalesInvoice.objects.filter(id=invoice_id).update(invoice_number='DFT-001')
-        thief = self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": stolen_number,
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(thief.status_code, 201)
-        self.assertEqual(thief.data['invoice_number'], stolen_number)
-
-        reconfirm = self.client.put(f"/api/billing/sales-invoices/{invoice_id}/edit/", {
             "customer_name": "Seq Customer",
             "invoice_number": "DFT-001",
             "invoice_date": str(date.today()),
             "status": "final",
             "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
         }, format='json')
-        self.assertEqual(reconfirm.status_code, 200)
-        self.assertNotEqual(reconfirm.data['invoice_number'], stolen_number)
-        self.assertTrue(reconfirm.data['invoice_number'].startswith('INV-'))
-
-    def test_duplicate_custom_invoice_number_returns_409(self):
-        self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": "CUSTOM-9",
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        dup = self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": "Seq Customer",
-            "invoice_number": "CUSTOM-9",
-            "invoice_date": str(date.today()),
-            "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
-        }, format='json')
-        self.assertEqual(dup.status_code, 409)
-
-    def test_purchase_order_uses_shared_max_plus_one(self):
-        from billing.models import PurchaseOrder
-        PurchaseOrder.objects.create(
-            po_number='PO-005',
-            status='draft',
-            total_amount=Decimal('10.00'),
-            created_by=self.tenant,
-        )
-        PurchaseOrder.objects.create(
-            po_number='PO-006',
-            status='confirmed',
-            total_amount=Decimal('20.00'),
-            created_by=self.tenant,
-        )
-        res = self.client.post("/api/billing/purchase-orders/", {
-            "vendor_name": "Seq Vendor",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 10, "amount": 10}]
-        }, format='json')
-        self.assertEqual(res.status_code, 201)
-        number = res.data.get('data', res.data).get('po_number') if isinstance(res.data, dict) else None
-        if number is None:
-            number = res.data['po_number']
-        self.assertEqual(number, 'PO-007')
-
-    def test_blank_purchase_bill_allocates_max_plus_one(self):
-        from billing.models import PurchaseBill
-        PurchaseBill.objects.create(
-            bill_number='BILL-002',
-            bill_date=date.today(),
-            vendor_name='Seq Vendor',
-            total_amount=Decimal('10.00'),
-            created_by=self.tenant,
-        )
-        res = self.client.post("/api/billing/purchase-bills/", {
-            "vendor_name": "Seq Vendor",
-            "bill_date": str(date.today()),
-            "journal": "Purchase",
-            "total_amount": 100,
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "amount": 100}]
-        }, format='json')
-        self.assertEqual(res.status_code, 201)
-        payload = res.data.get('data', res.data)
-        self.assertEqual(payload['bill_number'], 'BILL-003')
+        self.assertEqual(res_promote.status_code, 200)
+        self.assertEqual(res_promote.data['invoice_number'], 'INV-004')
 
     def test_sales_order_deletion_reverts_quotation_to_pending(self):
         from billing.models_sidecar import Quotation, QuotationItem, SalesOrder

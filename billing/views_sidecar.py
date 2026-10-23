@@ -33,7 +33,7 @@ def sales_order_list_create(request):
                 Q(order_number__icontains=search) | Q(customer__name__icontains=search)
             )
             
-        orders = orders.order_by('-order_number', '-date')
+        orders = orders.order_by('-date')
         
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(orders, request)
@@ -453,7 +453,7 @@ def delivery_challan_list_create(request):
     if request.method == 'GET':
         search = request.GET.get('search', '').strip()
         status_filter = request.GET.get('status', '').strip()
-        ordering = request.GET.get('ordering', '-challan_number').strip() or '-challan_number'
+        ordering = request.GET.get('ordering', '-date').strip() or '-date'
 
         # Auto-heal any orphaned challans where invoice was deleted/SET_NULL
         DeliveryChallan.objects.filter(
@@ -1362,7 +1362,7 @@ def quotation_list_create(request):
         search = request.GET.get('search', '').strip()
         status_filter = request.GET.get('status', '').strip()
 
-        qs = Quotation.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').order_by('-quotation_number', '-created_at')
+        qs = Quotation.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').order_by('-quotation_date', '-created_at')
 
         if search:
             qs = qs.filter(Q(quotation_number__icontains=search) | Q(customer_name__icontains=search))

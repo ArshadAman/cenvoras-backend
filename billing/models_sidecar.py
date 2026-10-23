@@ -238,11 +238,6 @@ class SalesOrder(models.Model):
                 pass
         return super().delete(*args, **kwargs)
 
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=['created_by', 'order_number'], name='uniq_order_number_per_tenant'),
-        ]
-
     def __str__(self):
         cust_display = self.customer_name or (self.customer.name if self.customer else 'Unknown')
         return f"SO: {self.order_number} ({cust_display})"
@@ -326,9 +321,6 @@ class DeliveryChallan(models.Model):
             models.Index(fields=['created_by', 'challan_number']),
             models.Index(fields=['created_by', 'date']),
         ]
-        constraints = [
-            models.UniqueConstraint(fields=['created_by', 'challan_number'], name='uniq_challan_number_per_tenant'),
-        ]
 
     def __str__(self):
         cname = self.customer.name if self.customer else (self.customer_name or "Unknown")
@@ -410,11 +402,6 @@ class Quotation(models.Model):
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=['created_by', 'quotation_number'], name='uniq_quotation_number_per_tenant'),
-        ]
 
     def __str__(self):
         return f"QT: {self.quotation_number} ({self.customer_name or 'Unknown'})"

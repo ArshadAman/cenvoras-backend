@@ -44,7 +44,7 @@ def purchase_bill_list_create(request):
 
         bills = (
             PurchaseBill.objects.filter(created_by=tenant)
-            .order_by('-bill_date', '-created_at')
+            .order_by('-bill_number', '-created_at')
             .prefetch_related('items__product')
         )
         vendor_filter = request.GET.get('vendor')
@@ -167,7 +167,7 @@ def purchase_order_list_create(request):
     if request.method == 'GET':
         orders = (
             PurchaseOrder.objects.filter(created_by=tenant)
-            .order_by('-created_at')
+            .order_by('-po_number', '-created_at')
             .prefetch_related('items__product')
         )
         vendor_filter = request.GET.get('vendor')
@@ -298,7 +298,7 @@ def sales_invoice_list_create(request):
                 )
                 .select_related('customer', 'warehouse', 'created_by', 'meta')
                 .prefetch_related('items__product', 'items__product__meta', 'items__batch')
-                .order_by('-invoice_date', '-created_at')
+                .order_by('-invoice_number', '-created_at')
             )
             customer_id = request.GET.get('customer')
             if customer_id:
@@ -326,46 +326,38 @@ def sales_invoice_list_create(request):
             )
 
     from billing.sequence_service import (
-        allocate_next_number,
+        keep_or_allocate_number,
         sync_sequence_after_creation,
         get_tenant_full_prefix,
-        is_auto_sequence_number,
+        DuplicateDocumentNumber,
         preview_next_number,
     )
     from django.db import transaction
 
     data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-    is_draft = data.get('status') == 'draft'
     invoice_number = (data.get('invoice_number') or '').strip()
-    full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=is_draft)
+    full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=False)
 
     with transaction.atomic():
-        canonical_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=False)
-        if is_draft:
-            if not invoice_number or is_auto_sequence_number(canonical_prefix, invoice_number):
-                invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=True)
-                data['invoice_number'] = invoice_number
-
-        else:
-            if not invoice_number or invoice_number.startswith('DFT-'):
-                invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=False)
-                data['invoice_number'] = invoice_number
-            elif SalesInvoice.objects.filter(invoice_number=invoice_number, created_by=tenant).exists():
-                if is_auto_sequence_number(full_prefix, invoice_number):
-                    # Concurrent cashier collision on auto-sequence number: auto-advance atomically
-                    invoice_number = allocate_next_number(tenant, document_type='sales_invoice', is_draft=False)
-                    data['invoice_number'] = invoice_number
-                else:
-                    return Response(
-                        {'error': 'Invoice number already exists', 'details': f'Invoice with number {invoice_number} already exists.'},
-                        status=status.HTTP_409_CONFLICT,
-                    )
+        try:
+            invoice_number = keep_or_allocate_number(
+                tenant,
+                'sales_invoice',
+                invoice_number,
+                prefix=full_prefix,
+                on_collision='conflict',
+            )
+        except DuplicateDocumentNumber as exc:
+            return Response(
+                {'error': 'Invoice number already exists', 'details': str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        data['invoice_number'] = invoice_number
 
         serializer = SalesInvoiceSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             serializer.save(created_by=tenant)
-            if not is_draft:
-                sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
+            sync_sequence_after_creation(tenant, 'sales_invoice', full_prefix, invoice_number)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         # is_valid() does not raise — mark the atomic block for rollback so any

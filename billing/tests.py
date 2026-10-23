@@ -2161,6 +2161,61 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertEqual(res_promote.status_code, 200)
         self.assertEqual(res_promote.data['invoice_number'], 'INV-003')
 
+    def test_deleting_latest_invoice_reuses_that_number(self):
+        from billing.sequence_service import allocate_next_number, preview_next_number
+
+        first = allocate_next_number(self.tenant, document_type='sales_invoice')
+        second = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(first, 'INV-001')
+        self.assertEqual(second, 'INV-002')
+
+        SalesInvoice.objects.create(
+            customer_name="Keep",
+            invoice_number=first,
+            invoice_date=date.today(),
+            total_amount=Decimal('10.00'),
+            created_by=self.tenant,
+            status='final',
+        )
+        latest = SalesInvoice.objects.create(
+            customer_name="Delete Me",
+            invoice_number=second,
+            invoice_date=date.today(),
+            total_amount=Decimal('10.00'),
+            created_by=self.tenant,
+            status='final',
+        )
+        latest.delete()
+
+        preview, _ = preview_next_number(self.tenant, document_type='sales_invoice')
+        reused = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(preview, 'INV-002')
+        self.assertEqual(reused, 'INV-002')
+
+    def test_deleting_middle_invoice_does_not_fill_gap(self):
+        from billing.sequence_service import allocate_next_number, preview_next_number
+
+        numbers = [allocate_next_number(self.tenant, document_type='sales_invoice') for _ in range(3)]
+        self.assertEqual(numbers, ['INV-001', 'INV-002', 'INV-003'])
+
+        invoices = [
+            SalesInvoice.objects.create(
+                customer_name=f"Doc {num}",
+                invoice_number=num,
+                invoice_date=date.today(),
+                total_amount=Decimal('10.00'),
+                created_by=self.tenant,
+                status='final',
+            )
+            for num in numbers
+        ]
+        invoices[1].delete()
+
+        preview, _ = preview_next_number(self.tenant, document_type='sales_invoice')
+        nxt = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(preview, 'INV-004')
+        self.assertEqual(nxt, 'INV-004')
+
     def test_keep_live_number_through_draft_and_reconfirm(self):
         created = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",

@@ -215,8 +215,8 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
                 )
 
                 max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
-                current_base = max(seq.last_number, max_existing)
-                seq.last_number = current_base + 1
+                # last_number reserves in-flight allocates; delete hooks lower it to remaining rows.
+                seq.last_number = max(seq.last_number, max_existing) + 1
 
                 while _number_exists(tenant, document_type, f"{full_prefix}{seq.last_number:0{min_digits}d}"):
                     seq.last_number += 1
@@ -239,17 +239,15 @@ def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_
 
     full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=False)
 
+    max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
     seq = InvoiceSequence.objects.filter(
         tenant=tenant,
         document_type=document_type,
         prefix=full_prefix,
     ).first()
+    seq_last = seq.last_number if seq else 0
 
-    current_num = seq.last_number if seq else 0
-    max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
-    current_base = max(current_num, max_existing)
-
-    candidate = current_base + 1
+    candidate = max(seq_last, max_existing) + 1
     while _number_exists(tenant, document_type, f"{full_prefix}{candidate:0{min_digits}d}"):
         candidate += 1
 
@@ -316,4 +314,28 @@ def sync_sequence_after_creation(tenant, document_type, prefix, actual_number):
         )
         if suffix_int > seq.last_number:
             seq.last_number = suffix_int
+            seq.save(update_fields=['last_number', 'updated_at'])
+
+
+def reconcile_sequence_from_db(tenant, document_type, prefix=None):
+    """
+    After a document is deleted, drop last_number to the highest remaining suffix
+    so the next allocate reuses the gap at the end (not middle gaps).
+    """
+    from billing.models import InvoiceSequence
+
+    if not tenant:
+        return
+
+    full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=False)
+    max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
+
+    with transaction.atomic():
+        seq = InvoiceSequence.objects.select_for_update().filter(
+            tenant=tenant,
+            document_type=document_type,
+            prefix=full_prefix,
+        ).first()
+        if seq and seq.last_number > max_existing:
+            seq.last_number = max_existing
             seq.save(update_fields=['last_number', 'updated_at'])

@@ -1,6 +1,7 @@
 from django.db.models.signals import pre_save, post_save, post_delete
 from django.dispatch import receiver
-from billing.models import PurchaseBillItem, SalesInvoiceItem, SalesInvoice, PurchaseBill, Payment, Customer
+from billing.models import PurchaseBillItem, SalesInvoiceItem, SalesInvoice, PurchaseBill, PurchaseOrder, Payment, Customer
+from billing.models_sidecar import Quotation, SalesOrder, DeliveryChallan
 from django.core.exceptions import ValidationError
 from inventory.models import Product, Warehouse, StockPoint
 from users.models import ActionLog
@@ -370,6 +371,7 @@ def update_balance_on_sale(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=SalesInvoice)
 def revert_balance_and_challans_on_sale_delete(sender, instance, **kwargs):
     from billing.models_sidecar import DeliveryChallan, SalesOrder
+    from billing.sequence_service import reconcile_sequence_from_db
     from django.db.models import Q
 
     raw_challan_numbers = [c.strip() for c in (instance.challan_number or '').split(',') if c.strip()]
@@ -397,6 +399,8 @@ def revert_balance_and_challans_on_sale_delete(sender, instance, **kwargs):
             sos = list(SalesOrder.objects.filter(id__in=so_ids, created_by=instance.created_by))
             if sos:
                 DocumentSyncService.reconcile_sales_order_dispatched_state(sos, instance.created_by)
+
+    reconcile_sequence_from_db(instance.created_by, 'sales_invoice')
 
 @receiver(pre_save, sender=Payment)
 def track_payment_pre_save(sender, instance, **kwargs):
@@ -598,3 +602,33 @@ def create_purchase_bill_accounting_entries(sender, instance, created, **kwargs)
 @receiver(post_save, sender=PurchaseBill)  
 def create_purchase_bill_accounting_entries_fallback(sender, instance, created, **kwargs):
     return
+
+
+def _reconcile_document_sequence(instance, document_type):
+    from billing.sequence_service import reconcile_sequence_from_db
+    reconcile_sequence_from_db(getattr(instance, 'created_by', None), document_type)
+
+
+@receiver(post_delete, sender=PurchaseBill)
+def reconcile_purchase_bill_sequence(sender, instance, **kwargs):
+    _reconcile_document_sequence(instance, 'purchase_bill')
+
+
+@receiver(post_delete, sender=PurchaseOrder)
+def reconcile_purchase_order_sequence(sender, instance, **kwargs):
+    _reconcile_document_sequence(instance, 'purchase_order')
+
+
+@receiver(post_delete, sender=Quotation)
+def reconcile_quotation_sequence(sender, instance, **kwargs):
+    _reconcile_document_sequence(instance, 'quotation')
+
+
+@receiver(post_delete, sender=SalesOrder)
+def reconcile_sales_order_sequence(sender, instance, **kwargs):
+    _reconcile_document_sequence(instance, 'sales_order')
+
+
+@receiver(post_delete, sender=DeliveryChallan)
+def reconcile_delivery_challan_sequence(sender, instance, **kwargs):
+    _reconcile_document_sequence(instance, 'delivery_challan')

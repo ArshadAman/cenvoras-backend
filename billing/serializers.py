@@ -851,12 +851,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     meta = TransactionMetaSerializer(required=False)
     bank_account_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     template_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    delivery_challans = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SalesInvoice
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
-                  'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_address', 'place_of_supply', 'gst_treatment',
+                  'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_challans', 'delivery_address', 'place_of_supply', 'gst_treatment',
                   'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
 
     def get_customer_details(self, instance):
@@ -887,6 +888,28 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             pos = getattr(instance.customer, 'state', None)
         pos_code = get_pos_state_code(pos, fallback_state=seller_state_code)
         return 'igst' if seller_state_code != pos_code else 'cgst_sgst'
+
+    def get_delivery_challans(self, instance):
+        related_manager = getattr(instance, 'source_delivery_challans', None)
+        related = list(related_manager.all()) if related_manager is not None else []
+        if related:
+            return [
+                {
+                    'challan_number': c.challan_number,
+                    'challan_date': c.date.isoformat() if getattr(c, 'date', None) else None,
+                }
+                for c in related
+                if getattr(c, 'challan_number', None)
+            ]
+        meta = getattr(instance, 'meta', None)
+        linked = getattr(meta, 'linked_challans', None) or []
+        if isinstance(linked, list) and linked:
+            return linked
+        numbers = [n.strip() for n in str(getattr(instance, 'challan_number', '') or '').split(',') if n.strip()]
+        if not numbers:
+            return []
+        single_date = instance.challan_date.isoformat() if getattr(instance, 'challan_date', None) else None
+        return [{'challan_number': n, 'challan_date': single_date} for n in numbers]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

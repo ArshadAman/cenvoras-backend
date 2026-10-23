@@ -32,7 +32,7 @@ def _raise_number_conflict(exc):
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransactionMeta
-        fields = ['status', 'delivery_status', 'delivery_boy', 'tags', 'bank_account_id', 'template_id']
+        fields = ['status', 'delivery_status', 'delivery_boy', 'tags', 'bank_account_id', 'template_id', 'linked_challans']
 
 class PartyMetaSerializer(serializers.ModelSerializer):
     class Meta:

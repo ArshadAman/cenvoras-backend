@@ -325,10 +325,14 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = tenant
         
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         try:
-            validated_data['order_number'] = keep_or_allocate_number(
-                tenant, 'sales_order', validated_data.get('order_number'), on_collision='conflict'
+            validated_data['order_number'] = assign_document_number(
+                tenant,
+                'sales_order',
+                validated_data.get('order_number'),
+                status=document_status_from(validated_data, self, default='new'),
+                on_collision='conflict',
             )
         except DuplicateDocumentNumber as exc:
             _raise_number_conflict(exc)
@@ -361,6 +365,22 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         validated_data.pop('customer_phone', None)
         validated_data.pop('invoice_number', None)
         validated_data.pop('invoice_date', None)
+
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from, is_placeholder_number
+        request_status = document_status_from(validated_data, self, default='new')
+        candidate = validated_data.get('order_number', instance.order_number)
+        if is_placeholder_number(candidate) or candidate != instance.order_number:
+            try:
+                validated_data['order_number'] = assign_document_number(
+                    instance.created_by,
+                    'sales_order',
+                    candidate,
+                    status=request_status,
+                    exclude_pk=instance.pk,
+                    on_collision='allocate',
+                )
+            except DuplicateDocumentNumber as exc:
+                _raise_number_conflict(exc)
 
         # Update scalar fields
         for attr, value in validated_data.items():
@@ -635,11 +655,16 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         is_draft = validated_data.get('status') == 'draft'
         ch_num = validated_data.get('challan_number')
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
         try:
-            validated_data['challan_number'] = keep_or_allocate_number(
-                user, 'delivery_challan', ch_num, prefix=raw_prefix, on_collision='conflict'
+            validated_data['challan_number'] = assign_document_number(
+                user,
+                'delivery_challan',
+                ch_num,
+                status=document_status_from(validated_data, self, default='open'),
+                prefix=raw_prefix,
+                on_collision='conflict',
             )
         except DuplicateDocumentNumber as exc:
             _raise_number_conflict(exc)
@@ -703,14 +728,15 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             or (instance.challan_number and str(instance.challan_number).startswith('D-DC-'))
         ) and new_status not in ['draft', 'cancelled']
         if is_draft_promotion:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+            from billing.sequence_service import assign_document_number, DuplicateDocumentNumber
             raw_prefix = self.context['request'].data.get('prefix') if 'request' in self.context else None
             candidate = validated_data.get('challan_number') or instance.challan_number
             try:
-                instance.challan_number = keep_or_allocate_number(
+                instance.challan_number = assign_document_number(
                     instance.created_by,
                     'delivery_challan',
                     candidate,
+                    status=new_status,
                     exclude_pk=instance.pk,
                     prefix=raw_prefix,
                     on_collision='allocate',
@@ -1084,13 +1110,18 @@ class QuotationSerializer(serializers.ModelSerializer):
         validated_data['created_by'] = tenant
 
         q_num = validated_data.get('quotation_number')
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         raw_prefix = self.context['request'].data.get('prefix', 'QT-') if 'request' in self.context else 'QT-'
         if q_num and 'AUTO' in str(q_num):
             q_num = None
         try:
-            validated_data['quotation_number'] = keep_or_allocate_number(
-                tenant, 'quotation', q_num, prefix=raw_prefix, on_collision='conflict'
+            validated_data['quotation_number'] = assign_document_number(
+                tenant,
+                'quotation',
+                q_num,
+                status=document_status_from(validated_data, self, default='draft'),
+                prefix=raw_prefix,
+                on_collision='conflict',
             )
         except DuplicateDocumentNumber as exc:
             _raise_number_conflict(exc)
@@ -1136,13 +1167,14 @@ class QuotationSerializer(serializers.ModelSerializer):
             or (instance.quotation_number and str(instance.quotation_number).startswith('D-QT-'))
         ) and new_status not in ['draft', 'cancelled', 'rejected']
         if is_draft_promotion:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+            from billing.sequence_service import assign_document_number, DuplicateDocumentNumber
             candidate = validated_data.get('quotation_number') or instance.quotation_number
             try:
-                instance.quotation_number = keep_or_allocate_number(
+                instance.quotation_number = assign_document_number(
                     instance.created_by,
                     'quotation',
                     candidate,
+                    status=new_status,
                     exclude_pk=instance.pk,
                     on_collision='allocate',
                 )

@@ -353,15 +353,17 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
 
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
-        bill_number = validated_data.get('bill_number')
-        if is_placeholder_number(bill_number):
-            try:
-                validated_data['bill_number'] = keep_or_allocate_number(
-                    user, 'purchase_bill', bill_number, on_collision='allocate'
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
+        try:
+            validated_data['bill_number'] = assign_document_number(
+                user,
+                'purchase_bill',
+                validated_data.get('bill_number'),
+                status=document_status_from(validated_data, self),
+                on_collision='allocate',
+            )
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
         
         try:
             purchase_bill = PurchaseBill.objects.create(**validated_data)
@@ -421,15 +423,18 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 )
             validated_data['vendor'] = vendor
 
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
-        bill_number = validated_data.get('bill_number', instance.bill_number)
-        if is_placeholder_number(bill_number):
-            try:
-                validated_data['bill_number'] = keep_or_allocate_number(
-                    user, 'purchase_bill', bill_number, exclude_pk=instance.pk, on_collision='allocate'
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
+        try:
+            validated_data['bill_number'] = assign_document_number(
+                user,
+                'purchase_bill',
+                validated_data.get('bill_number', instance.bill_number),
+                status=document_status_from(validated_data, self),
+                exclude_pk=instance.pk,
+                on_collision='allocate',
+            )
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
         
         # Update the purchase bill fields
         for attr, value in validated_data.items():
@@ -1355,15 +1360,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             or (instance.invoice_number and str(instance.invoice_number).startswith('DFT-'))
         ) and new_status == 'final'
         if is_draft_to_final:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+            from billing.sequence_service import assign_document_number, DuplicateDocumentNumber
             candidate = validated_data.get('invoice_number') or instance.invoice_number
             try:
-                instance.invoice_number = keep_or_allocate_number(
+                instance.invoice_number = assign_document_number(
                     instance.created_by,
                     'sales_invoice',
                     candidate,
+                    status=new_status,
                     exclude_pk=instance.pk,
                     on_collision='allocate',
+                    require_placeholder=True,
                 )
             except DuplicateDocumentNumber as exc:
                 _raise_number_conflict(exc)

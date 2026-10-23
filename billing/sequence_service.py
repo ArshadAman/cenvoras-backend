@@ -1,5 +1,6 @@
 import re
 import logging
+import uuid
 from django.db import transaction
 
 logger = logging.getLogger(__name__)
@@ -9,11 +10,25 @@ DRAFT_NUMBER_PREFIXES = (
     'D-QT-',
     'D-DC-',
     'D-SO-',
+    'D-PO-',
     'D-BILL-',
     'D-CN-',
     'D-DN-',
     'PB-DRAFT-',
 )
+
+UNCONFIRMED_STATUSES = frozenset({'draft', 'cancelled'})
+
+DRAFT_PLACEHOLDER_BY_TYPE = {
+    'sales_invoice': 'DFT-',
+    'quotation': 'D-QT-',
+    'delivery_challan': 'D-DC-',
+    'sales_order': 'D-SO-',
+    'purchase_order': 'D-PO-',
+    'purchase_bill': 'D-BILL-',
+    'credit_note': 'D-CN-',
+    'debit_note': 'D-DN-',
+}
 
 DOCUMENT_LABELS = {
     'sales_invoice': 'Invoice',
@@ -104,7 +119,36 @@ def is_placeholder_number(number_str):
     if not number_str or not str(number_str).strip():
         return True
     s = str(number_str).strip()
-    return s.startswith(DRAFT_NUMBER_PREFIXES)
+    if s.startswith(DRAFT_NUMBER_PREFIXES):
+        return True
+    return s.upper().endswith('-AUTO') or s.upper().endswith('/AUTO')
+
+
+def status_should_allocate(status):
+    """Blank numbers are allocated only for confirmed (non-draft) documents."""
+    if status is None:
+        return True
+    return str(status).strip().lower() not in UNCONFIRMED_STATUSES
+
+
+def document_status_from(validated_data, serializer=None, default=None):
+    if validated_data and validated_data.get('status') is not None:
+        return validated_data.get('status')
+    if serializer is not None:
+        request = (serializer.context or {}).get('request')
+        if request is not None:
+            raw = (getattr(request, 'data', {}) or {}).get('status')
+            if raw is not None:
+                return raw
+        if serializer.instance is not None:
+            return getattr(serializer.instance, 'status', default)
+    return default
+
+
+def make_draft_placeholder(document_type='sales_invoice'):
+    """Unique non-live number so drafts do not collide on unique(created_by, number)."""
+    prefix = DRAFT_PLACEHOLDER_BY_TYPE.get(document_type, 'DFT-')
+    return f"{prefix}X{uuid.uuid4().hex[:8].upper()}"
 
 
 def _get_model_and_field(document_type):
@@ -166,14 +210,9 @@ def _numeric_suffix(number_str, full_prefix):
             return int(rest)
         return None
 
-    val = digits_after(full_prefix)
-    if val is not None:
-        return val
-    for draft_prefix in DRAFT_NUMBER_PREFIXES:
-        val = digits_after(draft_prefix)
-        if val is not None:
-            return val
-    return None
+    # Live auto-numbers only. Draft prefixes and custom numbers must not
+    # advance INV/QT/DC sequences.
+    return digits_after(full_prefix)
 
 
 def _get_existing_max_number(tenant, document_type, full_prefix):
@@ -195,8 +234,9 @@ def _get_existing_max_number(tenant, document_type, full_prefix):
 def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3, max_retries=5, is_draft=False):
     """
     Atomically allocate the next guaranteed unique document number.
-    Draft and confirmed share one live sequence: max(allocated suffix) + 1.
-    is_draft is ignored so new drafts receive the live prefix.
+    Next value is the highest remaining live suffix + 1 (sticky last_number
+    cannot invent a gap after deletes). Call inside the same transaction as
+    the document insert so a failed create cannot leave a reserved hole.
     """
     import time
     from django.db import OperationalError
@@ -215,8 +255,7 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
                 )
 
                 max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
-                # last_number reserves in-flight allocates; delete hooks lower it to remaining rows.
-                seq.last_number = max(seq.last_number, max_existing) + 1
+                seq.last_number = max_existing + 1
 
                 while _number_exists(tenant, document_type, f"{full_prefix}{seq.last_number:0{min_digits}d}"):
                     seq.last_number += 1
@@ -233,21 +272,13 @@ def allocate_next_number(tenant, document_type='sales_invoice', prefix=None, min
 
 def preview_next_number(tenant, document_type='sales_invoice', prefix=None, min_digits=3, is_draft=False):
     """
-    Preview the next anticipated document number for UI forms without locking the database table.
+    Preview the next anticipated document number for UI forms without locking
+    or incrementing InvoiceSequence.last_number.
     """
-    from billing.models import InvoiceSequence
-
     full_prefix = get_tenant_full_prefix(tenant, document_type, prefix, is_draft=False)
 
     max_existing = _get_existing_max_number(tenant, document_type, full_prefix)
-    seq = InvoiceSequence.objects.filter(
-        tenant=tenant,
-        document_type=document_type,
-        prefix=full_prefix,
-    ).first()
-    seq_last = seq.last_number if seq else 0
-
-    candidate = max(seq_last, max_existing) + 1
+    candidate = max_existing + 1
     while _number_exists(tenant, document_type, f"{full_prefix}{candidate:0{min_digits}d}"):
         candidate += 1
 
@@ -264,10 +295,12 @@ def keep_or_allocate_number(
     exclude_pk=None,
     prefix=None,
     on_collision='allocate',
+    allocate_if_empty=True,
 ):
     """
     Keep a live unique number. Allocate max+1 if blank, draft-prefixed, or colliding.
     on_collision='conflict' raises DuplicateDocumentNumber for a taken custom number.
+    allocate_if_empty=False leaves drafts unnumbered (caller may assign a placeholder).
     """
     if number and not is_placeholder_number(number):
         if not number_taken(tenant, document_type, number, exclude_pk=exclude_pk):
@@ -276,7 +309,42 @@ def keep_or_allocate_number(
         if on_collision == 'conflict' and not is_auto_sequence_number(full_prefix, number):
             raise DuplicateDocumentNumber(number, document_type)
         # Stolen auto-number or promotion after another doc took it: next shared max+1
+    if not allocate_if_empty:
+        if number and is_placeholder_number(number) and str(number).strip():
+            return str(number).strip()
+        return ''
     return allocate_next_number(tenant, document_type, prefix=prefix, is_draft=False)
+
+
+def assign_document_number(
+    tenant,
+    document_type,
+    number,
+    *,
+    status=None,
+    exclude_pk=None,
+    prefix=None,
+    on_collision='allocate',
+    require_placeholder=False,
+):
+    """
+    Keep a custom number. Allocate a live sequence number only when confirmed.
+    Drafts stay blank, or get a unique DFT-/D-* placeholder when the table
+    cannot store two empty numbers.
+    """
+    allocate = status_should_allocate(status)
+    assigned = keep_or_allocate_number(
+        tenant,
+        document_type,
+        number,
+        exclude_pk=exclude_pk,
+        prefix=prefix,
+        on_collision=on_collision,
+        allocate_if_empty=allocate,
+    )
+    if not allocate and not assigned and require_placeholder:
+        return make_draft_placeholder(document_type)
+    return assigned
 
 
 def sync_sequence_after_creation(tenant, document_type, prefix, actual_number):

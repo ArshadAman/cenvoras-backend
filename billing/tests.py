@@ -1665,13 +1665,58 @@ class InvoiceSequenceConcurrencyTests(TestCase):
         """Calls to allocate_next_number produce sequential, non-overlapping numbers with strictly incrementing suffixes"""
         from billing.sequence_service import allocate_next_number
 
-        results = [allocate_next_number(self.tenant, document_type='sales_invoice') for _ in range(10)]
+        results = []
+        for idx in range(10):
+            number = allocate_next_number(self.tenant, document_type='sales_invoice')
+            SalesInvoice.objects.create(
+                created_by=self.tenant,
+                customer=self.customer,
+                invoice_number=number,
+                invoice_date=date.today(),
+                total_amount=Decimal("50.00"),
+                status='final',
+            )
+            results.append(number)
         self.assertEqual(len(results), 10)
         self.assertEqual(len(set(results)), 10, "All allocated invoice numbers must be distinct")
 
         # Verify strictly sequential suffixes (e.g. 001, 002, 003...)
         suffixes = [int(r.split('-')[-1]) for r in results]
         self.assertEqual(suffixes, list(range(suffixes[0], suffixes[0] + 10)))
+
+    def test_confirmed_create_advances_preview_draft_does_not(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff_1)
+
+        first_preview = client.get("/api/billing/sales-invoices/next-number/?prefix=INV-")
+        self.assertEqual(first_preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_preview.data["next_number"], "INV-001")
+
+        draft = client.post("/api/billing/sales-invoices/", {
+            "invoice_date": str(date.today()),
+            "customer_name": self.customer.name,
+            "customer": str(self.customer.id),
+            "status": "draft",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 50.00, "hsn_sac_code": "9983"}],
+        }, format="json")
+        self.assertEqual(draft.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(str(draft.data["invoice_number"]).startswith("DFT-"))
+
+        still_preview = client.get("/api/billing/sales-invoices/next-number/?prefix=INV-")
+        self.assertEqual(still_preview.data["next_number"], "INV-001")
+
+        confirmed = client.post("/api/billing/sales-invoices/", {
+            "invoice_date": str(date.today()),
+            "customer_name": self.customer.name,
+            "customer": str(self.customer.id),
+            "status": "final",
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 50.00, "hsn_sac_code": "9983"}],
+        }, format="json")
+        self.assertEqual(confirmed.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(confirmed.data["invoice_number"], "INV-001")
+
+        after_confirm = client.get("/api/billing/sales-invoices/next-number/?prefix=INV-")
+        self.assertEqual(after_confirm.data["next_number"], "INV-002")
 
 
 class InvoicePDFGenerationTests(TestCase):
@@ -2103,31 +2148,45 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.tenant)
 
+    def _create_allocated_invoice(self, number):
+        return SalesInvoice.objects.create(
+            customer_name="Seq Keep",
+            invoice_number=number,
+            invoice_date=date.today(),
+            total_amount=Decimal('10.00'),
+            created_by=self.tenant,
+            status='final',
+        )
+
     def test_clean_sequence_no_uuid(self):
-        from billing.sequence_service import allocate_next_number, display_document_number
+        from billing.sequence_service import allocate_next_number, display_document_number, preview_next_number
         num1 = allocate_next_number(self.tenant, document_type='sales_invoice')
         self.assertEqual(num1, 'INV-001')
+        # Without a row, another allocate still previews the same remaining max+1.
+        preview_again, _ = preview_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(preview_again, 'INV-001')
+        self._create_allocated_invoice(num1)
         num2 = allocate_next_number(self.tenant, document_type='sales_invoice')
         self.assertEqual(num2, 'INV-002')
         # Test display_document_number helper
         self.assertEqual(display_document_number('INV-ABBA-002'), 'INV-002')
         self.assertEqual(display_document_number('INV-002'), 'INV-002')
 
-    def test_draft_and_confirmed_share_one_sequence(self):
+    def test_draft_does_not_take_live_sequence(self):
         res1 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
             "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "hsn_sac_code": "9983"}]
         }, format='json')
-        self.assertEqual(res1.status_code, 201)
+        self.assertEqual(res1.status_code, 201, res1.data)
         self.assertEqual(res1.data['invoice_number'], 'INV-001')
 
         res2 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
             "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "hsn_sac_code": "9983"}]
         }, format='json')
         self.assertEqual(res2.status_code, 201)
         self.assertEqual(res2.data['invoice_number'], 'INV-002')
@@ -2136,47 +2195,40 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
             "status": "draft",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "hsn_sac_code": "9983"}]
         }, format='json')
         self.assertEqual(res_draft.status_code, 201)
-        self.assertEqual(res_draft.data['invoice_number'], 'INV-003')
+        self.assertTrue(str(res_draft.data['invoice_number']).startswith('DFT-'))
 
         res3 = self.client.post("/api/billing/sales-invoices/", {
             "customer_name": "Seq Customer",
             "invoice_date": str(date.today()),
             "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "hsn_sac_code": "9983"}]
         }, format='json')
         self.assertEqual(res3.status_code, 201)
-        self.assertEqual(res3.data['invoice_number'], 'INV-004')
+        self.assertEqual(res3.data['invoice_number'], 'INV-003')
 
         draft_id = res_draft.data['id']
         res_promote = self.client.put(f"/api/billing/sales-invoices/{draft_id}/edit/", {
             "customer_name": "Seq Customer",
-            "invoice_number": "INV-003",
+            "invoice_number": res_draft.data['invoice_number'],
             "invoice_date": str(date.today()),
             "status": "final",
-            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100}]
+            "items": [{"product": str(self.product.id), "quantity": 1, "price": 100, "hsn_sac_code": "9983"}]
         }, format='json')
         self.assertEqual(res_promote.status_code, 200)
-        self.assertEqual(res_promote.data['invoice_number'], 'INV-003')
+        self.assertEqual(res_promote.data['invoice_number'], 'INV-004')
 
     def test_deleting_latest_invoice_reuses_that_number(self):
         from billing.sequence_service import allocate_next_number, preview_next_number
 
         first = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self._create_allocated_invoice(first)
         second = allocate_next_number(self.tenant, document_type='sales_invoice')
         self.assertEqual(first, 'INV-001')
         self.assertEqual(second, 'INV-002')
 
-        SalesInvoice.objects.create(
-            customer_name="Keep",
-            invoice_number=first,
-            invoice_date=date.today(),
-            total_amount=Decimal('10.00'),
-            created_by=self.tenant,
-            status='final',
-        )
         latest = SalesInvoice.objects.create(
             customer_name="Delete Me",
             invoice_number=second,
@@ -2192,23 +2244,32 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         self.assertEqual(preview, 'INV-002')
         self.assertEqual(reused, 'INV-002')
 
+    def test_stale_last_number_does_not_skip_sequence(self):
+        from billing.models import InvoiceSequence
+        from billing.sequence_service import allocate_next_number, preview_next_number, get_tenant_full_prefix
+
+        self._create_allocated_invoice('INV-001')
+        InvoiceSequence.objects.update_or_create(
+            tenant=self.tenant,
+            document_type='sales_invoice',
+            prefix=get_tenant_full_prefix(self.tenant, 'sales_invoice'),
+            defaults={'last_number': 50},
+        )
+        preview, _ = preview_next_number(self.tenant, document_type='sales_invoice')
+        nxt = allocate_next_number(self.tenant, document_type='sales_invoice')
+        self.assertEqual(preview, 'INV-002')
+        self.assertEqual(nxt, 'INV-002')
+
     def test_deleting_middle_invoice_does_not_fill_gap(self):
         from billing.sequence_service import allocate_next_number, preview_next_number
 
-        numbers = [allocate_next_number(self.tenant, document_type='sales_invoice') for _ in range(3)]
+        numbers = []
+        invoices = []
+        for _ in range(3):
+            num = allocate_next_number(self.tenant, document_type='sales_invoice')
+            invoices.append(self._create_allocated_invoice(num))
+            numbers.append(num)
         self.assertEqual(numbers, ['INV-001', 'INV-002', 'INV-003'])
-
-        invoices = [
-            SalesInvoice.objects.create(
-                customer_name=f"Doc {num}",
-                invoice_number=num,
-                invoice_date=date.today(),
-                total_amount=Decimal('10.00'),
-                created_by=self.tenant,
-                status='final',
-            )
-            for num in numbers
-        ]
         invoices[1].delete()
 
         preview, _ = preview_next_number(self.tenant, document_type='sales_invoice')
@@ -2320,6 +2381,7 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
         )
         res = self.client.post("/api/billing/purchase-orders/", {
             "vendor_name": "Seq Vendor",
+            "status": "confirmed",
             "items": [{"product": str(self.product.id), "quantity": 1, "price": 10, "amount": 10}]
         }, format='json')
         self.assertEqual(res.status_code, 201)

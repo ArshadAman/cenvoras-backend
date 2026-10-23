@@ -149,6 +149,15 @@ class PurchaseBill(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by', 'bill_number'],
+                name='uniq_bill_number_per_tenant',
+                condition=~models.Q(bill_number=''),
+            ),
+        ]
+
     def __str__(self):
         return f"{self.bill_number} — {self.vendor_name}"
 
@@ -193,6 +202,15 @@ class PurchaseOrder(models.Model):
     )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by', 'po_number'],
+                name='uniq_po_number_per_tenant',
+                condition=models.Q(po_number__isnull=False) & ~models.Q(po_number=''),
+            ),
+        ]
 
     def __str__(self):
         return f"PO-{self.po_number or str(self.id)[:8]}"

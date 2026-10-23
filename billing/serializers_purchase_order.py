@@ -1,14 +1,6 @@
-from django.db import IntegrityError
 from rest_framework import serializers
-from rest_framework.exceptions import APIException
 from .models import PurchaseOrder, PurchaseOrderItem, Vendor
 from inventory.serializers import ProductSerializer
-
-
-def _raise_number_conflict(exc):
-    error = APIException({'error': str(exc), 'details': str(exc)})
-    error.status_code = 409
-    raise error
 
 
 class VendorSimpleSerializer(serializers.ModelSerializer):
@@ -80,7 +72,6 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseOrder
         fields = ['id', 'po_number', 'vendor', 'vendor_id', 'vendor_name', 'vendor_display_name', 'expected_date', 'status', 'notes', 'total_amount', 'items', 'created_at']
-        extra_kwargs = {'po_number': {'required': False, 'allow_blank': True, 'allow_null': True}}
 
     def get_vendor_display_name(self, obj):
         """Return vendor name or empty string if vendor is null."""
@@ -108,21 +99,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         items = validated_data.pop('items', [])
         vendor = self._resolve_vendor(validated_data)
         validated_data['vendor'] = vendor
-        request = self.context.get('request')
-        tenant = getattr(getattr(request, 'user', None), 'active_tenant', getattr(request, 'user', None)) if request else None
-        if tenant:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
-            try:
-                validated_data['po_number'] = keep_or_allocate_number(
-                    tenant, 'purchase_order', validated_data.get('po_number'), prefix='PO-', on_collision='conflict'
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
-        try:
-            po = PurchaseOrder.objects.create(**validated_data)
-        except IntegrityError:
-            from billing.sequence_service import DuplicateDocumentNumber
-            _raise_number_conflict(DuplicateDocumentNumber(validated_data.get('po_number'), 'purchase_order'))
+        po = PurchaseOrder.objects.create(**validated_data)
         for item in items:
             item.pop('product_name', None)
             PurchaseOrderItem.objects.create(purchase_order=po, **item)
@@ -133,24 +110,6 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         vendor = self._resolve_vendor(validated_data)
         if vendor:
             validated_data['vendor'] = vendor
-
-        old_status = instance.status
-        new_status = validated_data.get('status', old_status)
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
-        candidate = validated_data.get('po_number', instance.po_number)
-        promoting = old_status == 'draft' and new_status not in ['draft', 'cancelled']
-        if promoting or is_placeholder_number(candidate):
-            try:
-                validated_data['po_number'] = keep_or_allocate_number(
-                    instance.created_by,
-                    'purchase_order',
-                    candidate,
-                    exclude_pk=instance.pk,
-                    prefix='PO-',
-                    on_collision='allocate',
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
             
         for k, v in validated_data.items():
             setattr(instance, k, v)

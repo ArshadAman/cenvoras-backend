@@ -150,7 +150,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'phone', 'first_name', 'last_name',
-            'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
+            'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'sales_order_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
@@ -194,7 +194,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'first_name', 'last_name', 'phone', 'business_name', 
-            'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
+            'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'sales_order_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'email', 'current_password',
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
@@ -206,6 +206,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'business_name': {'required': False},
             'invoice_prefix': {'required': False},
             'quotation_prefix': {'required': False},
+            'sales_order_prefix': {'required': False},
             'email': {'required': False},
             'gstin': {'required': False, 'allow_blank': True, 'allow_null': True},
             'pan_number': {'required': False, 'allow_blank': True, 'allow_null': True},
@@ -236,6 +237,10 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     def validate_delivery_challan_prefix(self, value):
         normalized = str(value or '').strip().upper()
         return normalized or 'DC'
+
+    def validate_sales_order_prefix(self, value):
+        normalized = str(value or '').strip().upper()
+        return normalized or 'SO'
 
     def validate_bank_accounts(self, value):
         if not value:

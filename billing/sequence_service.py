@@ -75,7 +75,7 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
     elif document_type == 'delivery_challan':
         base = prefix or getattr(tenant, 'delivery_challan_prefix', 'DC') or 'DC'
     elif document_type == 'sales_order':
-        base = prefix or 'SO'
+        base = prefix or getattr(tenant, 'sales_order_prefix', 'SO') or 'SO'
     elif document_type == 'purchase_bill':
         base = prefix or 'BILL'
     elif document_type == 'purchase_order':

@@ -94,6 +94,11 @@ class TransactionMeta(models.Model):
     # Selected bank account for this bill
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this invoice")
     template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this invoice")
+    linked_challans = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Challan numbers and dates attached to this invoice, e.g. [{challan_number, challan_date}]",
+    )
 
     def __str__(self):
         return f"Meta for {self.invoice.invoice_number}"

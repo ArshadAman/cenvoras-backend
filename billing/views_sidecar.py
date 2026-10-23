@@ -16,6 +16,31 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def persist_linked_challans(invoice, challans):
+    """Store every challan number + date on the invoice and its meta sidecar."""
+    payload = []
+    dates = []
+    for challan in challans or []:
+        number = getattr(challan, 'challan_number', None)
+        if not number:
+            continue
+        challan_date = getattr(challan, 'date', None)
+        payload.append({
+            'challan_number': number,
+            'challan_date': challan_date.isoformat() if challan_date else None,
+        })
+        if challan_date:
+            dates.append(challan_date)
+    invoice.challan_number = ", ".join(item['challan_number'] for item in payload) or None
+    invoice.challan_date = min(dates) if dates else None
+    if invoice.pk:
+        invoice.save(update_fields=['challan_number', 'challan_date'])
+    meta, _ = TransactionMeta.objects.get_or_create(invoice=invoice)
+    meta.linked_challans = payload
+    meta.save(update_fields=['linked_challans'])
+    return payload
+
 # =============================================================================
 # SALES ORDER VIEWS
 # =============================================================================
@@ -255,11 +280,10 @@ def convert_order_to_invoice(request, pk):
             if is_post_delivery_invoicing or has_linked_challans:
                 invoice._skip_stock_deduction = True
 
-            if linked_challans:
-                invoice.challan_number = ", ".join(dict.fromkeys(c.challan_number for c in linked_challans if c.challan_number))
-                invoice.challan_date = max(c.date for c in linked_challans)
-
             invoice.save()
+            if linked_challans:
+                persist_linked_challans(invoice, linked_challans)
+                invoice.save(update_fields=['challan_number', 'challan_date'])
 
             if linked_challans:
                 for c in linked_challans:
@@ -988,8 +1012,8 @@ def convert_challan_to_invoice(request, pk):
             invoice.total_amount = final_total
             invoice.save(update_fields=['total_amount'])
 
-            # Ensure TransactionMeta exists
-            TransactionMeta.objects.get_or_create(invoice=invoice)
+            persist_linked_challans(invoice, [challan])
+            invoice.save(update_fields=['challan_number', 'challan_date'])
 
             # Accrue loyalty points (1 point per ₹100)
             if challan.customer and hasattr(challan.customer, 'meta'):
@@ -1103,8 +1127,6 @@ def bulk_convert_challans_to_invoice(request):
             from billing.sequence_service import allocate_next_number
             next_invoice_number = allocate_next_number(tenant, document_type='sales_invoice')
 
-            all_challan_numbers = ", ".join(c.challan_number for c in challans)
-            latest_challan_date = max(c.date for c in challans)
             combined_round_off = sum((c.round_off or Decimal('0.00') for c in challans), Decimal('0.00'))
 
             invoice = SalesInvoice(
@@ -1114,8 +1136,8 @@ def bulk_convert_challans_to_invoice(request):
                 place_of_supply=customer.state if customer and customer.state else None,
                 invoice_number=next_invoice_number,
                 invoice_date=date.today(),
-                challan_number=all_challan_numbers,
-                challan_date=latest_challan_date,
+                challan_number=None,
+                challan_date=None,
                 delivery_address=primary_challan.delivery_address,
                 po_number=primary_challan.po_number or (primary_challan.sales_order.order_number if primary_challan.sales_order else ''),
                 po_date=primary_challan.po_date,
@@ -1181,7 +1203,8 @@ def bulk_convert_challans_to_invoice(request):
             invoice.total_amount = final_total
             invoice.save(update_fields=['total_amount'])
 
-            TransactionMeta.objects.get_or_create(invoice=invoice)
+            persist_linked_challans(invoice, challans)
+            invoice.save(update_fields=['challan_number', 'challan_date'])
 
             if customer:
                 Customer.objects.filter(pk=customer.pk).update(

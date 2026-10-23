@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from rest_framework import serializers
+from rest_framework.exceptions import APIException
 from subscription.services import can_auto_create_inventory_product
 from .models_sidecar import (
     TransactionMeta,
@@ -20,6 +21,13 @@ from .models_sidecar import (
 from inventory.models import Product, Warehouse, ProductBatch, StockPoint
 from billing.models import Customer
 from django.db.models import F, Q
+
+
+def _raise_number_conflict(exc):
+    error = APIException({'error': str(exc), 'details': str(exc)})
+    error.status_code = 409
+    raise error
+
 
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -317,9 +325,13 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         validated_data['created_by'] = tenant
         
-        if not validated_data.get('order_number'):
-            from billing.sequence_service import allocate_next_number
-            validated_data['order_number'] = allocate_next_number(tenant, document_type='sales_order')
+        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        try:
+            validated_data['order_number'] = keep_or_allocate_number(
+                tenant, 'sales_order', validated_data.get('order_number'), on_collision='conflict'
+            )
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
 
         # Pop leftover write-only fields
         validated_data.pop('invoice_number', None)
@@ -623,16 +635,14 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         is_draft = validated_data.get('status') == 'draft'
         ch_num = validated_data.get('challan_number')
-        # Auto-allocate challan number if empty or wrong prefix
-        if not ch_num or (is_draft and not ch_num.startswith('D-DC-')) or (not is_draft and ch_num.startswith('D-DC-')):
-            from billing.sequence_service import allocate_next_number
-            raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
-            validated_data['challan_number'] = allocate_next_number(
-                tenant=user,
-                document_type='delivery_challan',
-                prefix=raw_prefix,
-                is_draft=is_draft
+        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
+        try:
+            validated_data['challan_number'] = keep_or_allocate_number(
+                user, 'delivery_challan', ch_num, prefix=raw_prefix, on_collision='conflict'
             )
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
 
 
         # Smart customer resolution
@@ -688,16 +698,25 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         old_status = instance.status
         new_status = validated_data.get('status', old_status)
-        is_draft_promotion = (old_status == 'draft' or (instance.challan_number and instance.challan_number.startswith('D-DC-'))) and new_status not in ['draft', 'cancelled']
+        is_draft_promotion = (
+            old_status == 'draft'
+            or (instance.challan_number and str(instance.challan_number).startswith('D-DC-'))
+        ) and new_status not in ['draft', 'cancelled']
         if is_draft_promotion:
-            from billing.sequence_service import allocate_next_number
+            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
             raw_prefix = self.context['request'].data.get('prefix') if 'request' in self.context else None
-            instance.challan_number = allocate_next_number(
-                instance.created_by,
-                document_type='delivery_challan',
-                prefix=raw_prefix,
-                is_draft=False
-            )
+            candidate = validated_data.get('challan_number') or instance.challan_number
+            try:
+                instance.challan_number = keep_or_allocate_number(
+                    instance.created_by,
+                    'delivery_challan',
+                    candidate,
+                    exclude_pk=instance.pk,
+                    prefix=raw_prefix,
+                    on_collision='allocate',
+                )
+            except DuplicateDocumentNumber as exc:
+                _raise_number_conflict(exc)
             validated_data.pop('challan_number', None)
 
         for attr, value in validated_data.items():
@@ -1064,17 +1083,17 @@ class QuotationSerializer(serializers.ModelSerializer):
         tenant = self.context['request'].user.active_tenant
         validated_data['created_by'] = tenant
 
-        is_draft = validated_data.get('status') == 'draft'
         q_num = validated_data.get('quotation_number')
-        if not q_num or (is_draft and not q_num.startswith('D-QT-')) or (not is_draft and q_num.startswith('D-QT-')) or 'AUTO' in str(q_num):
-            from billing.sequence_service import allocate_next_number
-            raw_prefix = self.context['request'].data.get('prefix', 'QT-') if 'request' in self.context else 'QT-'
-            validated_data['quotation_number'] = allocate_next_number(
-                tenant=tenant,
-                document_type='quotation',
-                prefix=raw_prefix,
-                is_draft=is_draft
+        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+        raw_prefix = self.context['request'].data.get('prefix', 'QT-') if 'request' in self.context else 'QT-'
+        if q_num and 'AUTO' in str(q_num):
+            q_num = None
+        try:
+            validated_data['quotation_number'] = keep_or_allocate_number(
+                tenant, 'quotation', q_num, prefix=raw_prefix, on_collision='conflict'
             )
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
 
         quotation = Quotation.objects.create(**validated_data)
         from billing.sync_service import DocumentSyncService
@@ -1112,10 +1131,23 @@ class QuotationSerializer(serializers.ModelSerializer):
 
         old_status = instance.status
         new_status = validated_data.get('status', old_status)
-        is_draft_promotion = (old_status == 'draft' or (instance.quotation_number and instance.quotation_number.startswith('D-QT-'))) and new_status not in ['draft', 'cancelled', 'rejected']
+        is_draft_promotion = (
+            old_status == 'draft'
+            or (instance.quotation_number and str(instance.quotation_number).startswith('D-QT-'))
+        ) and new_status not in ['draft', 'cancelled', 'rejected']
         if is_draft_promotion:
-            from billing.sequence_service import allocate_next_number
-            instance.quotation_number = allocate_next_number(instance.created_by, document_type='quotation', is_draft=False)
+            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+            candidate = validated_data.get('quotation_number') or instance.quotation_number
+            try:
+                instance.quotation_number = keep_or_allocate_number(
+                    instance.created_by,
+                    'quotation',
+                    candidate,
+                    exclude_pk=instance.pk,
+                    on_collision='allocate',
+                )
+            except DuplicateDocumentNumber as exc:
+                _raise_number_conflict(exc)
             validated_data.pop('quotation_number', None)
             validated_data.pop('invoice_number', None)
 

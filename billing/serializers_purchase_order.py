@@ -111,11 +111,16 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         tenant = getattr(getattr(request, 'user', None), 'active_tenant', getattr(request, 'user', None)) if request else None
         if tenant:
-            from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber
+            from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
             try:
-                validated_data['po_number'] = keep_or_allocate_number(
-                    tenant, 'purchase_order', validated_data.get('po_number'), prefix='PO-', on_collision='conflict'
-                )
+                validated_data['po_number'] = assign_document_number(
+                    tenant,
+                    'purchase_order',
+                    validated_data.get('po_number'),
+                    status=document_status_from(validated_data, self, default='draft'),
+                    prefix='PO-',
+                    on_collision='conflict',
+                ) or None
             except DuplicateDocumentNumber as exc:
                 _raise_number_conflict(exc)
         try:
@@ -136,21 +141,21 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
         old_status = instance.status
         new_status = validated_data.get('status', old_status)
-        from billing.sequence_service import keep_or_allocate_number, DuplicateDocumentNumber, is_placeholder_number
+        from billing.sequence_service import assign_document_number, DuplicateDocumentNumber
         candidate = validated_data.get('po_number', instance.po_number)
-        promoting = old_status == 'draft' and new_status not in ['draft', 'cancelled']
-        if promoting or is_placeholder_number(candidate):
-            try:
-                validated_data['po_number'] = keep_or_allocate_number(
-                    instance.created_by,
-                    'purchase_order',
-                    candidate,
-                    exclude_pk=instance.pk,
-                    prefix='PO-',
-                    on_collision='allocate',
-                )
-            except DuplicateDocumentNumber as exc:
-                _raise_number_conflict(exc)
+        try:
+            assigned = assign_document_number(
+                instance.created_by,
+                'purchase_order',
+                candidate,
+                status=new_status,
+                exclude_pk=instance.pk,
+                prefix='PO-',
+                on_collision='allocate',
+            )
+            validated_data['po_number'] = assigned or None
+        except DuplicateDocumentNumber as exc:
+            _raise_number_conflict(exc)
             
         for k, v in validated_data.items():
             setattr(instance, k, v)

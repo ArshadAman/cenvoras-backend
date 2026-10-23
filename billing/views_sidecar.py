@@ -1756,41 +1756,43 @@ def convert_order_to_purchase_order(request, pk):
         vendor = Vendor.objects.filter(pk=vendor_id, created_by=tenant).first()
 
     from billing.sequence_service import allocate_next_number
-    next_po_number = allocate_next_number(tenant, document_type='purchase_order', prefix='PO-')
-
     from billing.models import PurchaseOrder, PurchaseOrderItem
-    po = PurchaseOrder.objects.create(
-        po_number=next_po_number,
-        vendor=vendor,
-        expected_date=request.data.get('expected_date') or None,
-        notes=request.data.get('notes') or f"Generated from Sales Order {order.order_number}",
-        source_sales_order=order,
-        total_amount=Decimal('0.00'),
-        created_by=tenant,
-    )
+    from django.db import transaction
 
-    total = Decimal('0.00')
-    for so_item in order.items.all():
-        if not so_item.product:
-            continue
-        cost_price = getattr(so_item.product, 'price', None) or getattr(so_item.product, 'cost_price', None) or so_item.price or Decimal('0.00')
-        line_total = Decimal(str(so_item.quantity)) * Decimal(str(cost_price))
-        total += line_total
-        PurchaseOrderItem.objects.create(
-            purchase_order=po,
-            product=so_item.product,
-            quantity=so_item.quantity,
-            unit=so_item.unit or so_item.product.unit or 'pcs',
-            price=cost_price,
-            discount=Decimal('0.00'),
-            tax=so_item.tax or Decimal('0.00'),
-            amount=line_total,
-            description=so_item.description or '',
-            source_item_id=str(so_item.id),
+    with transaction.atomic():
+        next_po_number = allocate_next_number(tenant, document_type='purchase_order', prefix='PO-')
+        po = PurchaseOrder.objects.create(
+            po_number=next_po_number,
+            vendor=vendor,
+            expected_date=request.data.get('expected_date') or None,
+            notes=request.data.get('notes') or f"Generated from Sales Order {order.order_number}",
+            source_sales_order=order,
+            total_amount=Decimal('0.00'),
+            created_by=tenant,
         )
 
-    po.total_amount = total
-    po.save(update_fields=['total_amount'])
+        total = Decimal('0.00')
+        for so_item in order.items.all():
+            if not so_item.product:
+                continue
+            cost_price = getattr(so_item.product, 'price', None) or getattr(so_item.product, 'cost_price', None) or so_item.price or Decimal('0.00')
+            line_total = Decimal(str(so_item.quantity)) * Decimal(str(cost_price))
+            total += line_total
+            PurchaseOrderItem.objects.create(
+                purchase_order=po,
+                product=so_item.product,
+                quantity=so_item.quantity,
+                unit=so_item.unit or so_item.product.unit or 'pcs',
+                price=cost_price,
+                discount=Decimal('0.00'),
+                tax=so_item.tax or Decimal('0.00'),
+                amount=line_total,
+                description=so_item.description or '',
+                source_item_id=str(so_item.id),
+            )
+
+        po.total_amount = total
+        po.save(update_fields=['total_amount'])
 
     return Response({
         "message": "Purchase order created from sales order successfully.",

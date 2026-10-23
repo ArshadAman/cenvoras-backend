@@ -326,26 +326,28 @@ def sales_invoice_list_create(request):
             )
 
     from billing.sequence_service import (
-        keep_or_allocate_number,
+        assign_document_number,
         sync_sequence_after_creation,
         get_tenant_full_prefix,
         DuplicateDocumentNumber,
-        preview_next_number,
     )
     from django.db import transaction
 
     data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
     invoice_number = (data.get('invoice_number') or '').strip()
     full_prefix = get_tenant_full_prefix(tenant, document_type='sales_invoice', is_draft=False)
+    doc_status = data.get('status') or 'final'
 
     with transaction.atomic():
         try:
-            invoice_number = keep_or_allocate_number(
+            invoice_number = assign_document_number(
                 tenant,
                 'sales_invoice',
                 invoice_number,
+                status=doc_status,
                 prefix=full_prefix,
                 on_collision='conflict',
+                require_placeholder=True,
             )
         except DuplicateDocumentNumber as exc:
             return Response(

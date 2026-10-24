@@ -7,6 +7,7 @@ from .accounting_views import (
     partner_statement, partner_statement_pdf
 )
 from . import financial_views, bank_views
+from .bank_deposit_views import bank_deposit_summary, create_bank_deposit
 
 urlpatterns = [
     # General Ledger Accounting APIs
@@ -25,6 +26,8 @@ urlpatterns = [
     path('create-sales-invoice-entries/', create_sales_invoice_ledger_entries, name='create_sales_invoice_ledger_entries'),
     path('create-purchase-bill-entries/', create_purchase_bill_ledger_entries, name='create_purchase_bill_ledger_entries'),
     path('create-journal-entry/', create_manual_journal_entry, name='create_manual_journal_entry'),
+    path('bank-deposit/', create_bank_deposit, name='create_bank_deposit'),
+    path('bank-deposit/summary/', bank_deposit_summary, name='bank_deposit_summary'),
     path('repair-round-off/', repair_round_off_entries, name='repair_round_off_entries'),
     
     # Financial Statements

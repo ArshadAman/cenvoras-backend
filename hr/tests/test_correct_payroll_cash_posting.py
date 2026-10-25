@@ -73,3 +73,22 @@ class CorrectPayrollCashPostingTests(TestCase):
         n = GeneralLedgerEntry.objects.count()
         self.run_cmd('--bank-date', '2026-10-25', '--apply')
         self.assertEqual(GeneralLedgerEntry.objects.count(), n)
+
+    @patch.dict(os.environ, {'CENVORA_ALLOW_LEDGER_CORRECTION': 'yes'})
+    def test_all_accounts_without_tenant_corrects_every_cash_payroll(self):
+        other = User.objects.create_user(username='other', email='other@ex.com', password='x')
+        acc = AccountingService.get_or_create_default_accounts(other)
+        sp = HRAccountingService.get_or_create_hr_accounts(other)['2250']
+        d = datetime.date(2026, 8, 10)
+        GeneralLedgerEntry.objects.create(
+            date=d, account=sp, debit=Decimal('100.00'), credit=0,
+            description='Disbursement', reference='PAYROLL-PAID-2026-08', created_by=other,
+        )
+        GeneralLedgerEntry.objects.create(
+            date=d, account=acc['1001'], debit=0, credit=Decimal('100.00'),
+            description='Salary from Cash', reference='PAYROLL-PAID-2026-08', created_by=other,
+        )
+        out = StringIO()
+        call_command('correct_payroll_cash_posting', '--apply', stdout=out)
+        self.assertTrue(GeneralLedgerEntry.objects.filter(created_by=other, reference='PAYROLL-PAID-2026-08-R1').exists())
+        self.assertTrue(GeneralLedgerEntry.objects.filter(created_by=self.t, reference='PAYROLL-PAID-2026-09-R1').exists())

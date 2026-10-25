@@ -144,7 +144,10 @@ def allocate_existing_payment(request, pk):
     with transaction.atomic():
         if payment.amount <= first_due:
             payment.invoice = first_inv
-            payment.save(update_fields=['invoice'])
+            from zoneinfo import ZoneInfo
+            from django.utils import timezone
+            payment.adjusted_on = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
+            payment.save(update_fields=['invoice', 'adjusted_on'])
             recompute_invoice_amount_paid(first_inv.id)
             recompute_customer_balance(payment.customer_id)
             # Rebuild ledger entry
@@ -170,7 +173,10 @@ def allocate_existing_payment(request, pk):
             remaining_amount = payment.amount - first_due
             payment.amount = first_due
             payment.invoice = first_inv
-            payment.save(update_fields=['amount', 'invoice'])
+            from zoneinfo import ZoneInfo
+            from django.utils import timezone
+            payment.adjusted_on = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
+            payment.save(update_fields=['amount', 'invoice', 'adjusted_on'])
             recompute_invoice_amount_paid(first_inv.id)
 
             from ledger.models import GeneralLedgerEntry
@@ -196,6 +202,7 @@ def allocate_existing_payment(request, pk):
                 reference=payment.reference,
                 notes=payment.notes or "Remaining unallocated advance",
                 created_by=payment.created_by,
+                supply_kind=payment.supply_kind,
             )
             recompute_customer_balance(payment.customer_id)
 

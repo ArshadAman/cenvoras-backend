@@ -174,3 +174,16 @@ class StockValuationWACTests(TestCase):
         self.assertEqual(len(res.data["items"]), 1)
         self.assertEqual(float(res.data["items"][0]["avg_cost"]), 45.0)
         self.assertEqual(float(res.data["items"][0]["total_value"]), 450.0)
+
+    def test_negative_stock_is_included_in_valuation(self):
+        Product.objects.create(
+            name="Oversold SKU",
+            sale_price=500.00,
+            price=Decimal('100.00'),
+            stock=-5,
+            created_by=self.tenant,
+        )
+        report = get_stock_valuation(tenant=self.tenant)
+        item = next(i for i in report['items'] if i['name'] == 'Oversold SKU')
+        self.assertEqual(item['total_value'], Decimal('-500.00'))
+        self.assertEqual(item['valuation_method'], 'catalog_cost')

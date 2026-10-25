@@ -39,6 +39,20 @@ def _expected_gst_split(debit_note):
         total_igst += igst
 
     expected_gst = total_cgst + total_sgst + total_igst
+    original_bill = getattr(debit_note, 'original_bill', None)
+    if original_bill is not None:
+        from billing.gst_rules import remaining_bill_returns
+        remaining = remaining_bill_returns(original_bill, exclude_dn_id=debit_note.pk)
+        if total_taxable > remaining['remaining_taxable']:
+            total_taxable = remaining['remaining_taxable']
+        if expected_gst > remaining['remaining_tax'] and expected_gst > Decimal('0.00'):
+            scale = remaining['remaining_tax'] / expected_gst
+            total_igst = (total_igst * scale).quantize(Decimal('0.01'))
+            total_cgst = (total_cgst * scale).quantize(Decimal('0.01'))
+            total_sgst = (total_sgst * scale).quantize(Decimal('0.01'))
+            expected_gst = total_cgst + total_sgst + total_igst
+        is_interstate = remaining['is_interstate']
+
     if expected_gst <= Decimal('0.00'):
         return None
 

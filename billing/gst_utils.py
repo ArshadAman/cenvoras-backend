@@ -342,8 +342,10 @@ def get_debit_note_supplier_state_code(debit_note, buyer_state_code):
 
 def get_purchase_supplier_state_code(bill, buyer_state_code):
     """
-    Resolve supplier POS for a purchase bill (ITC available / Table 4(A)).
+    Resolve supplier state for a purchase bill (ITC available / Table 4(A)).
     Prefer GSTIN (bill.vendor_gstin or vendor.gstin) over free-text state.
+    Returns None when the vendor cannot be placed — do not silently use the buyer
+    (that forced intra-state CGST/SGST on interstate IGST bills).
     """
     vendor = getattr(bill, 'vendor', None)
     vendor_gstin = (
@@ -351,12 +353,15 @@ def get_purchase_supplier_state_code(bill, buyer_state_code):
         or (getattr(vendor, 'gstin', None) if vendor else None)
     )
     vendor_state = getattr(vendor, 'state', None) if vendor else None
-    # Prefer GSTIN prefix (authoritative) over possibly stale state labels
     if vendor_gstin and len(str(vendor_gstin).strip()) == 15:
         code = get_state_code_from_gstin(vendor_gstin)
         if code:
             return code
-    return get_pos_state_code(vendor_state or vendor_gstin, fallback_state=buyer_state_code)
+    if vendor_state or vendor_gstin:
+        code = normalize_state_code(vendor_state) or get_state_code_from_gstin(vendor_gstin)
+        if code:
+            return code
+    return None
 
 
 def validate_gstin_state_match(gstin, state):
@@ -492,7 +497,11 @@ def credit_note_tax_breakup(credit_note, seller_state_code=None):
         seller_state_code = get_seller_state_code(getattr(user, 'active_tenant', user))
     orig_inv = credit_note.original_invoice
     customer = credit_note.customer
-    pos_raw = (customer.state if customer else None) or (orig_inv.place_of_supply if orig_inv else None) or seller_state_code
+    pos_raw = (
+        (orig_inv.place_of_supply if orig_inv else None)
+        or (customer.state if customer else None)
+        or seller_state_code
+    )
     pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
     is_inter = (seller_state_code != pos_code)
 

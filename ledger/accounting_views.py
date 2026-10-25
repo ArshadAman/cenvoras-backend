@@ -985,12 +985,16 @@ def get_ledger_stats(request):
         sales_invoice__isnull=False
     ).aggregate(total=Sum('debit'))['total'] or 0
     
-    # Total Payments (Money received from customers)
-    total_payments = entries.filter(
-        account__account_type='asset', 
-        credit__gt=0, 
-        sales_invoice__isnull=True # Payments usually don't link to a single invoice if they are bulk
-    ).aggregate(total=Sum('credit'))['total'] or 0
+    # Customer receipts only (Payment model / cash-bank debit with a customer)
+    from billing.models import Payment
+    pay_qs = Payment.objects.filter(Q(created_by=user) | Q(created_by__parent=user))
+    if date_from_str:
+        pay_qs = pay_qs.filter(date__gte=date_from_str)
+    if date_to_str:
+        pay_qs = pay_qs.filter(date__lte=date_to_str)
+    if customer_id:
+        pay_qs = pay_qs.filter(customer_id=customer_id)
+    total_payments = pay_qs.aggregate(total=Sum('amount'))['total'] or 0
     
     # Note: If payments ARE linked to invoices, we might need a better check.
     # But usually, Returns have a 'credit_note' link.

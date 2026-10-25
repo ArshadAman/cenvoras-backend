@@ -57,7 +57,19 @@ class Payment(models.Model):
     mode = models.CharField(max_length=20, choices=PaymentMode.choices, default=PaymentMode.CASH)
     reference = models.CharField(max_length=100, blank=True, help_text="Cheque No / UPI Transaction ID")
     notes = models.TextField(blank=True)
-    
+    supply_kind = models.CharField(
+        max_length=16,
+        blank=True,
+        default='',
+        choices=[('goods', 'Goods'), ('services', 'Services')],
+        help_text="Drives GST on advances. Goods: no tax at receipt (Notfn 66/2017).",
+    )
+    adjusted_on = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Set when an advance is allocated to an invoice (GSTR-1 atadj).",
+    )
+
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -118,6 +130,12 @@ class PurchaseBill(models.Model):
     vendor_address = models.TextField(blank=True, null=True)
     vendor_gstin = models.CharField(max_length=15, blank=True, null=True)
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)
+    place_of_supply = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Place of supply for the purchase (defaults to buyer's registered state).",
+    )
     journal = models.CharField(max_length=50, default="Purchases")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse where items are received")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)

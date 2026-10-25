@@ -169,8 +169,8 @@ else:
         }
     }
 
-# Redis Caching
-if os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
+# Redis Caching — LocMem in tests so throttle never needs a live Redis.
+if TESTING or os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',

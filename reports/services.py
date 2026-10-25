@@ -24,7 +24,7 @@ def get_stock_valuation(tenant=None):
     2. Purchase Bill History: Volume-weighted average of all supplier purchase bills.
        WAC = Sum(item.quantity * item.price) / Sum(item.quantity + item.free_quantity)
     3. Baseline Catalog Cost: product.price (opening/catalog cost)
-    4. Fallback: product.sale_price or 0.00
+    Negative stock is included (qty × cost). Sale price is never used.
 
     Optimized with bulk SQL aggregation to operate in O(1) queries (zero N+1 loops).
     """
@@ -99,14 +99,11 @@ def get_stock_valuation(tenant=None):
                 avg_cost = cost_price
                 method = 'catalog_cost'
             else:
-                avg_cost = sale_price
-                method = 'sale_price_fallback'
+                avg_cost = Decimal('0.00')
+                method = 'unvalued'
 
             avg_cost = avg_cost.quantize(Decimal('0.01'))
-            if stock > 0:
-                value = (stock * avg_cost).quantize(Decimal('0.01'))
-            else:
-                value = Decimal('0.00')
+            value = (stock * avg_cost).quantize(Decimal('0.01'))
 
             total_value += value
 

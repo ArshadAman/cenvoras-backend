@@ -56,6 +56,7 @@ def aggregate_sales_metric(tenant, *, date_from=None, date_to=None, mtd=False):
     returns = cn_qs.aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
     net = (Decimal(str(gross)) - Decimal(str(returns))).quantize(Decimal('0.01'))
     count = inv_qs.count()
+    taxable_net = _taxable_net(inv_qs, cn_qs, tenant)
 
     label = (
         "This month's sales (incl. GST, net of credit notes)"
@@ -66,6 +67,7 @@ def aggregate_sales_metric(tenant, *, date_from=None, date_to=None, mtd=False):
         'gross': float(Decimal(str(gross)).quantize(Decimal('0.01'))),
         'returns': float(Decimal(str(returns)).quantize(Decimal('0.01'))),
         'net': float(net),
+        'taxable_net': float(taxable_net),
         'count': count,
         'date_from': str(date_from) if date_from else None,
         'date_to': str(date_to) if date_to else None,
@@ -74,6 +76,34 @@ def aggregate_sales_metric(tenant, *, date_from=None, date_to=None, mtd=False):
         'credit_notes_subtracted': True,
         'status_filter': 'final',
     }
+
+
+def _taxable_net(inv_qs, cn_qs, tenant):
+    """Invoice taxable (excl. GST) minus matching credit notes — Tax Register / 3.1(a) txval."""
+    from billing.gst_utils import (
+        calculate_item_tax_breakup,
+        credit_note_tax_breakup,
+        get_pos_state_code,
+        get_seller_state_code,
+    )
+
+    seller = get_seller_state_code(tenant)
+    taxable = Decimal('0.00')
+    for inv in inv_qs.select_related('customer').prefetch_related('items'):
+        pos = inv.place_of_supply or (inv.customer.state if inv.customer else None)
+        pos_code = get_pos_state_code(pos, fallback_state=seller)
+        is_inter = seller != pos_code
+        for item in inv.items.all():
+            if getattr(item, 'row_type', 'item') == 'note':
+                continue
+            line_taxable, *_rest = calculate_item_tax_breakup(item, is_inter)
+            taxable += line_taxable
+    for cn in cn_qs.select_related('customer', 'original_invoice').prefetch_related('items'):
+        if cn.original_invoice_id and getattr(cn.original_invoice, 'status', None) != 'final':
+            continue
+        brk = credit_note_tax_breakup(cn, seller)
+        taxable -= brk['totals']['taxable']
+    return taxable.quantize(Decimal('0.01'))
 
 
 def sales_mtd(tenant):

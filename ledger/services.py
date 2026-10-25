@@ -377,14 +377,13 @@ class AccountingService:
         ap_account = accounts_payable_account or accounts['accounts_payable']
 
         from billing.models import PurchaseBillItem
-        from billing.gst_utils import get_seller_state_code, get_purchase_supplier_state_code
+        from billing.gst_utils import get_seller_state_code
+        from billing.gst_rules import is_purchase_interstate
         line_items = list(PurchaseBillItem.objects.filter(purchase_bill=purchase_bill))
 
-        # GSTIN-first POS (same as sales/DN) — empty vendor.state must not force CGST/SGST
         tenant = getattr(user, 'active_tenant', user)
         buyer_code = get_seller_state_code(tenant)
-        supplier_code = get_purchase_supplier_state_code(purchase_bill, buyer_code)
-        is_interstate = bool(buyer_code and supplier_code and buyer_code != supplier_code)
+        is_interstate = is_purchase_interstate(purchase_bill, buyer_code)
 
         total_taxable = Decimal('0.00')
         total_tax = Decimal('0.00')
@@ -655,20 +654,78 @@ class AccountingService:
             created_by=user
         )
         
-        # Credit: Accounts Receivable for invoice-linked receipts, otherwise track as customer advance.
-        GeneralLedgerEntry.objects.create(
-            date=date,
-            account=target_account,
-            debit=0,
-            credit=amount,
-            description=payment_description,
-            reference=reference,
-            customer=customer,
-            sales_invoice=sales_invoice,
-            payment=payment_obj,
-            created_by=user
-        )
-        
+        # Unlinked service advance: Cr Customer Advances (taxable) + Cr Output GST.
+        # Goods advances: no tax at receipt (Notfn 66/2017-CT).
+        advance_split = None
+        if not invoice and payment_obj is not None:
+            from billing.gst_rules import advance_tax_split
+            from billing.gst_utils import get_seller_state_code
+            tenant = getattr(user, 'active_tenant', user)
+            advance_split = advance_tax_split(payment_obj, get_seller_state_code(tenant))
+
+        if advance_split and advance_split['tax'] > 0:
+            GeneralLedgerEntry.objects.create(
+                date=date,
+                account=target_account,
+                debit=0,
+                credit=advance_split['taxable'],
+                description=payment_description,
+                reference=reference,
+                customer=customer,
+                sales_invoice=sales_invoice,
+                payment=payment_obj,
+                created_by=user
+            )
+            if advance_split['igst'] > 0:
+                GeneralLedgerEntry.objects.create(
+                    date=date,
+                    account=accounts['output_igst'],
+                    debit=0,
+                    credit=advance_split['igst'],
+                    description=f"Output IGST on advance {reference}",
+                    reference=reference,
+                    customer=customer,
+                    payment=payment_obj,
+                    created_by=user
+                )
+            if advance_split['cgst'] > 0:
+                GeneralLedgerEntry.objects.create(
+                    date=date,
+                    account=accounts['output_cgst'],
+                    debit=0,
+                    credit=advance_split['cgst'],
+                    description=f"Output CGST on advance {reference}",
+                    reference=reference,
+                    customer=customer,
+                    payment=payment_obj,
+                    created_by=user
+                )
+            if advance_split['sgst'] > 0:
+                GeneralLedgerEntry.objects.create(
+                    date=date,
+                    account=accounts['output_sgst'],
+                    debit=0,
+                    credit=advance_split['sgst'],
+                    description=f"Output SGST on advance {reference}",
+                    reference=reference,
+                    customer=customer,
+                    payment=payment_obj,
+                    created_by=user
+                )
+        else:
+            GeneralLedgerEntry.objects.create(
+                date=date,
+                account=target_account,
+                debit=0,
+                credit=amount,
+                description=payment_description,
+                reference=reference,
+                customer=customer,
+                sales_invoice=sales_invoice,
+                payment=payment_obj,
+                created_by=user
+            )
+
         return True
     
     @classmethod
@@ -1017,10 +1074,15 @@ class AccountingService:
             get_debit_note_supplier_state_code,
             calculate_item_tax_breakup,
         )
+        from billing.gst_rules import is_purchase_interstate
         tenant = getattr(user, 'active_tenant', user)
         buyer_state_code = get_seller_state_code(tenant)
-        vendor_pos_code = get_debit_note_supplier_state_code(debit_note, buyer_state_code)
-        is_interstate = (buyer_state_code != vendor_pos_code)
+        original_bill = getattr(debit_note, 'original_bill', None)
+        if original_bill is not None:
+            is_interstate = is_purchase_interstate(original_bill, buyer_state_code)
+        else:
+            vendor_pos_code = get_debit_note_supplier_state_code(debit_note, buyer_state_code)
+            is_interstate = (buyer_state_code != vendor_pos_code)
 
         items = list(debit_note.items.all()) if hasattr(debit_note, 'items') else []
         total_taxable = Decimal('0.00')
@@ -1036,8 +1098,21 @@ class AccountingService:
                 total_sgst += sgst
                 total_igst += igst
         else:
-            # Header-only note: treat total_amount as taxable (no GST split available)
+            # Header-only notes are rejected at the API; keep a safe no-GST fallback for legacy.
             total_taxable = Decimal(str(debit_note.total_amount or '0.00'))
+
+        original_bill = getattr(debit_note, 'original_bill', None)
+        if original_bill is not None:
+            from billing.gst_rules import remaining_bill_returns
+            remaining = remaining_bill_returns(original_bill, exclude_dn_id=debit_note.pk)
+            if total_taxable > remaining['remaining_taxable']:
+                total_taxable = remaining['remaining_taxable']
+            gst_total = total_cgst + total_sgst + total_igst
+            if gst_total > remaining['remaining_tax'] and gst_total > Decimal('0.00'):
+                scale = remaining['remaining_tax'] / gst_total
+                total_igst = (total_igst * scale).quantize(Decimal('0.01'))
+                total_cgst = (total_cgst * scale).quantize(Decimal('0.01'))
+                total_sgst = (total_sgst * scale).quantize(Decimal('0.01'))
 
         total_parts = total_taxable + total_cgst + total_sgst + total_igst
 

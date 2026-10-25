@@ -261,7 +261,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
-            'warehouse', 'journal', 'is_reverse_charge',
+            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge',
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
@@ -352,6 +352,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
+        if not validated_data.get('place_of_supply'):
+            from billing.gst_utils import get_seller_state_code, CODE_TO_STATE_NAME
+            buyer_code = get_seller_state_code(user)
+            validated_data['place_of_supply'] = CODE_TO_STATE_NAME.get(buyer_code, buyer_code)
 
         from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         try:
@@ -1685,7 +1689,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
-            'mode', 'reference', 'notes', 'created_by', 'created_at'
+            'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number']
 

@@ -48,6 +48,15 @@ class GeneralLedgerEntry(models.Model):
     payment = models.ForeignKey('billing.Payment', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Audit trail for corrections (Rule 3(1), Rudra CA). `date` = transaction date; `created_at` = when the
+    # line was actually recorded. `created_by` is the company (tenant); `entered_by` is the user who did it.
+    entered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='+', help_text="User who recorded this line (e.g. the editor).")
+    correction_kind = models.CharField(max_length=10, blank=True, default='',
+                                       choices=[('reversal', 'Reversal'), ('repost', 'Re-post')])
+    correction_of = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='corrections', help_text="Original entry this line reverses/replaces.")
+    correction_reason = models.TextField(blank=True, default='')
     
     class Meta:
         ordering = ['-date', '-created_at']

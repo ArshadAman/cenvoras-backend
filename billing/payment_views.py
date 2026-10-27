@@ -5,6 +5,12 @@ from .models import Payment
 from .serializers import PaymentSerializer
 from .balance_sync import recompute_customer_balance, recompute_invoice_amount_paid
 
+def _truthy(v):
+    if isinstance(v, str):
+        return v.strip().lower() not in ('false', '0', 'no', 'off', '')
+    return bool(v)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([permissions.IsAuthenticated])
 def payment_list_create(request):
@@ -30,18 +36,30 @@ def payment_list_create(request):
         from decimal import Decimal
 
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-        auto_allocate = data.pop('auto_allocate', True)
+        auto_allocate = _truthy(data.pop('auto_allocate', True))
         tenant = getattr(request.user, 'active_tenant', request.user)
 
-        # If invoice is not explicitly provided, auto_allocate is True, and customer is provided
+        # R18 P0-A: a receipt the user records as an advance (supply_kind sent: services/goods) is never
+        # auto-applied; it stays an advance (GST at receipt for services) and is applied later through
+        # the AdvanceAdjustment flow. FIFO auto-apply is only for plain receipts against existing dues,
+        # and only to invoices dated on or before the receipt date (a receipt before the invoice is an advance).
+        if (data.get('supply_kind') or '').strip():
+            auto_allocate = False
+
         if not data.get('invoice') and data.get('customer') and auto_allocate:
             customer_id = data.get('customer')
             from .models import SalesInvoice
+            from .advances import _d
+            try:
+                receipt_date = _d(data.get('date'))
+            except Exception:
+                receipt_date = None
             open_invoices = list(
                 SalesInvoice.objects.filter(
                     created_by=tenant,
                     customer_id=customer_id,
                     status='final',
+                    **({'invoice_date__lte': receipt_date} if receipt_date else {'pk__in': []}),
                 ).order_by('invoice_date', 'created_at')
             )
             # Only consider invoices with actual outstanding balance
@@ -142,6 +160,19 @@ def allocate_existing_payment(request, pk):
     except Exception:
         return Response({'error': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
     on_date = request.data.get('date') or None
+    if amount is not None:
+        # R18 P1: explicit partial amount, validated server-side.
+        if amount <= 0:
+            return Response({'error': 'Amount must be greater than 0.'}, status=status.HTTP_400_BAD_REQUEST)
+        left = unapplied_amount(payment)
+        if amount > left:
+            return Response({'error': f'Amount exceeds the unapplied advance (max {left}).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if target_invoice_id:
+            due = invoice_due(open_invoices[0])
+            if amount > due:
+                return Response({'error': f'Amount exceeds invoice {open_invoices[0].invoice_number} '
+                                          f'outstanding (max {due}).'}, status=status.HTTP_400_BAD_REQUEST)
 
     applied = []
     try:
@@ -236,6 +267,10 @@ def payment_detail(request, pk):
         if payment.adjustments.exists():
             return Response({'error': 'This advance has been applied to invoices. Un-apply it instead of deleting; '
                                       'its history is kept for GSTR-1.'}, status=status.HTTP_400_BAD_REQUEST)
+        from .advances import is_gstr1_filed
+        if not payment.invoice_id and is_gstr1_filed(tenant, payment.date):
+            return Response({'error': f"GSTR-1 for {payment.date:%b %Y} is marked filed; this advance was reported "
+                                      f"in it and cannot be deleted."}, status=status.HTTP_400_BAD_REQUEST)
         # Rely on the post_delete signal in signals.py to revert the customer balance
         deleted_customer_id = payment.customer_id
         deleted_invoice_id = payment.invoice_id

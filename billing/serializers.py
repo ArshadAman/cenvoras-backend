@@ -1734,7 +1734,38 @@ class PaymentSerializer(serializers.ModelSerializer):
         elif not customer:
             raise serializers.ValidationError({'customer': 'Customer is required.'})
 
+        pay_date = attrs.get('date', getattr(self.instance, 'date', None))
+        if invoice and pay_date and invoice.invoice_date and pay_date < invoice.invoice_date:
+            # R18 P0-A: money received before the invoice date is an advance (GST at receipt for services).
+            raise serializers.ValidationError({'date': (
+                f'Receipt date {pay_date:%d/%m/%Y} is before invoice {invoice.invoice_number} '
+                f'({invoice.invoice_date:%d/%m/%Y}). Record it as an advance and apply it to the invoice later.')})
+
+        # R18 P1: GSTR-1 filed-month lock for advances (unlinked receipts feed GSTR-1 'at'), same rule as
+        # advance applications (billing.advances._check_open_period).
+        self._check_filed(attrs, invoice, pay_date)
         return attrs
+
+    def _check_filed(self, attrs, invoice, pay_date):
+        from billing.advances import is_gstr1_filed
+        request = self.context.get('request')
+        if not request:
+            return
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        checks = []
+        if not invoice and pay_date:
+            checks.append(pay_date)
+        inst = self.instance
+        if inst is not None and not inst.invoice_id and inst.date:
+            changed = any(k in attrs and attrs[k] != getattr(inst, k) for k in
+                          ('date', 'amount', 'customer', 'invoice', 'supply_kind'))
+            if changed:
+                checks.append(inst.date)
+        for d in checks:
+            if is_gstr1_filed(tenant, d):
+                raise serializers.ValidationError({'date': (
+                    f"GSTR-1 for {d:%b %Y} is marked filed; advances dated in that month cannot be "
+                    f"recorded or changed. Un-mark the month on the GSTR-1 page first if this is a correction.")})
 
     def create(self, validated_data):
         user = self.context['request'].user

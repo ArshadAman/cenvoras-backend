@@ -266,61 +266,8 @@ def compute_gstr1(tenant, from_date, to_date):
                 'typ': 'B2CL' if (is_inter and cn_val > Decimal('250000')) else 'B2CS',
             })
 
-    at, atadj = [], []
-    advance_payments = Payment.objects.filter(
-        created_by=tenant,
-        date__gte=from_date,
-        date__lte=to_date,
-        invoice__isnull=True,
-        customer__isnull=False,
-        adjusted_on__isnull=True,
-    ).select_related('customer')
-
-    at_totals = {'txval': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO}
-    for p in advance_payments:
-        split = advance_tax_split(p, seller_state_code)
-        if split['kind'] == 'goods' or Decimal(str(p.amount or 0)) <= 0:
-            continue
-        at.append({
-            'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA',
-            'pos': split['pos'],
-            'rt': float(split['rate']),
-            'ad_amt': float(p.amount),
-            'camt': float(split['cgst']),
-            'samt': float(split['sgst']),
-            'iamt': float(split['igst']),
-            'csamt': 0.0,
-        })
-        at_totals['txval'] += split['taxable']
-        at_totals['iamt'] += split['igst']
-        at_totals['camt'] += split['cgst']
-        at_totals['samt'] += split['sgst']
-
-    adjusted = Payment.objects.filter(
-        created_by=tenant,
-        adjusted_on__gte=from_date,
-        adjusted_on__lte=to_date,
-        customer__isnull=False,
-    ).select_related('customer')
-    atadj_totals = {'txval': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO}
-    for p in adjusted:
-        split = advance_tax_split(p, seller_state_code)
-        if split['kind'] == 'goods' or split['tax'] <= 0:
-            continue
-        atadj.append({
-            'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA',
-            'pos': split['pos'],
-            'rt': float(split['rate']),
-            'ad_amt': float(p.amount),
-            'camt': float(split['cgst']),
-            'samt': float(split['sgst']),
-            'iamt': float(split['igst']),
-            'csamt': 0.0,
-        })
-        atadj_totals['txval'] += split['taxable']
-        atadj_totals['iamt'] += split['igst']
-        atadj_totals['camt'] += split['cgst']
-        atadj_totals['samt'] += split['sgst']
+    from billing.advances import advance_tables
+    at, atadj, at_totals, atadj_totals = advance_tables(tenant, from_date, to_date, seller_state_code)
 
     hsn_data = []
     for idx, (_key, hval) in enumerate(sorted(hsn_dict.items()), 1):

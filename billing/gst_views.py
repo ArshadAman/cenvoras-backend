@@ -123,6 +123,26 @@ def hsn_summary_report(request):
                 hsn_dict[code]['igst'] -= igst
                 hsn_dict[code]['total_tax'] -= tax
                 hsn_dict[code]['total_value'] -= item.amount
+        # Advances (GSTR-1 at / atadj) so the register ties to 3.1(a) and the Output GST ledgers
+        if from_date and to_date:
+            from billing.advances import advance_tables
+            at_rows, adj_rows, _t1, _t2 = advance_tables(tenant, from_date, to_date, seller_state_code)
+            for sign, rows, label in ((1, at_rows, 'advance'), (-1, adj_rows, 'advance_adjustment')):
+                for r in rows:
+                    tx = Decimal(str(r['ad_amt'])) * sign
+                    c, s_, i = (Decimal(str(r[k])) * sign for k in ('camt', 'samt', 'iamt'))
+                    results.append({
+                        'id': r['payment_id'], 'invoice_number': 'Advance' if sign > 0 else 'Advance adjusted',
+                        'date': str(to_date), 'party_name': '', 'gstin': '',
+                        'taxable_value': float(tx), 'cgst': float(c), 'sgst': float(s_), 'igst': float(i),
+                        'total_tax': float(c + s_ + i), 'total_amount': float(tx + c + s_ + i), 'doc_type': label,
+                    })
+                    totals['taxable'] += tx
+                    totals['cgst'] += c
+                    totals['sgst'] += s_
+                    totals['igst'] += i
+                    totals['total_tax'] += c + s_ + i
+                    totals['total'] += tx + c + s_ + i
     else:
         bills = PurchaseBill.objects.filter(
             created_by=tenant
@@ -487,6 +507,7 @@ def gstr1_json_export(request):
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
     from billing.gstr1_compute import compute_gstr1
+    from billing.advances import group_for_portal
     data = compute_gstr1(tenant, from_date, to_date)
     return Response({
         'gstin': data['gstin'],
@@ -501,8 +522,10 @@ def gstr1_json_export(request):
             'b2b': data['hsn_data'],
             'b2c': [],
         },
-        'at': data['at'],
-        'atadj': data['atadj'],
+        # Offline-tool shape {pos, sply_ty, itms:[{rt, ad_amt(taxable), tax}]}. VERIFY key names
+        # ('atadj' vs API 'txpd') against the current GSTR-1 offline tool schema.
+        'at': group_for_portal(data['at']),
+        'atadj': group_for_portal(data['atadj']),
         'doc_issue': data['doc_issue'],
     })
 

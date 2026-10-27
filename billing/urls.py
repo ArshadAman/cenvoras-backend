@@ -54,6 +54,7 @@ urlpatterns = [
     # Payments
     path('payments/', payment_views.payment_list_create, name='payment_list_create'),
     path('payments/<uuid:pk>/', payment_views.payment_detail, name='payment_detail'),
+    path('payments/adjustments/<uuid:pk>/reverse/', payment_views.reverse_advance_adjustment, name='reverse_advance_adjustment'),
     path('payments/<uuid:pk>/allocate/', payment_views.allocate_existing_payment, name='allocate_existing_payment'),
     
     # Reports

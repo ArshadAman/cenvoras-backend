@@ -1684,14 +1684,28 @@ class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default='')
+    unapplied_amount = serializers.SerializerMethodField()
+    adjustments = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
-            'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at'
+            'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at',
+            'unapplied_amount', 'adjustments',
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number']
+
+    def get_unapplied_amount(self, obj):
+        from billing.advances import unapplied_amount
+        return str(unapplied_amount(obj))
+
+    def get_adjustments(self, obj):
+        return [
+            {'id': str(a.id), 'invoice': str(a.invoice_id), 'invoice_number': a.invoice.invoice_number,
+             'date': str(a.date), 'amount': str(a.gross), 'reversed_on': str(a.reversed_on) if a.reversed_on else None}
+            for a in obj.adjustments.all()
+        ]
 
     def validate(self, attrs):
         customer = attrs.get('customer') or getattr(self.instance, 'customer', None)

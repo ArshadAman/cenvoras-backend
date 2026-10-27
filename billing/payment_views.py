@@ -20,7 +20,8 @@ def payment_list_create(request):
     """
     if request.method == 'GET':
         tenant = getattr(request.user, 'active_tenant', request.user)
-        payments = Payment.objects.filter(created_by=tenant).order_by('-date', '-created_at')
+        payments = (Payment.objects.filter(created_by=tenant).select_related('customer', 'invoice')
+                    .prefetch_related('adjustments__invoice').order_by('-date', '-created_at'))
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)
 
@@ -101,8 +102,13 @@ def payment_list_create(request):
 @permission_classes([permissions.IsAuthenticated])
 def allocate_existing_payment(request, pk):
     """
-    Allocate an unlinked customer payment (advance) to open unpaid invoices.
+    Apply an unlinked customer payment (advance) to open final invoices.
+    Body: {invoice_id?, amount?, date?}. Never deletes the advance's receipt journals:
+    posts an adjusting entry on the application date (see billing.advances).
     """
+    from decimal import Decimal
+    from .models import SalesInvoice
+    from .advances import apply_advance, unapplied_amount, invoice_due
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
         payment = Payment.objects.get(pk=pk, created_by=tenant)
@@ -111,10 +117,8 @@ def allocate_existing_payment(request, pk):
 
     if payment.invoice_id:
         return Response({'message': 'Payment is already linked to an invoice.'}, status=status.HTTP_200_OK)
-
-    from .models import SalesInvoice
-    from decimal import Decimal
-    from django.db import transaction
+    if unapplied_amount(payment) <= 0:
+        return Response({'message': 'This advance is already fully applied.'}, status=status.HTTP_200_OK)
 
     target_invoice_id = request.data.get('invoice_id')
     if target_invoice_id:
@@ -123,93 +127,66 @@ def allocate_existing_payment(request, pk):
             return Response({'error': 'Specified invoice does not belong to this customer.'}, status=status.HTTP_400_BAD_REQUEST)
         open_invoices = [target_inv]
     else:
-        open_invoices = list(
-            SalesInvoice.objects.filter(
-                created_by=tenant,
-                customer_id=payment.customer_id,
-                status='final',
-            ).order_by('invoice_date', 'created_at')
-        )
         open_invoices = [
-            inv for inv in open_invoices
-            if (Decimal(str(inv.total_amount or 0)) - Decimal(str(inv.amount_paid or 0))) > Decimal('0.00')
+            inv for inv in SalesInvoice.objects.filter(
+                created_by=tenant, customer_id=payment.customer_id, status='final',
+            ).order_by('invoice_date', 'created_at')
+            if invoice_due(inv) > 0
         ]
-
     if not open_invoices:
         return Response({'message': 'No open invoices found for this customer to allocate against.'}, status=status.HTTP_200_OK)
 
-    first_inv = open_invoices[0]
-    first_due = Decimal(str(first_inv.total_amount or 0)) - Decimal(str(first_inv.amount_paid or 0))
+    amount = request.data.get('amount')
+    try:
+        amount = Decimal(str(amount)) if amount not in (None, '') else None
+    except Exception:
+        return Response({'error': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
+    on_date = request.data.get('date') or None
 
-    with transaction.atomic():
-        if payment.amount <= first_due:
-            payment.invoice = first_inv
-            from zoneinfo import ZoneInfo
-            from django.utils import timezone
-            payment.adjusted_on = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
-            payment.save(update_fields=['invoice', 'adjusted_on'])
-            recompute_invoice_amount_paid(first_inv.id)
-            recompute_customer_balance(payment.customer_id)
-            # Rebuild ledger entry
-            from ledger.models import GeneralLedgerEntry
-            from ledger.services import AccountingService
-            GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}").delete()
-            AccountingService.create_payment_received_entries(
-                customer=payment.customer,
-                amount=payment.amount,
-                description=payment.notes or f"Payment received for {first_inv.invoice_number}",
-                date=payment.date,
-                user=payment.created_by,
-                invoice=first_inv,
-                payment_id=payment.id,
-                payment_mode=payment.mode,
-            )
-            return Response({
-                'success': True,
-                'message': f"Allocated payment {payment.id} to invoice {first_inv.invoice_number}."
-            })
-        else:
-            # Payment exceeds first invoice: set first invoice to first_due, and create remaining payment
-            remaining_amount = payment.amount - first_due
-            payment.amount = first_due
-            payment.invoice = first_inv
-            from zoneinfo import ZoneInfo
-            from django.utils import timezone
-            payment.adjusted_on = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
-            payment.save(update_fields=['amount', 'invoice', 'adjusted_on'])
-            recompute_invoice_amount_paid(first_inv.id)
+    applied = []
+    try:
+        for inv in open_invoices:
+            if amount is not None and amount <= 0:
+                break
+            adj = apply_advance(payment, inv, amount=amount, on_date=on_date)
+            if adj:
+                applied.append(adj)
+                if amount is not None:
+                    amount -= adj.gross
+            payment.refresh_from_db()
+            if unapplied_amount(payment) <= 0:
+                break
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-            from ledger.models import GeneralLedgerEntry
-            from ledger.services import AccountingService
-            GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}").delete()
-            AccountingService.create_payment_received_entries(
-                customer=payment.customer,
-                amount=first_due,
-                description=payment.notes or f"Payment received for {first_inv.invoice_number}",
-                date=payment.date,
-                user=payment.created_by,
-                invoice=first_inv,
-                payment_id=payment.id,
-                payment_mode=payment.mode,
-            )
+    if not applied:
+        return Response({'message': 'Nothing to apply (invoice already paid).'}, status=status.HTTP_200_OK)
+    left = unapplied_amount(payment)
+    parts = ', '.join(f"₹{a.gross} to {a.invoice.invoice_number}" for a in applied)
+    return Response({
+        'success': True,
+        'message': f"Applied {parts}." + (f" ₹{left} remains as advance." if left > 0 else ''),
+        'adjustments': [str(a.id) for a in applied],
+        'unapplied': str(left),
+    })
 
-            # Create remaining payment
-            Payment.objects.create(
-                customer=payment.customer,
-                date=payment.date,
-                amount=remaining_amount,
-                mode=payment.mode,
-                reference=payment.reference,
-                notes=payment.notes or "Remaining unallocated advance",
-                created_by=payment.created_by,
-                supply_kind=payment.supply_kind,
-            )
-            recompute_customer_balance(payment.customer_id)
 
-            return Response({
-                'success': True,
-                'message': f"Allocated ₹{first_due} to invoice {first_inv.invoice_number}, residual ₹{remaining_amount} remains as advance."
-            })
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def reverse_advance_adjustment(request, pk):
+    """Un-apply an advance from an invoice: mirror entry dated today (or body.date, current month)."""
+    from .models import AdvanceAdjustment
+    from .advances import reverse_adjustment
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    adj = AdvanceAdjustment.objects.filter(pk=pk, created_by=tenant).first()
+    if not adj:
+        return Response({'error': 'Adjustment not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        reverse_adjustment(adj, on_date=request.data.get('date') or None)
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'success': True, 'message': 'Advance un-applied.'})
+
 
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([permissions.IsAuthenticated])
@@ -228,6 +205,9 @@ def payment_detail(request, pk):
         return Response(serializer.data)
 
     elif request.method == 'PUT':
+        if payment.adjustments.filter(reversed_on__isnull=True).exists():
+            return Response({'error': 'This advance has been applied to invoices. Un-apply it before editing.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         old_customer_id = payment.customer_id
         old_invoice_id = payment.invoice_id
         
@@ -253,6 +233,9 @@ def payment_detail(request, pk):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
+        if payment.adjustments.exists():
+            return Response({'error': 'This advance has been applied to invoices. Un-apply it instead of deleting; '
+                                      'its history is kept for GSTR-1.'}, status=status.HTTP_400_BAD_REQUEST)
         # Rely on the post_delete signal in signals.py to revert the customer balance
         deleted_customer_id = payment.customer_id
         deleted_invoice_id = payment.invoice_id

@@ -76,6 +76,34 @@ class Payment(models.Model):
     def __str__(self):
         return f"{self.customer.name} - {self.amount} ({self.date})"
 
+class AdvanceAdjustment(models.Model):
+    """
+    Application of a customer advance (an unlinked Payment) to a final invoice.
+    The advance's own receipt journals are never touched; this row carries its own
+    adjusting entry dated `date` (and a mirror entry dated `reversed_on` if undone).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name='adjustments')
+    invoice = models.ForeignKey('SalesInvoice', on_delete=models.PROTECT, related_name='advance_adjustments')
+    date = models.DateField(help_text="Application date (GSTR-1 atadj period).")
+    gross = models.DecimalField(max_digits=12, decimal_places=2)
+    taxable = models.DecimalField(max_digits=12, decimal_places=2)
+    cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    reversed_on = models.DateField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date', 'created_at']
+
+    @property
+    def tax(self):
+        return self.cgst + self.sgst + self.igst
+
+
 class Vendor(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)

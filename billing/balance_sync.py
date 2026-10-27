@@ -1,7 +1,7 @@
 from django.db.models import DecimalField, ExpressionWrapper, F, Sum, Value
 from django.db.models.functions import Coalesce
 
-from .models import Customer, Payment, SalesInvoice
+from .models import AdvanceAdjustment, Customer, Payment, SalesInvoice
 
 _AMOUNT_FIELD = DecimalField(max_digits=12, decimal_places=2)
 
@@ -19,6 +19,13 @@ def recompute_invoice_amount_paid(invoice_id):
         .aggregate(total=Coalesce(Sum('amount'), Value(0, output_field=_AMOUNT_FIELD)))
         .get('total')
     )
+
+    adjusted_total = (
+        AdvanceAdjustment.objects.filter(invoice_id=invoice_id, reversed_on__isnull=True)
+        .aggregate(total=Coalesce(Sum('gross'), Value(0, output_field=_AMOUNT_FIELD)))
+        .get('total')
+    )
+    paid_total = paid_total + adjusted_total
 
     capped_paid = min(paid_total, invoice.total_amount)
     if capped_paid < 0:
@@ -55,7 +62,14 @@ def recompute_customer_balance(customer_id):
         .get('total')
     ) or 0
 
-    final_balance = outstanding_total - unlinked_payments_total
+    applied_total = (
+        AdvanceAdjustment.objects.filter(payment__customer_id=customer_id, payment__invoice__isnull=True,
+                                         reversed_on__isnull=True)
+        .aggregate(total=Coalesce(Sum('gross'), Value(0, output_field=_AMOUNT_FIELD)))
+        .get('total')
+    ) or 0
+
+    final_balance = outstanding_total - (unlinked_payments_total - applied_total)
     Customer.objects.filter(pk=customer_id).update(current_balance=final_balance)
 
 
@@ -83,6 +97,14 @@ def recompute_customer_balances_for_customers(customers, tenant):
         .annotate(total=Coalesce(Sum('amount'), Value(0, output_field=_AMOUNT_FIELD)))
     )
     unlinked_map = {row['customer_id']: (row['total'] or 0) for row in unlinked_rows}
+    applied_rows = (
+        AdvanceAdjustment.objects.filter(payment__customer_id__in=customer_ids, payment__invoice__isnull=True,
+                                         reversed_on__isnull=True)
+        .values('payment__customer_id')
+        .annotate(total=Coalesce(Sum('gross'), Value(0, output_field=_AMOUNT_FIELD)))
+    )
+    for row in applied_rows:
+        unlinked_map[row['payment__customer_id']] = (unlinked_map.get(row['payment__customer_id'], 0) or 0) - (row['total'] or 0)
 
     for customer in customers:
         computed_balance = (outstanding_map.get(customer.id, 0) or 0) - (unlinked_map.get(customer.id, 0) or 0)

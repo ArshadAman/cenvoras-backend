@@ -243,7 +243,13 @@ def payment_detail(request, pk):
         old_customer_id = payment.customer_id
         old_invoice_id = payment.invoice_id
         
-        serializer = PaymentSerializer(payment, data=request.data, context={'request': request})
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        edit_reason = (data.pop('edit_reason', '') or '')
+        if isinstance(edit_reason, list):
+            edit_reason = edit_reason[0] if edit_reason else ''
+        payment._edited_by = request.user  # signals: audit trail (entered_by / reason)
+        payment._edit_reason = str(edit_reason).strip()[:500] or 'Receipt edited'
+        serializer = PaymentSerializer(payment, data=data, context={'request': request})
         if serializer.is_valid():
             from django.db import transaction
             

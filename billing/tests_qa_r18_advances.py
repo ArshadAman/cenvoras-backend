@@ -227,3 +227,38 @@ class R18AdvanceTests(FourFixesBase):
         self.assertEqual(net("output_cgst") + net("output_sgst"), D("360.00"))
         pay.refresh_from_db()
         self.assertEqual(pay.receipt_voucher_number, "RV-001")  # voucher number kept on edit
+
+    def test_receipt_edit_audit_trail_fields(self):
+        """Rule 3(1): reversal on original date, re-post on corrected date; each line has entered_by,
+        created_at, correction_of and a reason."""
+        orig_date = self.today - timedelta(days=1) if self.today.day > 1 else self.today
+        pay = self._advance("1180.00", orig_date)
+        originals = list(GeneralLedgerEntry.objects.filter(reference=f"Payment Received {pay.id}"))
+        put = self.client.put(f"/api/billing/payments/{pay.id}/", {
+            "customer": str(self.cust.id), "date": str(self.today), "amount": "2360.00", "mode": "upi",
+            "edit_reason": "Amount mistyped", **SVC}, format="json")
+        self.assertEqual(put.status_code, 200, put.data)
+        rev = GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {pay.id}", correction_kind="reversal")
+        rep = GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {pay.id}", correction_kind="repost")
+        self.assertTrue(rev.exists() and rep.exists())
+        orig_ids = {o.id for o in originals}
+        for l in list(rev) + list(rep):
+            self.assertEqual(l.correction_reason, "Amount mistyped")
+            self.assertIsNotNone(l.entered_by_id)
+            self.assertIsNotNone(l.created_at)
+            self.assertIn(l.correction_of_id, orig_ids)
+        self.assertEqual({l.date for l in rev}, {orig_date})      # reversal: original posting date
+        self.assertEqual({l.date for l in rep}, {self.today})     # re-post: corrected transaction date
+        # originals untouched
+        for o in originals:
+            o2 = GeneralLedgerEntry.objects.get(pk=o.pk)
+            self.assertEqual((o2.debit, o2.credit, o2.date, o2.correction_kind), (o.debit, o.credit, o.date, ""))
+
+    def test_receipt_edit_reason_defaults(self):
+        pay = self._advance("1180.00", self.today)
+        self.client.put(f"/api/billing/payments/{pay.id}/", {
+            "customer": str(self.cust.id), "date": str(self.today), "amount": "2360.00", "mode": "upi", **SVC},
+            format="json")
+        reasons = set(GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {pay.id}")
+                      .exclude(correction_kind="").values_list("correction_reason", flat=True))
+        self.assertEqual(reasons, {"Receipt edited"})

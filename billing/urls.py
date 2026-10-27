@@ -107,6 +107,8 @@ urlpatterns = [
     path('gst/ca-audit-pack/', views_gst_shield.download_ca_audit_pack, name='download_ca_audit_pack'),
     
     # Returns (Credit Notes / Debit Notes)
+    path('credit-notes/remaining/', returns_views.credit_note_remaining, name='credit_note_remaining'),
+    path('debit-notes/remaining/', returns_views.debit_note_remaining, name='debit_note_remaining'),
     path('credit-notes/', returns_views.credit_note_list_create, name='credit_note_list_create'),
     path('credit-notes/<uuid:pk>/', returns_views.credit_note_detail, name='credit_note_detail'),
     path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),

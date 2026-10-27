@@ -76,7 +76,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         entered = timezone.localtime(obj.created_at).date()
         if obj.date < entered:
             return {'entered_on': entered.isoformat(),
-                    'message': f"Back-dated entry: dated {obj.date.isoformat()}, entered on {entered.isoformat()}."}
+                    'message': f"Back-dated entry: dated {obj.date:%d/%m/%Y}, entered on {entered:%d/%m/%Y}."}
         return None
 
     def get_entered_by_name(self, obj):
@@ -122,7 +122,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             attrs['date'] = today_ist()
         if attrs['date'] < invoice.invoice_date:
             raise serializers.ValidationError({'date': (
-                f"The credit note date can't be before the invoice date ({invoice.invoice_date.isoformat()}).")})
+                f"The credit note date can't be before the invoice date ({invoice.invoice_date:%d/%m/%Y}).")})
         if attrs['date'] > today_ist():
             raise serializers.ValidationError({'date': "The credit note date can't be in the future."})
         if is_gstr1_filed(invoice.created_by, attrs['date']):
@@ -136,7 +136,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'items': 'Quantities can have at most 2 decimals.'})
             if attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value():
                 raise serializers.ValidationError({'items': (
-                    'Returned goods must be whole units (stock is kept in whole units). For a part-quantity '
+                    'Returns and defective items must be whole units. For a part-quantity '
                     'credit, choose the reason "Post-Sale Discount", "Rate Difference" or "Other".')})
         # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
         from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
@@ -532,7 +532,7 @@ def credit_note_list_create(request):
     tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
         notes = (CreditNote.objects.filter(created_by=tenant)
-                 .select_related('customer', 'original_invoice', 'created_by')
+                 .select_related('customer', 'original_invoice', 'created_by', 'entered_by')  # R22: no per-note user query
                  .prefetch_related('items__product').order_by('-date'))
         serializer = CreditNoteSerializer(notes, many=True)
         return Response(serializer.data)
@@ -552,7 +552,7 @@ def credit_note_list_create(request):
 def credit_note_detail(request, pk):
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        note = (CreditNote.objects.select_related('customer', 'original_invoice', 'created_by')
+        note = (CreditNote.objects.select_related('customer', 'original_invoice', 'created_by', 'entered_by')  # R22: no per-note user query
                 .prefetch_related('items__product').get(pk=pk, created_by=tenant))
     except CreditNote.DoesNotExist:
         return Response({'error': 'Not found'}, status=404)

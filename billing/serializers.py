@@ -1710,9 +1710,6 @@ class PaymentSerializer(serializers.ModelSerializer):
             data['gst_rate'] = '18'
         elif data.get('gst_rate') == '':
             data['gst_rate'] = None
-        pos = str(data.get('place_of_supply') or '').strip()
-        if pos.lower() == 'unknown':
-            data['place_of_supply'] = 'UNKNOWN'
         return super().to_internal_value(data)
 
     def get_unapplied_amount(self, obj):
@@ -1782,11 +1779,17 @@ class PaymentSerializer(serializers.ModelSerializer):
             attrs['place_of_supply'] = ''
             return
         rate = attrs.get('gst_rate', getattr(self.instance, 'gst_rate', None))
-        pos = attrs.get('place_of_supply', getattr(self.instance, 'place_of_supply', '')) or ''
-        if rate is None or not pos.strip():
+        pos = (attrs.get('place_of_supply', getattr(self.instance, 'place_of_supply', '')) or '').strip()
+        if rate is None:
             raise serializers.ValidationError({'gst_rate': (
-                'A service advance needs a GST rate and place of supply. Choose "Unknown" to use 18% '
-                '(Rule 50 proviso) or inter-state (IGST).')})
+                'A service advance needs a GST rate. Choose "Unknown" to use 18% (Rule 50 proviso).')})
+        # Rudra CA (R19): POS is mandatory on service advances; no 'unknown' / 97. Default = customer state.
+        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
+        code = normalize_state_code(pos) if pos and pos.upper() != 'UNKNOWN' else None
+        if not code or code == '97':
+            raise serializers.ValidationError({'place_of_supply': (
+                'Select the place of supply (state) for this service advance.')})
+        attrs['place_of_supply'] = CODE_TO_STATE_NAME[code]
         if rate < 0 or rate > 28:
             raise serializers.ValidationError({'gst_rate': 'GST rate must be between 0 and 28.'})
 
@@ -1812,6 +1815,11 @@ class PaymentSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['created_by'] = getattr(user, 'active_tenant', user)
+        # Allocate the RV number before insert so the receipt journals can carry it in their narration.
+        if not validated_data.get('invoice') and validated_data.get('supply_kind') == 'services':
+            from billing.sequence_service import allocate_next_number
+            validated_data['receipt_voucher_number'] = allocate_next_number(
+                validated_data['created_by'], document_type='receipt_voucher')
         return _with_receipt_voucher(super().create(validated_data))
 
     def update(self, instance, validated_data):

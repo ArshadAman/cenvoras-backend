@@ -463,7 +463,10 @@ def general_ledger_entries_list(request):
         target_vendor = Vendor.objects.filter(id=vendor_id, created_by=tenant).first()
 
     if description:
-        base_entries = base_entries.filter(description__icontains=description)
+        from django.db.models import Q
+        base_entries = base_entries.filter(
+            Q(description__icontains=description) | Q(payment__reference__icontains=description)
+            | Q(payment__receipt_voucher_number__icontains=description))
 
     # 2. Compute Opening Balance (prior to date_from)
     from decimal import Decimal

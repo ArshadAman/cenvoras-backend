@@ -931,6 +931,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['display_number'] = display_document_number(instance.invoice_number)
         data['bank_account_id'] = getattr(getattr(instance, 'meta', None), 'bank_account_id', None)
         data['template_id'] = getattr(getattr(instance, 'meta', None), 'template_id', None)
+        try:
+            from billing.gst_rules import invoice_pos_decision
+            _c, warn, _e = invoice_pos_decision(customer, instance.place_of_supply, list(instance.items.all()))
+            data['pos_warning'] = warn
+        except Exception:
+            data['pos_warning'] = None
         return data
 
 
@@ -1004,6 +1010,18 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
+        # Rudra CA POS rules (s.10/s.12 IGST Act): block mismatched POS for services / bill-to-ship-to.
+        if 'place_of_supply' in data or not self.instance:
+            from billing.gst_rules import invoice_pos_decision
+            init = getattr(self, 'initial_data', {}) or {}
+            btst = str(init.get('bill_to_ship_to', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+            pos_items = items if items is not None else (list(self.instance.items.all()) if self.instance else [])
+            _code, _warn, pos_error = invoice_pos_decision(
+                customer or getattr(self.instance, 'customer', None), data.get('place_of_supply'), pos_items,
+                bill_to_ship_to=btst, customer_gstin=init.get('customer_gstin', ''))
+            if pos_error:
+                raise serializers.ValidationError({'place_of_supply': pos_error})
+
         if customer:
             if not customer.allow_credit:
                 # Check current balance (Owes us positive) + New Bill delta

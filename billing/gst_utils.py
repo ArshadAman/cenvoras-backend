@@ -169,6 +169,14 @@ def normalize_state_code(val):
     return None
 
 
+def pos_display(val):
+    """Rule 46: place of supply as 'State name (GST code)', e.g. 'Odisha (21)'."""
+    code = normalize_state_code(val) if val else None
+    if not code:
+        return str(val or '')
+    return f"{CODE_TO_STATE_NAME.get(code, code)} ({code})"
+
+
 def get_state_code_from_gstin(gstin):
     """
     Extracts the 2-digit state code from the first 2 characters of a GSTIN.
@@ -495,11 +503,12 @@ def credit_note_tax_breakup(credit_note, seller_state_code=None):
     if seller_state_code is None:
         user = credit_note.created_by
         seller_state_code = get_seller_state_code(getattr(user, 'active_tenant', user))
+    from billing.gst_rules import customer_pos as _customer_pos
     orig_inv = credit_note.original_invoice
     customer = credit_note.customer
     pos_raw = (
         (orig_inv.place_of_supply if orig_inv else None)
-        or (customer.state if customer else None)
+        or (_customer_pos(customer)[0] if customer else None)
         or seller_state_code
     )
     pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)

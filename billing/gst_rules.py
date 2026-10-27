@@ -78,6 +78,104 @@ def section34_deadline(invoice_date):
     return date(fy_end.year, 11, 30)
 
 
+def cn_time_bar(tenant, invoice_date, cn_date, today=None):
+    """
+    Rudra CA s.34(2) time bar for a TAX credit note. Returns None if allowed, else the reason.
+    Only CNs against invoices from a PRIOR FY are affected (same-FY CNs: always allowed).
+      Monthly: CN date <= 31 Oct of the year after the invoice's FY, AND that month's GSTR-1 filed
+               on or before 30 Nov (unfiled after 30 Nov counts as late).
+      QRMP:    CN date <= 30 Sep, AND the Jul-Sep return filed on or before 30 Nov.
+    VERIFY with a practising CA: some read s.34(2) as an issue-by-30-Nov deadline; we use the
+    conservative declare-by rule. The annual-return-filed date is not tracked (30 Nov always used).
+    TODO(QRMP refinement): a QRMP B2B CN dated in October can go in the October IFF (due 13 Nov), so
+    it isn't time-barred; not handled yet (and is_qrmp() has no setting yet, so everyone is monthly).
+    """
+    if not invoice_date or not cn_date:
+        return None
+    fy_end = indian_fy_end(invoice_date)
+    if cn_date <= fy_end:
+        return None
+    y = fy_end.year
+    nov30 = date(y, 11, 30)
+    from billing.advances import is_qrmp
+    from billing.models import GSTR1Filing
+    qrmp = bool(tenant) and is_qrmp(tenant)
+    cutoff = date(y, 9, 30) if qrmp else date(y, 10, 31)
+    if cn_date > cutoff:
+        return (f"credit notes for FY {y - 1}-{str(y)[2:]} invoices must be dated on or before "
+                f"{cutoff.strftime('%d %b %Y')} ({'QRMP' if qrmp else 'monthly'} filer) and declared by 30 Nov {y}")
+    if not tenant:
+        return None
+    if qrmp:
+        periods = [date(cn_date.year, m, 1) for m in (7, 8, 9)] if cn_date.month in (7, 8, 9) else [date(cn_date.year, cn_date.month, 1)]
+    else:
+        periods = [date(cn_date.year, cn_date.month, 1)]
+    f = GSTR1Filing.objects.filter(created_by=tenant, period__in=periods).order_by('filed_on').first()
+    label = 'Jul-Sep' if (qrmp and cn_date.month in (7, 8, 9)) else cn_date.strftime('%b %Y')
+    if f and f.filed_on and f.filed_on > nov30:
+        return f"the {label} GSTR-1 was filed on {f.filed_on.isoformat()}, after 30 Nov {y}"
+    if not f and (today or date.today()) > nov30:
+        return f"the {label} GSTR-1 was not filed by 30 Nov {y}"
+    return None
+
+
+def _cn_split_key(rate):
+    return Decimal(str(rate)).quantize(Decimal('0.01'))
+
+
+def cn_tax_cap_errors(invoice, new_items):
+    """
+    s.34: a CN's tax can't exceed the tax charged on the original invoice. Per rate and per component
+    (CGST/SGST/IGST): invoice tax - earlier GST CNs' tax >= this CN's tax. Returns a list of messages.
+    new_items: dicts with quantity, price, discount, tax (rate %).
+    """
+    from types import SimpleNamespace
+    from billing.gst_utils import calculate_item_tax_breakup, get_seller_state_code, credit_note_tax_breakup
+    from billing.gstr1_compute import _invoice_pos
+    tenant = getattr(invoice.created_by, 'active_tenant', invoice.created_by)
+    seller = get_seller_state_code(tenant)
+    is_inter = seller != _invoice_pos(invoice, seller)
+    zero = Decimal('0.00')
+    comps = ('cgst', 'sgst', 'igst')
+    avail = {}
+    inv_tax = zero
+    for it in invoice.items.all():
+        if getattr(it, 'row_type', 'item') == 'note':
+            continue
+        _t, tax, c, s, i, rt = calculate_item_tax_breakup(it, is_inter)
+        inv_tax += tax
+        row = avail.setdefault(_cn_split_key(rt), dict.fromkeys(comps, zero))
+        row['cgst'] += c; row['sgst'] += s; row['igst'] += i
+    new = {}
+    for d in new_items:
+        ns = SimpleNamespace(quantity=d.get('quantity', 0), price=d.get('price', 0),
+                             discount=d.get('discount', 0), tax=d.get('tax', 0), amount=0)
+        _t, tax, c, s, i, rt = calculate_item_tax_breakup(ns, is_inter)
+        if tax <= zero:
+            continue
+        row = new.setdefault(_cn_split_key(rt), dict.fromkeys(comps, zero))
+        row['cgst'] += c; row['sgst'] += s; row['igst'] += i
+    if not new:
+        return []
+    if inv_tax <= zero:
+        return ["This invoice carried no GST; the credit note can't carry GST."]
+    for cn in invoice.credit_notes.filter(gst_time_barred=False):
+        for ln in credit_note_tax_breakup(cn, seller)['lines']:
+            row = avail.setdefault(_cn_split_key(ln['rate']), dict.fromkeys(comps, zero))
+            for k in comps:
+                row[k] -= ln[k]
+    errors = []
+    tol = Decimal('0.05')
+    for rate, row in new.items():
+        have = avail.get(rate, dict.fromkeys(comps, zero))
+        for k in comps:
+            if row[k] > max(have[k], zero) + tol:
+                errors.append(
+                    f"{k.upper()} at {rate.normalize():f}%: this credit note reverses ₹{row[k]:,.2f} but only "
+                    f"₹{max(have[k], zero):,.2f} is left on invoice {invoice.invoice_number} after earlier credit notes (s.34).")
+    return errors
+
+
 def section34_warning(invoice_date, note_date, has_tax):
     if not invoice_date or not note_date or not has_tax:
         return None
@@ -307,6 +405,61 @@ def customer_pos(customer):
     if not code or code == '97':
         return None, None
     return code, CODE_TO_STATE_NAME.get(code)
+
+
+MIXED_POS_WARNING = 'Mixed goods and services: confirm POS.'
+
+
+def _is_services_line(item):
+    get = (item.get if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d)))
+    if (get('row_type', 'item') or 'item') == 'note':
+        return None
+    h = str(get('hsn_sac_code', '') or '').strip()
+    prod = get('product', None)
+    if not h and prod is not None and not isinstance(prod, (str, int)):
+        h = str(getattr(prod, 'hsn_sac_code', '') or '').strip()
+    if not h and isinstance(prod, str):
+        try:
+            from inventory.models import Product
+            p = Product.objects.filter(pk=prod).only('hsn_sac_code').first()
+            h = (p.hsn_sac_code or '').strip() if p else ''
+        except Exception:
+            h = ''
+    return h.startswith('99') if h else None
+
+
+def invoice_pos_decision(customer, pos_value, items, bill_to_ship_to=False, customer_gstin=''):
+    """
+    Rudra CA (s.10 / s.12 IGST Act). Default POS = customer's GSTIN state, else address state.
+      goods: a different POS (ship-to state) is allowed, with a visible warning;
+      services, or a bill-to-ship-to supply: a POS different from the default is blocked.
+    Returns (pos_code, warning, error).
+    """
+    from billing.gst_utils import get_state_code_from_gstin, normalize_state_code
+    default = customer_pos(customer)[0] if customer else None
+    g = (customer_gstin or '').strip()
+    if not default and len(g) == 15:
+        default = get_state_code_from_gstin(g)
+    chosen = normalize_state_code(pos_value) if pos_value else None
+    kinds = [k for k in (_is_services_line(i) for i in (items or [])) if k is not None]
+    services = bool(kinds) and all(kinds)
+    # Rudra CA: mixed goods + services = treated as goods (never blocked), but always flagged.
+    mixed = MIXED_POS_WARNING if (any(kinds) and not all(kinds)) else None
+    if not chosen:
+        return default, mixed, None
+    if not default or chosen == default:
+        return chosen, mixed, None
+    from billing.gst_utils import CODE_TO_STATE_NAME
+    names = f"{CODE_TO_STATE_NAME.get(chosen, chosen)} vs customer's {CODE_TO_STATE_NAME.get(default, default)}"
+    if services:
+        return None, None, (f"Place of supply for services is the recipient's location (s.12 IGST Act): "
+                            f"{names}. Use the customer's state.")
+    if bill_to_ship_to:
+        return None, None, (f"Bill-to-ship-to supply: place of supply is the bill-to customer's state "
+                            f"(s.10(1)(b) IGST Act): {names}.")
+    warn = (f"Place of supply differs from the customer's state ({names}). "
+            f"Allowed for goods shipped to another state; check the ship-to address.")
+    return chosen, (f"{mixed} {warn}" if mixed else warn), None
 
 
 def advance_pos_code(payment, seller_state_code):

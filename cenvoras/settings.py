@@ -415,3 +415,4 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip('"').strip("'")
 # GSTN offline tool AT/ATADJ sheets (CSV export provided).
 GSTR1_ADVANCE_ADJ_JSON_KEY = os.environ.get('GSTR1_ADVANCE_ADJ_JSON_KEY', 'txpd')
 GSTR1_ADVANCES_JSON_ENABLED = os.environ.get('GSTR1_ADVANCES_JSON_ENABLED', 'False').lower() in ('1', 'true', 'yes', 'on')
+GSTR1_NIL_JSON_ENABLED = os.environ.get('GSTR1_NIL_JSON_ENABLED', 'False').lower() in ('1', 'true', 'yes', 'on')

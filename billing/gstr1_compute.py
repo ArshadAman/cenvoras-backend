@@ -31,7 +31,7 @@ def _customer_gstin(inv):
     return (getattr(inv, 'customer_gstin', None) or '').strip().upper()
 
 
-def compute_gstr1(tenant, from_date, to_date):
+def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
     seller_state_code = get_seller_state_code(tenant)
 
     invoices = SalesInvoice.objects.filter(
@@ -301,6 +301,18 @@ def compute_gstr1(tenant, from_date, to_date):
         'samt': bucket_totals['taxable']['samt'] + at_totals['samt'] - txpd_totals['samt'],
     }
 
+    # Never a negative 3.1(a) (Rudra CA, VERIFY): floor each head at 0 and carry the unadjusted
+    # advance adjustment into the next month(s). GSTR-1 txpd still goes out in full.
+    a31_raw = dict(a31)
+    carry_in = {k: ZERO for k in a31}
+    carry_from = None
+    if apply_carry:
+        from billing.advances import carry_into
+        carry_in, carry_from = carry_into(tenant, from_date)
+    if apply_carry:
+        a31 = {k: max(a31_raw[k] - carry_in[k], ZERO) for k in a31_raw}
+    carry_out = {k: max(carry_in[k] - a31_raw[k], ZERO) for k in a31_raw}
+
     return {
         'gstin': gstin,
         'fp': fp,
@@ -337,6 +349,10 @@ def compute_gstr1(tenant, from_date, to_date):
         },
         'bucket_totals': bucket_totals,
         'table_3_1_a': a31,
+        'table_3_1_a_raw': a31_raw,
+        'carry_forward_in': carry_in,
+        'carry_forward_from': carry_from,
+        'carry_forward_out': carry_out,
         'table_3_2': table32,
         'invoices': invoices,
         'credit_notes': credit_notes,

@@ -2,6 +2,8 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+from django.test import override_settings
+
 from billing.advances import today_ist
 from billing.gstr1_compute import compute_gstr1
 from billing.models import AdvanceAdjustment, Customer, Payment, SalesInvoice, SalesInvoiceItem
@@ -119,9 +121,23 @@ class AdvanceAdjustmentTests(FourFixesBase):
         self.assertEqual((a2["txval"], a2["camt"], a2["samt"]), (D("0.00"), D("0.00"), D("0.00")))
         self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), a2["camt"])
         # portal-shaped export
-        exp = self.client.get("/api/billing/gst/gstr1-export/", {"from": str(self.m_from), "to": str(self.m_to)}).data
-        self.assertEqual(exp["txpd"][0]["itms"][0]["ad_amt"], 1000.0)
-        self.assertEqual(exp["txpd"][0]["sply_ty"], "INTRA")
+        q = {"from": str(self.m_from), "to": str(self.m_to)}
+        exp = self.client.get("/api/billing/gst/gstr1-export/", q).data      # flag OFF by default
+        self.assertNotIn("txpd", exp)
+        self.assertNotIn("at", exp)
+        self.assertIn("AT/ATADJ", exp["_cenvora"]["advances_note"])
+        with override_settings(GSTR1_ADVANCES_JSON_ENABLED=True, GSTR1_ADVANCE_ADJ_JSON_KEY="atadj"):
+            exp = self.client.get("/api/billing/gst/gstr1-export/", q).data
+        self.assertEqual(exp["atadj"][0]["itms"][0]["ad_amt"], 1000.0)
+        self.assertEqual(exp["atadj"][0]["sply_ty"], "INTRA")
+        with override_settings(GSTR1_ADVANCES_JSON_ENABLED=True):
+            self.assertIn("txpd", self.client.get("/api/billing/gst/gstr1-export/", q).data)
+        csv = self.client.get("/api/billing/gst/gstr1-advances-csv/", {**q, "sheet": "atadj"})
+        self.assertEqual(csv.status_code, 200)
+        body = csv.content.decode()
+        self.assertIn("Gross Advance Adjusted", body)
+        self.assertIn("29-Karnataka,,18,1000.00,0.00", body)
+        self.assertIn("VERIFY", body)
 
     def test_goods_advance_has_no_gst_and_clears_2102(self):
         pay = self._advance("2000.00", self.today, kind="goods", mode="cash")
@@ -242,5 +258,49 @@ class AdvanceAdjustmentTests(FourFixesBase):
         g2, a2 = self._a31(self.m_from, self.m_to)
         self.assertEqual(g2["at"], [])
         self.assertEqual(D(str(g2["txpd"][0]["ad_amt"])), D("1000.00"))
-        self.assertEqual((a2["txval"], a2["camt"]), (D("-1000.00"), D("-90.00")))
-        self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), a2["camt"])
+        raw = {k: D(str(v)).quantize(D("0.01")) for k, v in g2["table_3_1_a_raw"].items()}
+        self.assertEqual((raw["txval"], raw["camt"]), (D("-1000.00"), D("-90.00")))
+        self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), raw["camt"])
+        # floor: never a negative 3.1(a); unadjusted balance carried out
+        self.assertEqual((a2["txval"], a2["camt"], a2["samt"], a2["iamt"]), (D("0.00"),) * 4)
+        self.assertEqual(D(str(g2["carry_forward_out"]["txval"])), D("1000.00"))
+        self.assertEqual(D(str(g2["carry_forward_out"]["camt"])), D("90.00"))
+        self.assertEqual(len(g2["txpd"]), 1)                              # GSTR-1 row still in full
+        r = self.client.get("/api/billing/gst/gstr3b/", {"from": str(self.m_from), "to": str(self.m_to)})
+        self.assertIn("advance_adjustment_carried_out", [w["code"] for w in r.data["warnings"]])
+        self.assertEqual(r.data["table_3_1"]["outward_taxable"]["camt"], 0.0)
+
+    def test_negative_31a_carries_forward_across_two_months(self):
+        m1, _ = month_bounds(self.prev_from - timedelta(days=1))           # M-2
+        m0, _ = month_bounds(m1 - timedelta(days=1))                       # M-3
+        pay = self._advance("1180.00", m0 + timedelta(days=2))
+        inv = self._invoice("R17-CF0", "1000.00", m0 + timedelta(days=5))
+        self._file(m0)
+        self.assertEqual(self._allocate(pay, inv).status_code, 200)
+        AdvanceAdjustment.objects.filter(payment=pay).update(gstr1_period=m1, date=m1 + timedelta(days=3))
+        _, am1 = self._a31(m1, month_bounds(m1)[1])
+        self.assertEqual(am1["txval"], D("0.00"))                          # floored, 1000 carried
+        self._invoice("R17-CF1", "600.00", self.prev_from + timedelta(days=3))
+        gp, ap = self._a31(self.prev_from, self.prev_to)
+        self.assertEqual((ap["txval"], ap["camt"]), (D("0.00"), D("0.00")))
+        self.assertEqual(D(str(gp["carry_forward_in"]["txval"])), D("1000.00"))
+        self.assertEqual(D(str(gp["carry_forward_out"]["txval"])), D("400.00"))
+        self.assertEqual(gp["carry_forward_from"], m1.strftime("%b %Y"))
+        self._invoice("R17-CF2", "1000.00", self.today)
+        gc, ac = self._a31(self.m_from, self.m_to)
+        self.assertEqual((ac["txval"], ac["camt"], ac["samt"]), (D("600.00"), D("54.00"), D("54.00")))
+        self.assertEqual(D(str(gc["carry_forward_in"]["camt"])), D("36.00"))
+        self.assertEqual(gc["carry_forward_from"], m1.strftime("%b %Y"))
+        self.assertEqual(D(str(gc["carry_forward_out"]["txval"])), D("0.00"))
+        r = self.client.get("/api/billing/gst/gstr3b/", {"from": str(self.m_from), "to": str(self.m_to)})
+        msg = [w["message"] for w in r.data["warnings"] if w["code"] == "advance_adjustment_carried_in"][0]
+        self.assertIn("₹400.00 of advance adjustment carried forward from " + m1.strftime("%b %Y"), msg)
+
+    def test_qrmp_company_treats_quarter_as_unfiled(self):
+        from billing.advances import is_gstr1_filed, is_qrmp
+        self._file(self.prev_from)
+        self.assertTrue(is_gstr1_filed(self.tenant, self.prev_from))
+        self.assertFalse(is_qrmp(self.tenant))                 # no filing-frequency setting exists yet
+        self.tenant.gst_filing_frequency = "quarterly"          # simulated future setting
+        self.assertTrue(is_qrmp(self.tenant))
+        self.assertFalse(is_gstr1_filed(self.tenant, self.prev_from))

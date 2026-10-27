@@ -93,6 +93,7 @@ urlpatterns = [
     path('gst/hsn-summary/', gst_views.hsn_summary_report, name='hsn_summary_report'),
     path('gst/tax-register/', gst_views.tax_register, name='tax_register'),
     path('gst/tax-register/<uuid:invoice_id>/', gst_views.tax_register_invoice_detail, name='tax_register_invoice_detail'),
+    path('gst/gstr1-advances-csv/', gst_views.gstr1_advances_csv, name='gstr1_advances_csv'),
     path('gst/gstr1-filing/', gst_views.gstr1_filing_status, name='gstr1_filing_status'),
     path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
     path('gst/gstr3b/', gst_views.gstr3b_summary, name='gstr3b_summary'),

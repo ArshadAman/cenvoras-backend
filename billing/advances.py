@@ -36,9 +36,59 @@ def month_start(d):
     return d.replace(day=1)
 
 
+def is_qrmp(tenant):
+    """Cenvora has no GST filing-frequency setting yet (only QRMP eligibility in gst_thresholds).
+    Reads a future `gst_filing_frequency` attribute if one is added; today this is always False."""
+    t = getattr(tenant, 'active_tenant', tenant)
+    return (getattr(t, 'gst_filing_frequency', '') or '').lower() in ('quarterly', 'qrmp')
+
+
+QRMP_WARNING = 'QRMP period handling is pending.'
+
+
 def is_gstr1_filed(tenant, d):
+    """Monthly flag. QRMP companies: the whole quarter is treated as unfiled (follow-up)."""
     from billing.models import GSTR1Filing
+    if is_qrmp(tenant):
+        return False
     return GSTR1Filing.objects.filter(created_by=tenant, period=month_start(d)).exists()
+
+
+def _next_month(d):
+    return (d.replace(day=28) + __import__('datetime').timedelta(days=4)).replace(day=1)
+
+
+def carry_into(tenant, from_date):
+    """
+    Negative 3.1(a) carried into the month starting at `from_date`, per head, plus the month it
+    originated in. Walks month by month from the first month with a txpd (non-netted) adjustment.
+    Only full calendar months carry; returns zeros otherwise.
+    """
+    from billing.models import AdvanceAdjustment
+    heads = ('txval', 'iamt', 'camt', 'samt')
+    zero = {k: ZERO for k in heads}
+    start = _d(from_date)
+    if start.day != 1:
+        return zero, None
+    first = (AdvanceAdjustment.objects.filter(created_by=tenant, netted=False)
+             .order_by('gstr1_period').values_list('gstr1_period', flat=True).first())
+    if not first or first >= start:
+        return zero, None
+    from billing.gstr1_compute import compute_gstr1
+    carry, origin = dict(zero), None
+    m = month_start(first)
+    while m < start:
+        end = _next_month(m) - __import__('datetime').timedelta(days=1)
+        raw = compute_gstr1(tenant, str(m), str(end), apply_carry=False)['table_3_1_a']
+        new = {k: max(carry[k] - raw[k], ZERO) for k in heads}
+        if any(v > 0 for v in new.values()):
+            if not any(v > 0 for v in carry.values()):
+                origin = m
+        else:
+            origin = None
+        carry = new
+        m = _next_month(m)
+    return carry, (origin.strftime('%b %Y') if origin else None)
 
 
 def adjustment_reference(adj_id):

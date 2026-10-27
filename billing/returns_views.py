@@ -31,14 +31,16 @@ class CreditNoteSerializer(serializers.ModelSerializer):
     original_invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True, default=None)
     tax_breakup = serializers.SerializerMethodField()
     section34_warning = serializers.SerializerMethodField()
+    without_gst = serializers.BooleanField(write_only=True, required=False, default=False)
 
     class Meta:
         model = CreditNote
         fields = ['id', 'credit_note_number', 'date', 'original_invoice', 'original_invoice_number',
                   'customer', 'customer_name', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items', 'tax_breakup',
-                  'section34_warning']
-        read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at', 'section34_warning']
+                  'section34_warning', 'gst_time_barred', 'without_gst']
+        read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at', 'section34_warning',
+                            'gst_time_barred']
         extra_kwargs = {
             'original_invoice': {'required': True, 'allow_null': False},
         }
@@ -89,6 +91,28 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         items = attrs.get('items') or []
         if not items:
             raise serializers.ValidationError({'items': 'At least one item is required.'})
+        # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
+        from billing.gst_rules import section34_deadline
+        _nd = attrs.get('date') or getattr(self.instance, 'date', None)
+        _dl = section34_deadline(invoice.invoice_date)
+        time_barred = bool(_nd and _nd > _dl)
+        without_gst = bool(attrs.pop('without_gst', False))
+        if without_gst and not time_barred:
+            raise serializers.ValidationError({'without_gst': (
+                f"A credit note without GST is only for time-barred notes (after {_dl.isoformat()}).")})
+        if without_gst:
+            for it in items:
+                it['tax'] = Decimal('0')
+            attrs['gst_time_barred'] = True
+        elif time_barred and any(Decimal(str(it.get('tax', 0) or 0)) > 0 for it in items):
+            raise serializers.ValidationError({
+                'code': 'cn_time_barred',
+                'section34': (
+                    f"GST can't be reduced: the s.34(2) deadline for invoice {invoice.invoice_number} was "
+                    f"{_dl.isoformat()}. Issue it as 'Credit note without GST (time-barred under s.34)'? "
+                    f"It will reduce the customer balance and sales value with no output-tax reversal."),
+                'offer_without_gst': True,
+            })
         remaining = remaining_invoice_returns(invoice)
         this_taxable = Decimal('0.00')
         this_total = Decimal('0.00')
@@ -110,6 +134,8 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             this_total += taxable + tax_amt
             if tax_rate > 0:
                 this_has_tax = True
+        if without_gst:
+            attrs['total_amount'] = this_total  # commercial CN: no tax component
         for pid, qty in qty_by_product.items():
             allowed = remaining['remaining_qty'].get(pid, Decimal('0.00'))
             if qty > allowed:

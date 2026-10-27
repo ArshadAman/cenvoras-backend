@@ -57,19 +57,44 @@ def _add_nil(nil, sply_ty, field, amt, deadline=None):
         row['_dl'] = min(row.get('_dl') or deadline, deadline)
 
 
-def floor_cn_rows(b2cs, nil, carry_in, month_start):
+def carry_block_reason(tenant, deadline, month_start, today=None):
+    """
+    Rudra CA s.34(2): a carried CN amount must be DECLARED in a return filed by 30 Nov after the FY.
+    Usable only in periods up to October (monthly) or the Jul-Sep quarter (QRMP; is_qrmp() has no
+    setting yet so everyone is monthly today), and only if that period's GSTR-1 is filed on or before
+    30 Nov (GSTR1Filing.filed_on). Annual-return-filed date not tracked: 30 Nov always used.
+    Returns None if usable, else the reason.
+    """
+    if not deadline:
+        return None
+    from billing.advances import is_qrmp
+    from billing.models import GSTR1Filing
+    last = datetime.date(deadline.year, 9 if is_qrmp(tenant) else 10, 1)
+    if month_start > last:
+        return f"the last period it could be declared in ({last.strftime('%b %Y')}) has passed"
+    f = GSTR1Filing.objects.filter(created_by=tenant, period=month_start).first()
+    if f and f.filed_on and f.filed_on > deadline:
+        return f"the {month_start.strftime('%b %Y')} GSTR-1 was filed on {f.filed_on.isoformat()}, after 30 Nov"
+    if not f and (today or datetime.date.today()) > deadline:
+        return f"the {month_start.strftime('%b %Y')} GSTR-1 was not filed by {deadline.isoformat()}"
+    return None
+
+
+def floor_cn_rows(b2cs, nil, carry_in, month_start, tenant=None, today=None):
     """
     Rudra CA: a b2cs (POS + rate + supply type) or Table 8 row never goes negative. Excess CN value
-    is carried into the next month's same row, but never past the s.34(2) deadline (30 Nov after the
-    FY of the original invoice; annual-return date not tracked, so 30 Nov is always used).
+    is carried into the next month's same row while s.34(2) allows (carry_block_reason).
+    The earliest deadline among netted CNs applies to a row.
     carry_in/out: list of {'table', 'key', 'amts', 'deadline'}. Returns (carry_out, warnings).
     """
     warnings = []
     for c in carry_in:
-        if c['deadline'] and month_start > c['deadline']:
+        why = carry_block_reason(tenant, c['deadline'], month_start, today) if tenant else (
+            'deadline passed' if c['deadline'] and month_start > c['deadline'] else None)
+        if why:
             warnings.append({'code': 'cn_carry_expired', 'message': (
-                f"₹{_fmt(c['amts'])} of credit notes carried forward ({c['table']} {c['key']}) was not "
-                f"declared: s.34(2) deadline {c['deadline'].isoformat()} has passed.")})
+                f"₹{_fmt(c['amts'])} of credit notes carried forward ({c['table']} {c['key']}) dropped: "
+                f"s.34(2) deadline {c['deadline'].isoformat()}; {why}.")})
             continue
         if c['table'] == 'b2cs':
             pos, rt, sply = c['key']
@@ -118,7 +143,7 @@ def cn_carry_into(tenant, from_date):
     while m < start:
         end = _next_month(m) - _dt.timedelta(days=1)
         raw = compute_gstr1(tenant, str(m), str(end), apply_carry=False)
-        carry, _w = floor_cn_rows(raw['b2cs'], raw['_nil_map'], carry, m)
+        carry, _w = floor_cn_rows(raw['b2cs'], raw['_nil_map'], carry, m, tenant)
         m = _next_month(m)
     return carry
 
@@ -278,6 +303,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         date__lte=to_date,
         original_invoice__isnull=False,
         original_invoice__status='final',
+        gst_time_barred=False,  # commercial CNs (time-barred, no GST) never enter GST returns
     ).select_related('customer', 'original_invoice').prefetch_related('items__product').order_by(
         'date', 'credit_note_number'
     )
@@ -295,6 +321,20 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         cn_igst = brk['totals']['igst']
         cn_val = (cn_taxable + cn_cgst + cn_sgst + cn_igst).quantize(Decimal('0.01'))
         bucket = classify_outward_supply(orig_inv)
+        clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
+        deadline = section34_deadline(orig_inv.invoice_date)
+        if cn.date > deadline:
+            # Rudra CA: a CN dated after the s.34(2) deadline reduces GST nowhere (GSTR-1 tables, Table 8, 3B).
+            cn_warnings.append({'code': 'cn_after_s34', 'message': (
+                f"{clean_cn_number} excluded from GST returns: dated after the s.34(2) deadline "
+                f"{deadline.isoformat()} for invoice {orig_inv.invoice_number}. Re-issue it as a credit note "
+                f"without GST.")})
+            continue
+        cn_tax = cn_cgst + cn_sgst + cn_igst
+        if bucket in ('nil_exempt', 'non_gst') and cn_tax > ZERO:
+            cn_warnings.append({'code': 'cn_taxed_on_untaxed_invoice', 'message': (
+                f"{clean_cn_number} carries GST (₹{cn_tax:,.2f}) but invoice {orig_inv.invoice_number} looks "
+                f"nil-rated/exempt/non-GST. Check the data; reported as a taxable credit note.")})
         bucket_totals[bucket]['txval'] -= cn_taxable
         bucket_totals[bucket]['iamt'] -= cn_igst
         bucket_totals[bucket]['camt'] -= cn_cgst
@@ -334,7 +374,6 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
             }
             for idx, ln in enumerate(brk['lines'], 1)
         ]
-        clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
         nt_entry = {
             'nt_num': clean_cn_number,
             'nt_dt': cn.date.strftime('%d-%m-%Y'),
@@ -351,22 +390,12 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
             'rchrg': 'N',
             'itms': cn_items_data,
         }
-        deadline = section34_deadline(orig_inv.invoice_date)
-        late = cn.date > deadline
-        if bucket in ('nil_exempt', 'non_gst') and (cn_cgst + cn_sgst + cn_igst) == ZERO:
+        if bucket in ('nil_exempt', 'non_gst') and cn_tax == ZERO:
             # Rudra CA: CN on a nil/exempt/non-GST invoice reduces Table 8 (same inter/intra, B2B/B2C bucket).
-            if late:
-                cn_warnings.append({'code': 'cn_after_s34', 'message': (
-                    f"{clean_cn_number} not declared: dated after the s.34(2) deadline {deadline.isoformat()}.")})
-                continue
             orig_gstin = len(_customer_gstin(orig_inv)) == 15
             _add_nil(nil, _nil_key(is_inter, orig_gstin or has_gstin), _nil_field(orig_inv, bucket),
                      -float(cn_taxable), deadline=deadline)
             continue
-        if late:
-            cn_warnings.append({'code': 'cn_after_s34', 'message': (
-                f"{clean_cn_number} is dated after the s.34(2) deadline {deadline.isoformat()} for invoice "
-                f"{orig_inv.invoice_number}{'' if has_gstin else '; not netted'}.")})
         if has_gstin:
             existing_cdnr = next((c for c in cdnr if c['ctin'] == cust_gstin), None)
             if existing_cdnr:
@@ -381,7 +410,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         elif _is_b2cl(orig_inv, _invoice_pos(orig_inv, seller_state_code), seller_state_code,
                       len(_customer_gstin(orig_inv)) == 15):
             cdnur.append({**{k: v for k, v in nt_entry.items() if k != 'rchrg'}, 'typ': 'B2CL'})
-        elif not late:
+        else:
             # CN on a b2cs invoice: net into b2cs by POS + rate + supply type.
             for ln in brk['lines']:
                 _add_b2cs(b2cs, pos_code, is_inter, float(ln['rate']), -float(ln['taxable']),
@@ -390,7 +419,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
     # Rudra CA: never a negative b2cs / Table 8 row; carry the excess forward (s.34(2) limited).
     if apply_carry:
         _m0 = datetime.datetime.strptime(str(from_date), '%Y-%m-%d').date()
-        cn_carry_out, floor_warn = floor_cn_rows(b2cs, nil, cn_carry_into(tenant, from_date), _m0)
+        cn_carry_out, floor_warn = floor_cn_rows(b2cs, nil, cn_carry_into(tenant, from_date), _m0, tenant)
         cn_warnings.extend(floor_warn)
     else:
         cn_carry_out = None

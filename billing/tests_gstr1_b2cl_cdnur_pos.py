@@ -212,5 +212,122 @@ class Gstr1CnFloorCarryTests(_G1Helpers, FourFixesBase):
         self.cn(inv, "1000.00", tax="0")
         res = self.client.get("/api/billing/gst/gstr1-export/?from=2026-09-01&to=2026-09-30")
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.data['nil']['inv'][0]['nil_amt'], 9000.0)
+        self.assertEqual(res.data['_cenvora']['table8'][0]['nil_amt'], 9000.0)
         self.assertIn('warnings', res.data['_cenvora'])
+
+
+class Gstr1S34RudraR22Tests(_G1Helpers, FourFixesBase):
+    """Rudra CA answers on #191: taxed-CN-on-untaxed warning, s.34(2) declaration rule, time-barred CNs."""
+
+    def g1(self, y, m):
+        import calendar
+        return compute_gstr1(self.tenant, date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1]))
+
+    def _sep_excess_fy2425(self):
+        old = self.inv(self.od, "11800.00", price="10000.00", d=date(2024, 6, 1))   # deadline 30 Nov 2025
+        self.inv(self.od, "1180.00", price="1000.00", d=date(2025, 9, 5))
+        self.cn(old, "3000.00", d=date(2025, 9, 20))                                # 2,000 excess carried
+        self.inv(self.od, "5900.00", price="5000.00", d=date(2025, 10, 5))
+
+    def _file(self, y, m, on):
+        from billing.models import GSTR1Filing
+        GSTR1Filing.objects.create(created_by=self.tenant, period=date(y, m, 1), filed_on=on)
+
+    def test_taxed_cn_on_untaxed_invoice_warns_and_keeps_old_routing(self):
+        inv = self.inv(self.ka, "10000.00", price="10000.00", tax="0")
+        self.cn(inv, "1000.00", tax="18")
+        r = self.run_()
+        self.assertTrue(any(w['code'] == 'cn_taxed_on_untaxed_invoice' for w in r['cn_warnings']))
+        self.assertEqual(r['nil'][0]['nil_amt'], 10000.0)            # Table 8 not reduced
+        self.assertEqual(r['b2cs'][0]['txval'], -1000.0)              # old routing (unfloored, no carry)
+
+    def test_carry_usable_in_october_if_october_filed_by_30_nov(self):
+        self._sep_excess_fy2425()
+        self._file(2025, 10, date(2025, 11, 10))
+        self.assertEqual(self.g1(2025, 10)['b2cs'][0]['txval'], 3000.0)
+
+    def test_carry_dropped_if_october_filed_after_30_nov(self):
+        self._sep_excess_fy2425()
+        self._file(2025, 10, date(2025, 12, 5))
+        r = self.g1(2025, 10)
+        self.assertEqual(r['b2cs'][0]['txval'], 5000.0)
+        self.assertTrue(any(w['code'] == 'cn_carry_expired' and 'after 30 Nov' in w['message']
+                            for w in r['cn_warnings']))
+
+    def test_carry_dropped_if_october_never_filed(self):
+        self._sep_excess_fy2425()
+        r = self.g1(2025, 10)
+        self.assertEqual(r['b2cs'][0]['txval'], 5000.0)
+        self.assertTrue(any('not filed by 2025-11-30' in w['message'] for w in r['cn_warnings']))
+
+    def test_carry_not_usable_after_october_period(self):
+        old = self.inv(self.od, "11800.00", price="10000.00", d=date(2024, 6, 1))
+        self.inv(self.od, "1180.00", price="1000.00", d=date(2025, 10, 5))
+        self.cn(old, "3000.00", d=date(2025, 10, 20))
+        self._file(2025, 10, date(2025, 11, 10))
+        self.inv(self.od, "5900.00", price="5000.00", d=date(2025, 11, 5))
+        self._file(2025, 11, date(2025, 11, 28))
+        r = self.g1(2025, 11)
+        self.assertEqual(r['b2cs'][0]['txval'], 5000.0)
+        self.assertTrue(any('Oct 2025' in w['message'] for w in r['cn_warnings']))
+
+    def test_late_cn_absent_everywhere_including_3b(self):
+        old = self.inv(self.customer, "11800.00", price="10000.00", d=date(2024, 6, 1))
+        self.inv(self.customer, "5900.00", price="5000.00", d=date(2025, 12, 5))
+        self.cn(old, "1000.00", d=date(2025, 12, 10))
+        r = self.g1(2025, 12)
+        self.assertEqual(r['cdnr'], [])
+        self.assertEqual(r['cdnur'], [])
+        self.assertEqual(r['bucket_totals']['taxable']['txval'], Decimal('5000.00'))
+        self.assertTrue(any(w['code'] == 'cn_after_s34' for w in r['cn_warnings']))
+
+    def _api_cn(self, inv, extra=None):
+        payload = {"date": "2025-12-10", "original_invoice": str(inv.id), "customer": str(inv.customer_id),
+                   "reason": "discount", "total_amount": "1180.00",
+                   "items": [{"product": str(self.product.id), "quantity": 1, "price": "1000.00", "tax": "18.00",
+                              "amount": "1180.00"}]}
+        payload.update(extra or {})
+        return self.client.post("/api/billing/credit-notes/", payload, format="json")
+
+    def test_time_barred_cn_api_prompt_then_commercial_cn_without_gst(self):
+        from ledger.models import GeneralLedgerEntry
+        old = self.inv(self.customer, "11800.00", price="10000.00", d=date(2024, 6, 1))
+        res = self._api_cn(old)
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn('without GST', str(res.data))
+        self.assertIn('offer_without_gst', str(res.data))
+        self.customer.refresh_from_db()
+        bal0 = self.customer.current_balance
+        res = self._api_cn(old, {"without_gst": True})
+        self.assertEqual(res.status_code, 201, res.data)
+        cn = CreditNote.objects.get(pk=res.data['id'])
+        self.assertTrue(cn.gst_time_barred)
+        self.assertEqual(cn.total_amount, Decimal('1000.00'))
+        gl = GeneralLedgerEntry.objects.filter(credit_note=cn)
+        self.assertFalse(gl.filter(description__icontains='GST Reversal').exists())
+        self.assertEqual(sum(e.debit for e in gl), sum(e.credit for e in gl))
+        self.customer.refresh_from_db()
+        self.assertEqual(bal0 - self.customer.current_balance, Decimal('1000.00'))
+        r = self.g1(2025, 12)
+        self.assertEqual((r['cdnr'], r['cdnur'], r['b2cs']), ([], [], []))
+        self.assertEqual(r['bucket_totals']['taxable']['txval'], Decimal('0'))
+        self.assertEqual(r['doc_issue']['doc_det'][1]['totnum'], 0)
+
+    def test_without_gst_rejected_when_not_time_barred(self):
+        inv = self.inv(self.customer, "11800.00", price="10000.00", d=date(2025, 6, 1))
+        res = self._api_cn(inv, {"without_gst": True})
+        self.assertEqual(res.status_code, 400, res.data)
+
+    def test_table8_json_flag_and_csv(self):
+        from django.test import override_settings
+        inv = self.inv(self.ka, "10000.00", price="10000.00", tax="0")
+        self.cn(inv, "1000.00", tax="0")
+        url = "/api/billing/gst/gstr1-export/?from=2026-09-01&to=2026-09-30"
+        res = self.client.get(url)
+        self.assertNotIn('nil', res.data)
+        self.assertEqual(res.data['_cenvora']['table8'][0]['nil_amt'], 9000.0)
+        with override_settings(GSTR1_NIL_JSON_ENABLED=True):
+            self.assertEqual(self.client.get(url).data['nil']['inv'][0]['nil_amt'], 9000.0)
+        csv_res = self.client.get("/api/billing/gst/gstr1-advances-csv/?from=2026-09-01&to=2026-09-30&sheet=nil")
+        body = csv_res.content.decode()
+        self.assertIn('Intra-State supplies to unregistered persons,9000.00,0.00,0.00', body)

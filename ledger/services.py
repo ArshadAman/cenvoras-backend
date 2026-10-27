@@ -919,6 +919,8 @@ class AccountingService:
         description = f"Sales Return from {credit_note.customer.name} - CN {credit_note.credit_note_number}"
         if credit_note.reason:
             description += f" ({credit_note.get_reason_display()})"
+        if getattr(credit_note, 'gst_time_barred', False):
+            description += " - without GST, time-barred under s.34"
 
         from billing.gst_utils import get_seller_state_code, get_pos_state_code
         tenant = getattr(user, 'active_tenant', user)

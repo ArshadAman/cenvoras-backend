@@ -35,6 +35,10 @@ class CreditNote(models.Model):
     ]
     reason = models.CharField(max_length=20, choices=REASON_CHOICES, default='return')
     notes = models.TextField(blank=True)
+    gst_time_barred = models.BooleanField(
+        default=False,
+        help_text="Commercial credit note without GST (time-barred under s.34(2)): no output-tax reversal, "
+                  "never reported in GSTR-1/3B.")
     
     warehouse = models.ForeignKey(
         Warehouse, on_delete=models.SET_NULL, null=True, blank=True,

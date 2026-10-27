@@ -93,7 +93,7 @@ def floor_cn_rows(b2cs, nil, carry_in, month_start, tenant=None, today=None):
             'deadline passed' if c['deadline'] and month_start > c['deadline'] else None)
         if why:
             warnings.append({'code': 'cn_carry_expired', 'message': (
-                f"₹{_fmt(c['amts'])} of credit notes carried forward ({c['table']} {c['key']}) dropped: "
+                f"₹{_fmt(c['amts'])} of credit notes carried forward ({row_label(c['table'], c['key'])}) dropped: "
                 f"s.34(2) deadline {c['deadline'].isoformat()}; {why}.")})
             continue
         if c['table'] == 'b2cs':
@@ -118,8 +118,19 @@ def floor_cn_rows(b2cs, nil, carry_in, month_start, tenant=None, today=None):
                 r[f] = 0.0
             carry_out.append({'table': table, 'key': keyf(r), 'amts': neg, 'deadline': dl})
             warnings.append({'code': 'cn_carried_forward', 'message': (
-                f"₹{_fmt(neg)} of credit notes carried forward ({table} {keyf(r)}) to next month.")})
+                f"₹{_fmt(neg)} of credit notes carried forward ({row_label(table, keyf(r))}) to next month.")})
     return carry_out, warnings
+
+
+def row_label(table, key):
+    """R21: human label for a carried row, e.g. 'B2CS Kerala (32), 5%, inter-state'."""
+    from billing.gst_utils import pos_display
+    if table == 'b2cs':
+        pos, rt, sply = key
+        return f"B2CS {pos_display(pos)}, {float(rt):g}%, {'inter' if sply == 'INTER' else 'intra'}-state"
+    k = str(key)
+    reg = 'registered' if k.endswith('B2B') else 'unregistered'
+    return f"Table 8 {'inter' if k.startswith('INTR') and not k.startswith('INTRA') else 'intra'}-state, {reg}"
 
 
 def _fmt(amts):
@@ -435,7 +446,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
             'hsn_sc': hval['hsn_sc'],
             'desc': hval['desc'],
             'uqc': hval['uqc'],
-            'qty': hval['qty'],
+            'qty': float(hval['qty']),  # CN quantities may be decimal (R21)
             'val': float(hval['val']),
             'txval': float(hval['txval']),
             'camt': float(hval['camt']),

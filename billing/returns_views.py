@@ -43,6 +43,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                             'gst_time_barred']
         extra_kwargs = {
             'original_invoice': {'required': True, 'allow_null': False},
+            'date': {'required': False},  # R21: defaults to today (IST)
         }
 
     def get_tax_breakup(self, obj):
@@ -91,6 +92,28 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         items = attrs.get('items') or []
         if not items:
             raise serializers.ValidationError({'items': 'At least one item is required.'})
+        # R21: CN date (default today): not before the invoice, not in the future, not in a filed month.
+        from billing.advances import today_ist, is_gstr1_filed
+        if not attrs.get('date'):
+            attrs['date'] = today_ist()
+        if attrs['date'] < invoice.invoice_date:
+            raise serializers.ValidationError({'date': (
+                f"The credit note date can't be before the invoice date ({invoice.invoice_date.isoformat()}).")})
+        if attrs['date'] > today_ist():
+            raise serializers.ValidationError({'date': "The credit note date can't be in the future."})
+        if is_gstr1_filed(invoice.created_by, attrs['date']):
+            raise serializers.ValidationError({'date': (
+                "That month's GSTR-1 is filed. Date the credit note in the current month.")})
+        for it in items:
+            q = Decimal(str(it.get('quantity', 0) or 0))
+            if q <= 0:
+                raise serializers.ValidationError({'items': 'Quantities must be greater than 0.'})
+            if q != q.quantize(Decimal('0.01')):
+                raise serializers.ValidationError({'items': 'Quantities can have at most 2 decimals.'})
+            if attrs.get('reason', 'return') in ('return', 'defective') and q != q.to_integral_value():
+                raise serializers.ValidationError({'items': (
+                    'Returned goods must be whole units (stock is kept in whole units). For a part-quantity '
+                    'credit, choose the reason "Post-Sale Discount", "Rate Difference" or "Other".')})
         # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
         from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
         _nd = attrs.get('date') or getattr(self.instance, 'date', None)
@@ -224,8 +247,11 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         for item_data in processed_items:
             CreditNoteItem.objects.create(credit_note=credit_note, **item_data)
 
-            # Restore stock (returned goods come back in)
-            qty = item_data['quantity']
+            # Restore stock (returned goods come back in). R21: only whole quantities move stock.
+            qty = Decimal(str(item_data['quantity']))
+            if qty != qty.to_integral_value():
+                continue
+            qty = int(qty)
             Product.objects.filter(pk=item_data['product'].pk).update(stock=F('stock') + qty)
 
             if item_data.get('batch') and target_warehouse:

@@ -66,7 +66,9 @@ class CreditNoteItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    # R21: up to 2-decimal quantities (part-quantity credits). Stock is in whole units, so only whole
+    # quantities restore stock (see CreditNoteSerializer).
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)

@@ -47,8 +47,13 @@ class CreditNote(models.Model):
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)  # tenant (owner)
+    created_at = models.DateTimeField(auto_now_add=True)  # entry time (audit), separate from `date`
+    # R21 (Rudra CA): who actually keyed the CN (staff user), for the back-dated-entry audit trail.
+    entered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='+')
+    # R21: did this CN put goods back into stock? None = created before this field (old code always did).
+    stock_restored = models.BooleanField(null=True, blank=True, default=None)
 
     class Meta:
         unique_together = [['created_by', 'credit_note_number']]
@@ -66,7 +71,9 @@ class CreditNoteItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    # R21: up to 2-decimal quantities (part-quantity credits). Stock is in whole units, so only whole
+    # quantities restore stock (see CreditNoteSerializer).
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)

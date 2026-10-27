@@ -515,14 +515,15 @@ def gstr1_json_export(request):
     if not from_date or not to_date:
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
-    from billing.gstr1_compute import compute_gstr1
+    from billing.gstr1_compute import compute_gstr1, row_label
     from billing.advances import group_for_portal
     data = compute_gstr1(tenant, from_date, to_date)
     payload = {
         'gstin': data['gstin'],
         'fp': data['fp'],
         'b2b': data['b2b'],
-        'b2cs': data['b2cs'],
+        # R21: rows floored to 0 by CN carry-forward are not filed (kept on screen via _cenvora).
+        'b2cs': [r for r in data['b2cs'] if any(r[k] for k in ('txval', 'camt', 'samt', 'iamt'))],
         'b2cl': data['b2cl'],
         'cdnr': data['cdnr'],
         'cdnur': data['cdnur'],
@@ -556,7 +557,10 @@ def gstr1_json_export(request):
                                         'txpd_total': _adv_total(data['txpd'])},
                            'warnings': data['cn_warnings'],
                            'nil_in_json': getattr(dj_settings, 'GSTR1_NIL_JSON_ENABLED', False),
-                           'table8': data['nil']}
+                           'table8': data['nil'],
+                           'b2cs_zero_rows': [
+                               {**r, 'label': row_label('b2cs', (r['pos'], r['rt'], r['sply_ty']))}
+                               for r in data['b2cs'] if not any(r[k] for k in ('txval', 'camt', 'samt', 'iamt'))]}
     return Response(payload)
 
 

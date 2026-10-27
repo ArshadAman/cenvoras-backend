@@ -38,11 +38,44 @@ def payment_list_create(request):
         return Response(serializer.data)
 
     elif request.method == 'POST':
+        # R21 P1: one transaction for "new customer + payment"; any 4xx rolls the customer back too.
         from django.db import transaction
-        from decimal import Decimal
+        with transaction.atomic():
+            resp = _payment_create(request)
+            if resp.status_code >= 400:
+                transaction.set_rollback(True)
+        return resp
 
+
+def _resolve_new_customer(data, tenant):
+    """
+    R21 P1: the receipt form may send `new_customer_name` instead of a customer id. Reuse the tenant's
+    existing customer with that exact name (case-insensitive, oldest first) so retries never create
+    duplicates; otherwise create it. Runs inside the payment's transaction.
+    """
+    from .models import Customer
+    name = str(data.get('new_customer_name', '') or '').strip()
+    if 'new_customer_name' in data:
+        data.pop('new_customer_name')
+    if data.get('customer') or not name:
+        return None
+    cust = Customer.objects.filter(created_by=tenant, name__iexact=name).order_by('created_at').first()
+    if cust is None:
+        cust = Customer.objects.create(name=name, created_by=tenant)
+    data['customer'] = str(cust.id)
+    return cust
+
+
+def _payment_create(request):
+    from django.db import transaction
+    from decimal import Decimal
+    if True:
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         tenant = getattr(request.user, 'active_tenant', request.user)
+        _resolve_new_customer(data, tenant)
+        if not data.get('customer'):
+            return Response({'customer': ['Please select or enter a customer name.']},
+                            status=status.HTTP_400_BAD_REQUEST)
         # R18 P0-A: auto-apply only when asked for (plain receipt against dues). A legacy client that sends
         # supply_kind without auto_allocate is recording an advance: never auto-applied.
         if 'auto_allocate' in data:

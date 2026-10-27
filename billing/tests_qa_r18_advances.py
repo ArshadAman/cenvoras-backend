@@ -171,8 +171,13 @@ class R18AdvanceTests(FourFixesBase):
         self.assertTrue(adv.receipt_voucher_number.startswith("RV"))
 
     def test_service_advance_unknown_rate_and_pos_posts_18pct_igst(self):
+        # R19 (Rudra CA): unknown RATE -> 18% stays; POS must be a real state (no 'unknown'/97).
         res = self._receipt("1180.00", self.today, supply_kind="services", gst_rate="unknown",
                             place_of_supply="unknown", auto_allocate=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("place_of_supply", res.data)
+        res = self._receipt("1180.00", self.today, supply_kind="services", gst_rate="unknown",
+                            place_of_supply="Odisha", auto_allocate=False)
         self.assertEqual(res.status_code, 201, res.data)
         pay = Payment.objects.get(pk=res.data["id"])
         self.assertEqual(pay.gst_rate, D("18"))

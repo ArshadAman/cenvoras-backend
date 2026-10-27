@@ -5,6 +5,13 @@ from .models import GeneralLedgerEntry, Account, AccountType
 from billing.models import SalesInvoice, PurchaseBill
 
 
+def _adv_label(payment):
+    """Narration for advance GST lines: RV number and the payment reference, never the internal UUID."""
+    parts = [getattr(payment, 'receipt_voucher_number', '') or '', getattr(payment, 'reference', '') or '']
+    label = ' / '.join(p for p in parts if p)
+    return label or f"receipt {payment.date:%d/%m/%Y}" if payment else ''
+
+
 class AccountingService:
     """Service for handling double-entry accounting operations"""
     
@@ -682,7 +689,7 @@ class AccountingService:
                     account=accounts['output_igst'],
                     debit=0,
                     credit=advance_split['igst'],
-                    description=f"Output IGST on advance {reference}",
+                    description=f"Output IGST on advance {_adv_label(payment_obj)}",
                     reference=reference,
                     customer=customer,
                     payment=payment_obj,
@@ -694,7 +701,7 @@ class AccountingService:
                     account=accounts['output_cgst'],
                     debit=0,
                     credit=advance_split['cgst'],
-                    description=f"Output CGST on advance {reference}",
+                    description=f"Output CGST on advance {_adv_label(payment_obj)}",
                     reference=reference,
                     customer=customer,
                     payment=payment_obj,
@@ -706,7 +713,7 @@ class AccountingService:
                     account=accounts['output_sgst'],
                     debit=0,
                     credit=advance_split['sgst'],
-                    description=f"Output SGST on advance {reference}",
+                    description=f"Output SGST on advance {_adv_label(payment_obj)}",
                     reference=reference,
                     customer=customer,
                     payment=payment_obj,

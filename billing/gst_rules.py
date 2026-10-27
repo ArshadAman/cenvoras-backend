@@ -286,6 +286,40 @@ def infer_supply_kind(payment):
     return 'services'
 
 
+# Rudra CA (27 Oct): advances never report POS 97. New service advances must carry a real state.
+# Only legacy rows with no determinable state (pre-R19 'Unknown' POS) still resolve here; the
+# fix_advance_pos_97 command lists/repairs them. Change this one constant if Rudra rules otherwise.
+LEGACY_UNDETERMINED_ADVANCE_POS = '97'
+
+
+def customer_pos(customer):
+    """(state_code, state_name) of a customer's place of supply: registered -> GSTIN state code,
+    unregistered -> address state. (None, None) when neither is known."""
+    from billing.gst_utils import CODE_TO_STATE_NAME, get_state_code_from_gstin, normalize_state_code
+    if not customer:
+        return None, None
+    code = None
+    gstin = (getattr(customer, 'gstin', '') or '').strip()
+    if len(gstin) == 15:
+        code = get_state_code_from_gstin(gstin)
+    if not code:
+        code = normalize_state_code(getattr(customer, 'state', None))
+    if not code or code == '97':
+        return None, None
+    return code, CODE_TO_STATE_NAME.get(code)
+
+
+def advance_pos_code(payment, seller_state_code):
+    """Single place that decides the POS state code reported/posted for an advance."""
+    from billing.gst_utils import normalize_state_code
+    raw = (getattr(payment, 'place_of_supply', '') or '').strip()
+    code = None if raw.upper() == 'UNKNOWN' else normalize_state_code(raw) if raw else None
+    if code and code != '97':
+        return code
+    code, _ = customer_pos(getattr(payment, 'customer', None))
+    return code or LEGACY_UNDETERMINED_ADVANCE_POS
+
+
 def advance_tax_split(payment, seller_state_code):
     """
     GST on an unlinked customer receipt.
@@ -310,18 +344,10 @@ def advance_tax_split(payment, seller_state_code):
     if kind == 'goods' or gross <= 0:
         return empty
 
-    customer = getattr(payment, 'customer', None)
-    pos_raw = getattr(payment, 'place_of_supply', None) or (customer.state if customer else None)
-    if str(pos_raw or '').strip().upper() == 'UNKNOWN':
-        pos_raw = None  # user confirmed POS cannot be determined -> inter-state
-    used_fallback_pos = not bool(pos_raw)
-    if used_fallback_pos:
-        # Law: treat as inter-state when POS cannot be worked out
-        pos = '97'
-        is_inter = True
-    else:
-        pos = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
-        is_inter = seller_state_code != pos
+    # IGST vs CGST/SGST follows supplier state vs POS (Rudra CA). POS 97 only for undeterminable legacy rows.
+    pos = advance_pos_code(payment, seller_state_code)
+    used_fallback_pos = pos == LEGACY_UNDETERMINED_ADVANCE_POS
+    is_inter = seller_state_code != pos
 
     explicit = getattr(payment, 'gst_rate', None)
     rate = Decimal(str(explicit)) if explicit is not None else infer_advance_rate(payment)

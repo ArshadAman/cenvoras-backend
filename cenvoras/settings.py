@@ -99,6 +99,7 @@ MIDDLEWARE = [
     'audit_log.middleware.AuditMiddleware',
     'users.middleware.ManagerPermissionMiddleware',
     'users.middleware.RegionalContextMiddleware',
+    'cenvoras.nocache_middleware.ApiNoStoreMiddleware',
 ]
 
 # OWASP Security Hardening

@@ -291,6 +291,11 @@ def payment_detail(request, pk):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _pos_name(cust):
+    from .gst_rules import customer_pos
+    return customer_pos(cust)[1]
+
+
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def advance_defaults(request):
@@ -321,7 +326,7 @@ def advance_defaults(request):
         'supply_kind': kind,
         'line_counts': dict(kinds),
         'gst_rate': rates.most_common(1)[0][0] if rates else None,
-        'place_of_supply': cust.state or None,
+        'place_of_supply': _pos_name(cust),
         'needs_confirmation': True,
     })
 

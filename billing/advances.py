@@ -332,12 +332,8 @@ def advance_tables(tenant, from_date, to_date, seller_state_code):
             if month_start(lo) <= per <= hi:
                 for k in acc[table]:
                     acc[table][k] += sign * getattr(a, k)
-        pos_raw = getattr(p, 'place_of_supply', None) or (p.customer.state if p.customer else None)
-        if str(pos_raw or '').strip().upper() == 'UNKNOWN':
-            pos_raw = None
-        pos = get_pos_state_code(pos_raw, fallback_state=seller_state_code) if pos_raw else seller_state_code
-        if split['is_interstate'] and pos == seller_state_code:
-            pos = '97'
+        from billing.gst_rules import advance_pos_code
+        pos = advance_pos_code(p, seller_state_code)
         for table in ('at', 'txpd'):
             vals = acc[table]
             if vals['taxable'] <= 0:
@@ -351,6 +347,22 @@ def advance_tables(tenant, from_date, to_date, seller_state_code):
             tots[table]['samt'] += vals['sgst']
             tots[table]['iamt'] += vals['igst']
     return rows['at'], rows['txpd'], tots['at'], tots['txpd']
+
+
+def merge_advance_rows(rows):
+    """One row per POS + rate + supply type (INTER/INTRA) + cess rate; ad_amt and tax summed (R19, Rudra CA)."""
+    out = {}
+    for r in rows:
+        key = (str(r['pos']).zfill(2), float(r['rt']), r['sply_ty'], float(r.get('cess_rt', 0) or 0))
+        m = out.setdefault(key, {'pos': key[0], 'rt': key[1], 'sply_ty': key[2], 'cess_rt': key[3],
+                                 'ad_amt': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO, 'csamt': ZERO})
+        for k in ('ad_amt', 'iamt', 'camt', 'samt', 'csamt'):
+            m[k] += Decimal(str(r.get(k, 0) or 0))
+    merged = []
+    for key in sorted(out):
+        m = out[key]
+        merged.append({**m, **{k: float(_q(m[k])) for k in ('ad_amt', 'iamt', 'camt', 'samt', 'csamt')}})
+    return merged
 
 
 def group_for_portal(rows):

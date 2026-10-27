@@ -230,10 +230,11 @@ class DebitNoteItemSerializer(serializers.ModelSerializer):
 
 class DebitNoteSerializer(serializers.ModelSerializer):
     items = DebitNoteItemSerializer(many=True)
+    original_bill_number = serializers.CharField(source='original_bill.bill_number', read_only=True, default=None)
 
     class Meta:
         model = DebitNote
-        fields = ['id', 'debit_note_number', 'date', 'original_bill',
+        fields = ['id', 'debit_note_number', 'date', 'original_bill', 'original_bill_number',
                   'vendor_name', 'vendor_gstin', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items']
         read_only_fields = ['id', 'debit_note_number', 'created_by', 'created_at']
@@ -392,6 +393,51 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 
 
 # ─── API Views ────────────────────────────────────────────────
+
+def _remaining_payload(remaining):
+    q = lambda d: str(Decimal(d).quantize(Decimal('0.01')))
+    return {
+        'remaining_qty': {pid: q(max(v, Decimal('0'))) for pid, v in remaining['remaining_qty'].items()},
+        'remaining_taxable': q(remaining['remaining_taxable']),
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def debit_note_remaining(request):
+    """Qty still debitable per product id on a purchase bill (same rule the DN serializer enforces)."""
+    from billing.models import PurchaseBill
+    from billing.gst_rules import remaining_bill_returns
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    bill = PurchaseBill.objects.filter(pk=request.query_params.get('bill'), created_by=tenant).first() \
+        if _is_uuid(request.query_params.get('bill')) else None
+    if not bill:
+        return Response({'error': 'Purchase bill not found'}, status=404)
+    return Response(_remaining_payload(remaining_bill_returns(bill)))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def credit_note_remaining(request):
+    """Qty still creditable per product id on a sales invoice (same rule the CN serializer enforces)."""
+    from billing.models import SalesInvoice
+    from billing.gst_rules import remaining_invoice_returns
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    inv = SalesInvoice.objects.filter(pk=request.query_params.get('invoice'), created_by=tenant).first() \
+        if _is_uuid(request.query_params.get('invoice')) else None
+    if not inv:
+        return Response({'error': 'Invoice not found'}, status=404)
+    return Response(_remaining_payload(remaining_invoice_returns(inv)))
+
+
+def _is_uuid(v):
+    import uuid
+    try:
+        uuid.UUID(str(v))
+        return True
+    except (ValueError, TypeError):
+        return False
+
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])

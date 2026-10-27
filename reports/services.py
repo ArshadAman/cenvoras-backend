@@ -1,5 +1,5 @@
 from decimal import Decimal
-from django.db.models import Sum, F, Q
+from django.db.models import Sum, F, Q, Value, DecimalField, ExpressionWrapper
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from inventory.models import Product, StockPoint, ProductBatch
@@ -73,7 +73,10 @@ def get_stock_valuation(tenant=None):
             purchase_items_qs.values('product_id')
             .annotate(
                 total_qty=Sum(F('quantity') + F('free_quantity')),
-                total_val=Sum(F('quantity') * F('price'))
+                # Net of line discount (%), excl. GST (price is pre-tax). AS 2: trade discounts reduce cost.
+                total_val=Sum(ExpressionWrapper(
+                    F('quantity') * F('price') * (Value(100) - Coalesce(F('discount'), Value(0))) / Value(100),
+                    output_field=DecimalField(max_digits=18, decimal_places=4)))
             )
         )
         purchase_wac_map = {}

@@ -128,41 +128,11 @@ class SmartDashboard:
         return round(self._get_cash_collections() + self._get_bank_collections(), 2)
     
     def _get_net_profit_today(self):
-        """Estimated net profit = Sales - Cost of Goods Sold"""
-        # Get today's sales items
-        sales_items = SalesInvoiceItem.objects.filter(
-            Q(sales_invoice__created_by=self.owner) | Q(sales_invoice__created_by__parent=self.owner),
-        ).filter(
-            sales_invoice__invoice_date=self.today
-        ).exclude(sales_invoice__status='draft').select_related('product', 'batch')
-        
-        total_revenue = Decimal('0')
-        total_cost = Decimal('0')
-        
-        for item in sales_items:
-            qty = Decimal(str(item.quantity))
-            sale_price = Decimal(str(item.price))
-            discount = Decimal(str(item.discount or 0))
-            
-            # Revenue = (quantity * price - discount), before tax
-            base_amount = qty * sale_price
-            discount_amount = (base_amount * discount) / Decimal('100')
-            line_revenue = base_amount - discount_amount
-            
-            # Cost Price: batch.cost_price -> product.price -> product.sale_price (fallback)
-            if item.batch and item.batch.cost_price:
-                cost_price = Decimal(str(item.batch.cost_price))
-            elif item.product.price:
-                cost_price = Decimal(str(item.product.price))
-            else:
-                # Fallback to sale_price if no cost data
-                cost_price = Decimal(str(item.product.sale_price or 0))
-            
-            total_revenue += line_revenue
-            total_cost += qty * cost_price
-        
-        return float(total_revenue - total_cost)
-    
+        """Today's net profit on the same Schedule III basis as the P&L statement (ledger.pnl)."""
+        from ledger.pnl import compute_net_profit
+        _rev, _exp, net, _inv = compute_net_profit(self.owner, from_date=self.today, to_date=self.today)
+        return float(net.quantize(Decimal('0.01')))
+
     def _get_credit_given_today(self):
         """Total unpaid invoices created today (Udhaar given)"""
         # Get today's invoices

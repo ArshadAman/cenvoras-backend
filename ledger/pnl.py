@@ -14,7 +14,9 @@ There is no separate COGS expense line. A COGS estimate is returned only as a me
 Switch: PNL_PRESENTATION = 'cogs' falls back to the old GL-only basis (no inventory change line;
 5001 COGS account used if anything posts to it). Change it here and nowhere else.
 
-Stock valuation: AT COST (weighted average, same unit cost as Reports -> Stock Valuation).
+Stock valuation: AT COST (weighted average, same unit cost as Reports -> Stock Valuation),
+excluding GST (purchase prices are pre-tax; Input GST sits in 1301-1303) and net of line discounts.
+Inward freight is NOT included: purchase bills have no freight/landed-cost field yet.
 Lower of cost and NRV (AS 2) is NOT applied: Cenvora has no NRV data per item. Quantities at a
 date are rolled back from the current product stock using dated documents (purchase bills,
 final sales invoices, credit notes, debit notes, stock journals). Manual stock edits with no
@@ -124,20 +126,70 @@ def _gl_balances(tenant, account_type, from_date=None, to_date=None, as_of=None)
     return out
 
 
+STOCK_INCOMPLETE_NOTE = ('Stock data incomplete: total inventory is negative, so it is shown as 0. '
+                         'Profit is not reliable until purchases, returns and stock entries are corrected.')
+
+
+def _clamp(value):
+    """Never a negative asset: a negative total means missing stock-in documents."""
+    return (ZERO, True) if value < 0 else (value, False)
+
+
+def inventory_ledger_warning(tenant):
+    """Guard: stock is periodic (outside the GL). If anything is posted to an inventory/stock ledger,
+    the go-live opening stock may be counted twice."""
+    from .models import Account, AccountType, GeneralLedgerEntry
+    accs = [a for a in Account.objects.filter(created_by=tenant, account_type=AccountType.ASSET)
+            if a.code == '1300' or 'stock' in (a.name or '').lower() or 'inventor' in (a.name or '').lower()]
+    if not accs:
+        return None
+    t = GeneralLedgerEntry.objects.filter(created_by=tenant, account__in=accs).aggregate(dr=Sum('debit'), cr=Sum('credit'))
+    if _d(t['dr']) or _d(t['cr']):
+        names = ', '.join(sorted({f"{a.code} {a.name}" for a in accs}))
+        return (f'Journal entries are posted to an inventory ledger ({names}). Cenvora already adds stock from '
+                f'item quantities, so opening stock may be double-counted. Reverse those journals or ask your CA.')
+    return None
+
+
 def inventory_change(tenant, from_date=None, to_date=None, as_of=None):
-    """Opening, closing and change (opening - closing) for the period. Cumulative when as_of is given."""
+    """
+    Opening, closing and change (opening - closing).
+    Period: opening = closing stock of the day before `from_date` (= previous period's closing).
+    Cumulative (as_of, or no from_date): opening = stock at go-live (before any dated document).
+    `golive` is always the go-live opening stock (the only equity adjustment).
+    Negative totals are shown as 0 with stock_data_incomplete=True.
+    """
+    empty = {'opening': ZERO, 'closing': ZERO, 'change': ZERO, 'golive': ZERO, 'negative_items': [],
+             'stock_data_incomplete': False, 'warnings': []}
     if PNL_PRESENTATION != 'schedule_iii':
-        return {'opening': ZERO, 'closing': ZERO, 'change': ZERO, 'negative_items': []}
+        return empty
     costs = _unit_costs(tenant)
     from_date, to_date, as_of = _parse(from_date), _parse(to_date), _parse(as_of)
     end = as_of or to_date or date.today()
+    golive_raw, _ = stock_value_as_of(tenant, None, costs)
     if as_of or not from_date:
-        opening, _neg_o = stock_value_as_of(tenant, None, costs)
+        opening_raw = golive_raw
     else:
-        opening, _neg_o = stock_value_as_of(tenant, from_date - timedelta(days=1), costs)
-    closing, negatives = stock_value_as_of(tenant, end, costs)
+        opening_raw, _neg = stock_value_as_of(tenant, from_date - timedelta(days=1), costs)
+    closing_raw, negatives = stock_value_as_of(tenant, end, costs)
+    golive, g_bad = _clamp(golive_raw)
+    opening, o_bad = _clamp(opening_raw)
+    closing, c_bad = _clamp(closing_raw)
+    incomplete = g_bad or o_bad or c_bad
+    warnings = []
+    if incomplete:
+        warnings.append(STOCK_INCOMPLETE_NOTE)
+    if negatives:
+        total_neg = sum((Decimal(n['value']) for n in negatives), ZERO)
+        warnings.append(f'{len(negatives)} item(s) have negative stock (valued at last weighted-average cost: '
+                        f'{total_neg}). Check purchases and returns for: '
+                        + ', '.join(n['product'] for n in negatives[:5]) + ('...' if len(negatives) > 5 else ''))
+    guard = inventory_ledger_warning(tenant)
+    if guard:
+        warnings.append(guard)
     return {'opening': opening, 'closing': closing, 'change': (opening - closing).quantize(CENT),
-            'negative_items': negatives}
+            'golive': golive, 'negative_items': negatives, 'stock_data_incomplete': incomplete,
+            'warnings': warnings}
 
 
 def compute_net_profit(tenant, from_date=None, to_date=None, as_of=None):

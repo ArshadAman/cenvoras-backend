@@ -88,8 +88,12 @@ def profit_loss_statement(request):
             'opening_stock': f(inv['opening']),
             'closing_stock': f(inv['closing']),
             'change': f(inv['change']),
-            'valuation': 'At cost (weighted average). Lower of cost and NRV is not applied: no NRV data.',
+            'valuation': ('At cost (weighted average), excluding GST where ITC is claimed and net of discounts. '
+                          'Inward freight is not included (bills have no freight field). '
+                          'Lower of cost and NRV is not applied: no NRV data.'),
             'negative_stock_items': inv['negative_items'][:50],
+            'stock_data_incomplete': inv['stock_data_incomplete'],
+            'warnings': inv['warnings'],
         },
         # Memo only, never added to expenses (Schedule III has no COGS line for traders).
         'memo': {'cogs_estimate': f(cogs_memo(user, from_date, to_date))},
@@ -190,14 +194,16 @@ def balance_sheet(request):
         # Periodic inventory: stock is not in the GL, so show closing stock as an asset and the
         # opening position brought into Cenvora (before any dated document) as capital. Balances because
         # cumulative profit already includes (opening - closing).
-        if inv['closing'] != 0:
-            asset_items.append({'id': 'inventories', 'code': 'INV', 'name': 'Inventories (stock-in-trade, at cost)',
-                                'amount': float(inv['closing'])})
-            total_assets += inv['closing']
-        if inv['opening'] != 0:
-            equity_items.append({'id': 'opening-stock', 'code': 'INV-OB', 'name': 'Opening stock brought in',
-                                 'amount': float(inv['opening'])})
-            total_equity += inv['opening']
+        # Current assets: closing stock (never negative; see stock_data_incomplete)
+        asset_items.append({'id': 'inventories', 'code': 'INV', 'name': 'Inventories (stock-in-trade)',
+                            'group': 'Current assets', 'amount': float(inv['closing'])})
+        total_assets += inv['closing']
+        # Reserves & Surplus: go-live opening stock only. Later periods roll closing -> opening via RE.
+        if inv['golive'] != 0:
+            equity_items.append({'id': 'opening-stock-adjustment', 'code': 'INV-OB',
+                                 'name': 'Opening stock adjustment', 'group': 'Reserves & Surplus',
+                                 'amount': float(inv['golive'])})
+            total_equity += inv['golive']
 
     is_balanced = abs(total_assets - (total_liabilities + total_equity)) < Decimal('0.01')
     difference = total_assets - (total_liabilities + total_equity)
@@ -219,6 +225,12 @@ def balance_sheet(request):
         },
         'is_balanced': is_balanced,
         'difference': float(difference),
+        'inventory': {
+            'closing_stock': float(inv['closing']) if PNL_PRESENTATION == 'schedule_iii' else 0.0,
+            'stock_data_incomplete': inv['stock_data_incomplete'] if PNL_PRESENTATION == 'schedule_iii' else False,
+            'warnings': inv['warnings'] if PNL_PRESENTATION == 'schedule_iii' else [],
+            'negative_stock_items': inv['negative_items'][:50] if PNL_PRESENTATION == 'schedule_iii' else [],
+        },
     })
 
 

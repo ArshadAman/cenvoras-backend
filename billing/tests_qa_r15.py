@@ -260,6 +260,6 @@ class AdvanceGstR15Tests(FourFixesBase):
         self.assertIsNotNone(svc.adjusted_on)
         d = str(date.today())
         g1 = compute_gstr1(self.tenant, d, d)
-        # Same period advance + invoice: reported in neither 'at' nor 'atadj'.
-        self.assertEqual(g1['atadj'], [])
+        # Same period advance + invoice: reported in neither 'at' nor 'txpd'.
+        self.assertEqual(g1['txpd'], [])
         self.assertEqual(g1['at'], [])

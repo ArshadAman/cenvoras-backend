@@ -68,7 +68,7 @@ class AdvanceAdjustmentTests(FourFixesBase):
         return g, {k: D(str(v)).quantize(D("0.01")) for k, v in g["table_3_1_a"].items()}
 
     # tests
-    def test_same_month_advance_and_invoice_report_neither_at_nor_atadj(self):
+    def test_same_month_advance_and_invoice_report_neither_at_nor_txpd(self):
         pay = self._advance("1180.00", self.today)
         receipt_lines = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {pay.id}").count()
         self.assertEqual(self._bal("customer_advances"), D("1000.00"))
@@ -86,7 +86,7 @@ class AdvanceAdjustmentTests(FourFixesBase):
         self.assertEqual(inv.amount_paid, D("1180.00"))
         g, a31 = self._a31(self.m_from, self.m_to)
         self.assertEqual(g["at"], [])
-        self.assertEqual(g["atadj"], [])
+        self.assertEqual(g["txpd"], [])
         self.assertEqual((a31["txval"], a31["camt"], a31["samt"]), (D("1000.00"), D("90.00"), D("90.00")))
         # Tax register agrees with 3B and the Output GST ledger
         tr = self.client.get("/api/billing/gst/tax-register/", {"from": str(self.m_from), "to": str(self.m_to)}).data
@@ -114,14 +114,14 @@ class AdvanceAdjustmentTests(FourFixesBase):
         # month 2: invoice 1,000/90/90 and atadj 1,000/90/90 -> nets to 0
         g2, a2 = self._a31(self.m_from, self.m_to)
         self.assertEqual(g2["at"], [])
-        self.assertEqual(len(g2["atadj"]), 1)
-        self.assertEqual(D(str(g2["atadj"][0]["ad_amt"])), D("1000.00"))
+        self.assertEqual(len(g2["txpd"]), 1)
+        self.assertEqual(D(str(g2["txpd"][0]["ad_amt"])), D("1000.00"))
         self.assertEqual((a2["txval"], a2["camt"], a2["samt"]), (D("0.00"), D("0.00"), D("0.00")))
         self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), a2["camt"])
         # portal-shaped export
         exp = self.client.get("/api/billing/gst/gstr1-export/", {"from": str(self.m_from), "to": str(self.m_to)}).data
-        self.assertEqual(exp["atadj"][0]["itms"][0]["ad_amt"], 1000.0)
-        self.assertEqual(exp["atadj"][0]["sply_ty"], "INTRA")
+        self.assertEqual(exp["txpd"][0]["itms"][0]["ad_amt"], 1000.0)
+        self.assertEqual(exp["txpd"][0]["sply_ty"], "INTRA")
 
     def test_goods_advance_has_no_gst_and_clears_2102(self):
         pay = self._advance("2000.00", self.today, kind="goods", mode="cash")
@@ -133,7 +133,7 @@ class AdvanceAdjustmentTests(FourFixesBase):
         adj = AdvanceAdjustment.objects.get(payment=pay)
         self.assertEqual((adj.gross, adj.taxable, adj.cgst + adj.sgst + adj.igst), (D("2000.00"), D("2000.00"), D("0.00")))
         g, _ = self._a31(self.m_from, self.m_to)
-        self.assertEqual((g["at"], g["atadj"]), ([], []))
+        self.assertEqual((g["at"], g["txpd"]), ([], []))
         inv.refresh_from_db()
         self.assertEqual(inv.amount_paid, D("2000.00"))
 
@@ -154,7 +154,7 @@ class AdvanceAdjustmentTests(FourFixesBase):
         inv2.refresh_from_db()
         self.assertEqual(inv2.amount_paid, D("590.00"))
         g, a31 = self._a31(self.m_from, self.m_to)
-        self.assertEqual((g["at"], g["atadj"]), ([], []))
+        self.assertEqual((g["at"], g["txpd"]), ([], []))
         self.assertEqual((a31["txval"], a31["camt"]), (D("1500.00"), D("135.00")))
 
     def test_odd_paisa_partial_still_clears(self):
@@ -181,13 +181,66 @@ class AdvanceAdjustmentTests(FourFixesBase):
         self.assertEqual(inv.amount_paid, D("0.00"))
         g, a31 = self._a31(self.m_from, self.m_to)
         self.assertEqual(D(str(g["at"][0]["ad_amt"])), D("1000.00"))
-        self.assertEqual(g["atadj"], [])
+        self.assertEqual(g["txpd"], [])
         self.assertEqual(a31["camt"], self._bal("output_cgst", self.m_from, self.m_to))
 
-    def test_cannot_backdate_into_prior_month(self):
+    def _file(self, d):
+        res = self.client.post("/api/billing/gst/gstr1-filing/", {"period": d.strftime("%Y-%m"), "filed": True,
+                                                                  "confirm": True}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data["filed"])
+
+    def test_filing_flag_requires_confirmation_and_defaults_unfiled(self):
+        res = self.client.get("/api/billing/gst/gstr1-filing/", {"period": self.prev_from.strftime("%Y-%m")})
+        self.assertFalse(res.data["filed"])
+        bad = self.client.post("/api/billing/gst/gstr1-filing/", {"period": self.prev_from.strftime("%Y-%m"),
+                                                                 "filed": True}, format="json")
+        self.assertEqual(bad.status_code, 400)
+
+    def test_application_into_filed_period_rejected_open_prior_period_allowed(self):
         pay = self._advance("1180.00", self.prev_from)
         inv = self._invoice("R17-B1", "1000.00", self.prev_from)
-        res = self.client.post(f"/api/billing/payments/{pay.id}/allocate/",
-                               {"invoice_id": str(inv.id), "date": str(self.prev_to)}, format="json")
+        ok = self.client.post(f"/api/billing/payments/{pay.id}/allocate/",
+                              {"invoice_id": str(inv.id), "date": str(self.prev_to)}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)  # prior month still unfiled -> allowed
+        pay2 = self._advance("1180.00", self.prev_from)
+        inv2 = self._invoice("R17-B2", "1000.00", self.prev_from)
+        self._file(self.prev_from)
+        res = self.client.post(f"/api/billing/payments/{pay2.id}/allocate/",
+                               {"invoice_id": str(inv2.id), "date": str(self.prev_to)}, format="json")
         self.assertEqual(res.status_code, 400)
-        self.assertEqual(AdvanceAdjustment.objects.count(), 0)
+        self.assertEqual(AdvanceAdjustment.objects.filter(payment=pay2).count(), 0)
+
+    def test_same_month_pair_recorded_next_month_before_filing_is_netted(self):
+        pay = self._advance("1180.00", self.prev_from + timedelta(days=2))
+        inv = self._invoice("R17-NM1", "1000.00", self.prev_from + timedelta(days=5))
+        self.assertEqual(self._allocate(pay, inv).status_code, 200)   # recorded today (month 2)
+        adj = AdvanceAdjustment.objects.get(payment=pay)
+        self.assertTrue(adj.netted)
+        self.assertEqual(adj.gstr1_period, self.prev_from)
+        self.assertEqual(adj.recorded_on, self.today)
+        g1, a1 = self._a31(self.prev_from, self.prev_to)
+        g2, a2 = self._a31(self.m_from, self.m_to)
+        self.assertEqual((g1["at"], g1["txpd"], g2["at"], g2["txpd"]), ([], [], [], []))
+        self.assertEqual((a1["txval"], a1["camt"], a1["samt"]), (D("1000.00"), D("90.00"), D("90.00")))
+        self.assertEqual(self._bal("output_cgst", self.prev_from, self.prev_to), D("90.00"))
+        self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), D("0.00"))
+
+    def test_same_month_pair_recorded_after_month1_filed_goes_to_txpd_next_month(self):
+        pay = self._advance("1180.00", self.prev_from + timedelta(days=2))
+        inv = self._invoice("R17-NM2", "1000.00", self.prev_from + timedelta(days=5))
+        g1_before, _ = self._a31(self.prev_from, self.prev_to)
+        self.assertEqual(D(str(g1_before["at"][0]["ad_amt"])), D("1000.00"))   # filed with the advance in 'at'
+        self._file(self.prev_from)
+        self.assertEqual(self._allocate(pay, inv).status_code, 200)
+        adj = AdvanceAdjustment.objects.get(payment=pay)
+        self.assertFalse(adj.netted)
+        self.assertEqual((adj.gstr1_period, adj.date), (self.m_from, self.today))
+        g1, a1 = self._a31(self.prev_from, self.prev_to)
+        self.assertEqual(g1["at"], g1_before["at"])                     # filed month unchanged
+        self.assertEqual(self._bal("output_cgst", self.prev_from, self.prev_to), D("180.00"))
+        g2, a2 = self._a31(self.m_from, self.m_to)
+        self.assertEqual(g2["at"], [])
+        self.assertEqual(D(str(g2["txpd"][0]["ad_amt"])), D("1000.00"))
+        self.assertEqual((a2["txval"], a2["camt"]), (D("-1000.00"), D("-90.00")))
+        self.assertEqual(self._bal("output_cgst", self.m_from, self.m_to), a2["camt"])

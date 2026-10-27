@@ -267,7 +267,7 @@ def compute_gstr1(tenant, from_date, to_date):
             })
 
     from billing.advances import advance_tables
-    at, atadj, at_totals, atadj_totals = advance_tables(tenant, from_date, to_date, seller_state_code)
+    at, txpd, at_totals, txpd_totals = advance_tables(tenant, from_date, to_date, seller_state_code)
 
     hsn_data = []
     for idx, (_key, hval) in enumerate(sorted(hsn_dict.items()), 1):
@@ -293,12 +293,12 @@ def compute_gstr1(tenant, from_date, to_date):
     gstin = tenant.gstin if hasattr(tenant, 'gstin') and tenant.gstin else ''
     fp = datetime.datetime.strptime(str(from_date), '%Y-%m-%d').strftime('%m%Y')
 
-    # 3.1(a) base = taxable invoices − CNs + at − atadj (taxable value and tax)
+    # 3.1(a) base = taxable invoices − CNs + at − txpd (taxable value and tax)
     a31 = {
-        'txval': bucket_totals['taxable']['txval'] + at_totals['txval'] - atadj_totals['txval'],
-        'iamt': bucket_totals['taxable']['iamt'] + at_totals['iamt'] - atadj_totals['iamt'],
-        'camt': bucket_totals['taxable']['camt'] + at_totals['camt'] - atadj_totals['camt'],
-        'samt': bucket_totals['taxable']['samt'] + at_totals['samt'] - atadj_totals['samt'],
+        'txval': bucket_totals['taxable']['txval'] + at_totals['txval'] - txpd_totals['txval'],
+        'iamt': bucket_totals['taxable']['iamt'] + at_totals['iamt'] - txpd_totals['iamt'],
+        'camt': bucket_totals['taxable']['camt'] + at_totals['camt'] - txpd_totals['camt'],
+        'samt': bucket_totals['taxable']['samt'] + at_totals['samt'] - txpd_totals['samt'],
     }
 
     return {
@@ -312,7 +312,7 @@ def compute_gstr1(tenant, from_date, to_date):
         'cdnur': cdnur,
         'hsn_data': hsn_data,
         'at': at,
-        'atadj': atadj,
+        'txpd': txpd,
         'doc_issue': {
             'doc_det': [
                 {

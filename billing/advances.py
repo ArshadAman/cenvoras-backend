@@ -9,6 +9,9 @@ Application (this module, dated on the application date):
     (goods: Dr 2102 gross; Cr AR gross). Partial applications are pro rata; the last one takes
     the exact remainder so the advance clears to the paisa.
 De-application: a mirror entry dated the de-application date. Nothing is deleted.
+Dates: allowed in any period whose GSTR-1 is not marked filed (GSTR1Filing). The accounting date of an
+application follows its GSTR-1 classification (see classify), so GSTR-3B, the Tax Register and the
+Output GST ledgers agree month by month.
 """
 from datetime import date as date_cls
 from decimal import Decimal, ROUND_HALF_UP
@@ -27,6 +30,15 @@ def today_ist():
     from zoneinfo import ZoneInfo
     from django.utils import timezone
     return timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
+
+
+def month_start(d):
+    return d.replace(day=1)
+
+
+def is_gstr1_filed(tenant, d):
+    from billing.models import GSTR1Filing
+    return GSTR1Filing.objects.filter(created_by=tenant, period=month_start(d)).exists()
 
 
 def adjustment_reference(adj_id):
@@ -109,12 +121,29 @@ def _post(adj, sign, on_date, description):
     return True
 
 
-def _check_open_period(on_date):
-    today = today_ist()
-    if on_date > today:
-        raise ValueError('Application date cannot be in the future.')
-    if (on_date.year, on_date.month) != (today.year, today.month):
-        raise ValueError('Application date must be in the current month; earlier months are not rewritten.')
+def _check_open_period(tenant, on_date):
+    if on_date > today_ist():
+        raise ValueError('Date cannot be in the future.')
+    if is_gstr1_filed(tenant, on_date):
+        raise ValueError(f"GSTR-1 for {on_date.strftime('%b %Y')} is marked filed; that period is not rewritten.")
+
+
+def classify(payment, invoice, recorded_on):
+    """
+    Rudra CA rule, on receipt date and invoice date (not the recording date):
+      same period, period unfiled            -> netted (neither at nor txpd); booked in that period
+      invoice period unfiled (advance earlier, already in 'at') -> txpd in the invoice period
+      otherwise (period already filed with the advance in 'at') -> txpd in the recording period (catch-up)
+    Returns (netted, gstr1_period_start, accounting_date).
+    """
+    tenant = payment.created_by
+    r, i = month_start(payment.date), month_start(invoice.invoice_date)
+    eff = max(payment.date, invoice.invoice_date)
+    if r == i and not is_gstr1_filed(tenant, r):
+        return True, r, eff
+    if i > r and not is_gstr1_filed(tenant, i):
+        return False, i, eff
+    return False, month_start(recorded_on), recorded_on
 
 
 @transaction.atomic
@@ -127,7 +156,7 @@ def apply_advance(payment, invoice, amount=None, on_date=None):
     on_date = on_date or today_ist()
     if isinstance(on_date, str):
         on_date = date_cls.fromisoformat(on_date)
-    _check_open_period(on_date)
+    _check_open_period(payment.created_by, on_date)
     if payment.invoice_id:
         raise ValueError('This receipt is already linked to an invoice; it is not an advance.')
     if invoice.status != 'final':
@@ -136,6 +165,8 @@ def apply_advance(payment, invoice, amount=None, on_date=None):
         raise ValueError('Invoice does not belong to this customer.')
     if on_date < payment.date or on_date < invoice.invoice_date:
         raise ValueError('Application date cannot be before the advance or the invoice date.')
+    netted, period, acct_date = classify(payment, invoice, on_date)
+    _check_open_period(payment.created_by, acct_date)
 
     left = unapplied_amount(payment)
     due = invoice_due(invoice)
@@ -158,9 +189,10 @@ def apply_advance(payment, invoice, amount=None, on_date=None):
         taxable = amt - cgst - sgst - igst
 
     adj = AdvanceAdjustment.objects.create(
-        payment=payment, invoice=invoice, date=on_date, gross=amt, taxable=_q(taxable),
-        cgst=_q(cgst), sgst=_q(sgst), igst=_q(igst), rate=split['rate'], created_by=payment.created_by)
-    _post(adj, +1, on_date, f"Advance applied to {invoice.invoice_number}")
+        payment=payment, invoice=invoice, date=acct_date, gross=amt, taxable=_q(taxable),
+        cgst=_q(cgst), sgst=_q(sgst), igst=_q(igst), rate=split['rate'], created_by=payment.created_by,
+        gstr1_period=period, netted=netted, recorded_on=on_date)
+    _post(adj, +1, acct_date, f"Advance applied to {invoice.invoice_number}")
     if not payment.adjusted_on:
         payment.adjusted_on = on_date
         Payment.objects.filter(pk=payment.pk).update(adjusted_on=on_date)
@@ -180,7 +212,7 @@ def reverse_adjustment(adj, on_date=None):
     on_date = on_date or today_ist()
     if isinstance(on_date, str):
         on_date = date_cls.fromisoformat(on_date)
-    _check_open_period(on_date)
+    _check_open_period(adj.created_by, on_date)
     if on_date < adj.date:
         raise ValueError('Reversal date cannot be before the application date.')
     _post(adj, -1, on_date, f"Advance un-applied from {adj.invoice.invoice_number}")
@@ -191,72 +223,80 @@ def reverse_adjustment(adj, on_date=None):
     return adj
 
 
-# ─── GSTR-1 at / atadj (Rudra CA rule) ────────────────────────────
+# ─── GSTR-1 at / txpd (Rudra CA rule) ────────────────────────────
 
 def _in(d, lo, hi):
     return d is not None and lo <= d <= hi
 
 
+def _events(p, split):
+    """(period_start, table, sign, adj) events for one service advance."""
+    ev = []
+    for a in p.adjustments.all():
+        per = a.gstr1_period or month_start(a.date)
+        ev.append((per, 'at' if a.netted else 'txpd', -1 if a.netted else 1, a))
+        if a.reversed_on:
+            rper = month_start(a.reversed_on)
+            if rper == per:
+                ev.append((per, 'at' if a.netted else 'txpd', 1 if a.netted else -1, a))  # cancels
+            else:
+                ev.append((rper, 'at', 1, a))  # un-applied later: advance outstanding again
+    return ev
+
+
 def advance_tables(tenant, from_date, to_date, seller_state_code):
     """
-    Per service advance, for period P = [from_date, to_date]:
-      applied_in_P = applications dated in P minus reversals dated in P (taxable/tax, signed)
-      received in P  -> at = receipt - applied_in_P ; no atadj   (same-period advance+invoice nets out)
-      received before-> applied_in_P > 0 -> atadj ; < 0 (un-applied) -> at again
-    Goods advances never appear. ad_amt is TAXABLE value. Legacy receipts already linked to an
-    invoice (old flow) are plain invoice receipts and are not reported.
-    Returns (at_rows, atadj_rows, at_totals, atadj_totals); rows are flat, see group_for_portal().
+    GSTR-1 Table 11A ('at') and 11B ('txpd') for P = [from_date, to_date], monthly periods.
+      at   = service advances received in P, minus applications netted in P (same period, unfiled),
+             plus later un-applications.
+      txpd = applications classified to P (advance reported in an earlier 'at').
+    Classification is fixed per application when it is recorded (billing.advances.classify).
+    Goods advances never appear. ad_amt is TAXABLE value.
     """
     from billing.models import AdvanceAdjustment, Payment
     from billing.gst_utils import get_pos_state_code
     lo, hi = _d(from_date), _d(to_date)
     zero = lambda: {'txval': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO}
-    at_tot, adj_tot = zero(), zero()
-    at_rows, adj_rows = [], []
+    tots = {'at': zero(), 'txpd': zero()}
+    rows = {'at': [], 'txpd': []}
 
     candidates = set(Payment.objects.filter(created_by=tenant, invoice__isnull=True, customer__isnull=False,
                                             date__gte=lo, date__lte=hi).values_list('id', flat=True))
     adjs = AdvanceAdjustment.objects.filter(created_by=tenant).filter(
-        models_q(date__gte=lo, date__lte=hi) | models_q(reversed_on__gte=lo, reversed_on__lte=hi))
+        models_q(gstr1_period__gte=month_start(lo), gstr1_period__lte=hi) | models_q(date__gte=lo, date__lte=hi)
+        | models_q(reversed_on__gte=lo, reversed_on__lte=hi))
     candidates |= set(adjs.values_list('payment_id', flat=True))
 
-    for p in Payment.objects.filter(id__in=candidates).select_related('customer'):
+    for p in Payment.objects.filter(id__in=candidates).select_related('customer').prefetch_related('adjustments'):
         split = posted_advance_split(p)
         if split['kind'] != 'services':
             continue
-        app = {'taxable': ZERO, 'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO}
-        for a in p.adjustments.all():
-            if _in(a.date, lo, hi):
-                for k in app:
-                    app[k] += getattr(a, k)
-            if _in(a.reversed_on, lo, hi):
-                for k in app:
-                    app[k] -= getattr(a, k)
+        acc = {'at': {'taxable': ZERO, 'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO},
+               'txpd': {'taxable': ZERO, 'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO}}
         if _in(p.date, lo, hi):
-            vals = {k: split[k] - app[k] for k in app}
-            target = 'at'
-        elif any(v > 0 for v in app.values()):
-            vals, target = app, 'atadj'
-        elif any(v < 0 for v in app.values()):
-            vals, target = {k: -v for k, v in app.items()}, 'at'
-        else:
-            continue
-        if vals['taxable'] <= 0:
-            continue
+            for k in acc['at']:
+                acc['at'][k] += split[k]
+        for per, table, sign, a in _events(p, split):
+            if month_start(lo) <= per <= hi:
+                for k in acc[table]:
+                    acc[table][k] += sign * getattr(a, k)
         pos_raw = getattr(p, 'place_of_supply', None) or (p.customer.state if p.customer else None)
         pos = get_pos_state_code(pos_raw, fallback_state=seller_state_code) if pos_raw else seller_state_code
         if split['is_interstate'] and pos == seller_state_code:
             pos = '97'
-        row = {'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA', 'pos': pos, 'rt': float(split['rate']),
-               'ad_amt': float(vals['taxable']), 'camt': float(vals['cgst']), 'samt': float(vals['sgst']),
-               'iamt': float(vals['igst']), 'csamt': 0.0, 'payment_id': str(p.id)}
-        rows, tot = (at_rows, at_tot) if target == 'at' else (adj_rows, adj_tot)
-        rows.append(row)
-        tot['txval'] += vals['taxable']
-        tot['camt'] += vals['cgst']
-        tot['samt'] += vals['sgst']
-        tot['iamt'] += vals['igst']
-    return at_rows, adj_rows, at_tot, adj_tot
+        for table in ('at', 'txpd'):
+            vals = acc[table]
+            if vals['taxable'] <= 0:
+                continue
+            rows[table].append({'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA', 'pos': pos,
+                                'rt': float(split['rate']), 'ad_amt': float(vals['taxable']),
+                                'camt': float(vals['cgst']), 'samt': float(vals['sgst']),
+                                'iamt': float(vals['igst']), 'csamt': 0.0, 'payment_id': str(p.id)})
+            tots[table]['txval'] += vals['taxable']
+            tots[table]['camt'] += vals['cgst']
+            tots[table]['samt'] += vals['sgst']
+            tots[table]['iamt'] += vals['igst']
+    return rows['at'], rows['txpd'], tots['at'], tots['txpd']
 
 
 def group_for_portal(rows):

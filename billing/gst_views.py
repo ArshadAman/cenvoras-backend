@@ -123,7 +123,7 @@ def hsn_summary_report(request):
                 hsn_dict[code]['igst'] -= igst
                 hsn_dict[code]['total_tax'] -= tax
                 hsn_dict[code]['total_value'] -= item.amount
-        # Advances (GSTR-1 at / atadj) so the register ties to 3.1(a) and the Output GST ledgers
+        # Advances (GSTR-1 at / txpd) so the register ties to 3.1(a) and the Output GST ledgers
         if from_date and to_date:
             from billing.advances import advance_tables
             at_rows, adj_rows, _t1, _t2 = advance_tables(tenant, from_date, to_date, seller_state_code)
@@ -522,10 +522,10 @@ def gstr1_json_export(request):
             'b2b': data['hsn_data'],
             'b2c': [],
         },
-        # Offline-tool shape {pos, sply_ty, itms:[{rt, ad_amt(taxable), tax}]}. VERIFY key names
-        # ('atadj' vs API 'txpd') against the current GSTR-1 offline tool schema.
+        # Table 11A 'at' / 11B 'txpd' (Rudra CA). Shape {pos, sply_ty, itms:[{rt, ad_amt(taxable), tax}]}.
+        # VERIFY: GSTN's offline-tool manual names the sections AT/ATADJ; its JSON field tables are images.
         'at': group_for_portal(data['at']),
-        'atadj': group_for_portal(data['atadj']),
+        'txpd': group_for_portal(data['txpd']),
         'doc_issue': data['doc_issue'],
     })
 
@@ -926,3 +926,34 @@ def generate_eway_bill(request):
         'message': 'E-Way Bill generated locally (stub). Connect NIC API for production.',
     }, status=status.HTTP_201_CREATED if created else 200)
 
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def gstr1_filing_status(request):
+    """
+    GSTR-1 filed flag per month (Cenvora does not file returns; the user records that they filed).
+    GET  ?period=YYYY-MM            -> {period, filed, filed_on}
+    POST {period: 'YYYY-MM', filed: true|false, confirm: true}
+    Unfiled by default. Filed periods are not rewritten by advance applications.
+    """
+    import datetime as _dt
+    from billing.models import GSTR1Filing
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    raw = request.query_params.get('period') if request.method == 'GET' else request.data.get('period')
+    try:
+        period = _dt.date.fromisoformat(f"{str(raw)[:7]}-01")
+    except (ValueError, TypeError):
+        return Response({'error': 'period must be YYYY-MM'}, status=400)
+    if request.method == 'POST':
+        if not request.data.get('confirm'):
+            return Response({'error': 'Confirmation required.'}, status=400)
+        if request.data.get('filed', True):
+            from billing.advances import today_ist
+            GSTR1Filing.objects.get_or_create(created_by=tenant, period=period,
+                                              defaults={'filed_on': today_ist(), 'marked_by': request.user})
+        else:
+            GSTR1Filing.objects.filter(created_by=tenant, period=period).delete()
+    row = GSTR1Filing.objects.filter(created_by=tenant, period=period).first()
+    return Response({'period': period.strftime('%Y-%m'), 'filed': bool(row),
+                     'filed_on': str(row.filed_on) if row else None})

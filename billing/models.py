@@ -93,6 +93,10 @@ class AdvanceAdjustment(models.Model):
     igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     reversed_on = models.DateField(null=True, blank=True)
+    # GSTR-1 classification snapshot, fixed when the application is recorded (never recomputed):
+    gstr1_period = models.DateField(null=True, blank=True, help_text="First day of the GSTR-1 period this application belongs to.")
+    netted = models.BooleanField(default=False, help_text="Advance and invoice in the same unfiled period: in neither at nor txpd.")
+    recorded_on = models.DateField(null=True, blank=True, help_text="Date the user recorded the application.")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -102,6 +106,20 @@ class AdvanceAdjustment(models.Model):
     @property
     def tax(self):
         return self.cgst + self.sgst + self.igst
+
+
+class GSTR1Filing(models.Model):
+    """Per-company, per-month 'GSTR-1 filed' flag. No row = unfiled (default). Set from the GSTR-1 page."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='gstr1_filings')
+    period = models.DateField(help_text="First day of the return month.")
+    filed_on = models.DateField()
+    marked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('created_by', 'period')]
 
 
 class Vendor(models.Model):

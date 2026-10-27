@@ -254,9 +254,12 @@ class AdvanceGstR15Tests(FourFixesBase):
         )
         self.assertIn(res.status_code, (200, 201))
         svc.refresh_from_db()
-        self.assertEqual(svc.invoice_id, inv.id)
+        # R17 (Rudra CA): the receipt stays an advance; the application is a separate adjustment.
+        self.assertIsNone(svc.invoice_id)
+        self.assertTrue(svc.adjustments.filter(invoice=inv).exists())
         self.assertIsNotNone(svc.adjusted_on)
         d = str(date.today())
         g1 = compute_gstr1(self.tenant, d, d)
-        self.assertTrue(g1['atadj'])
-        self.assertFalse(any(float(row.get('ad_amt') or 0) == 590 for row in g1['at']))
+        # Same period advance + invoice: reported in neither 'at' nor 'txpd'.
+        self.assertEqual(g1['txpd'], [])
+        self.assertEqual(g1['at'], [])

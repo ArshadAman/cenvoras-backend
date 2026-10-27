@@ -31,7 +31,7 @@ def _customer_gstin(inv):
     return (getattr(inv, 'customer_gstin', None) or '').strip().upper()
 
 
-def compute_gstr1(tenant, from_date, to_date):
+def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
     seller_state_code = get_seller_state_code(tenant)
 
     invoices = SalesInvoice.objects.filter(
@@ -266,61 +266,8 @@ def compute_gstr1(tenant, from_date, to_date):
                 'typ': 'B2CL' if (is_inter and cn_val > Decimal('250000')) else 'B2CS',
             })
 
-    at, atadj = [], []
-    advance_payments = Payment.objects.filter(
-        created_by=tenant,
-        date__gte=from_date,
-        date__lte=to_date,
-        invoice__isnull=True,
-        customer__isnull=False,
-        adjusted_on__isnull=True,
-    ).select_related('customer')
-
-    at_totals = {'txval': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO}
-    for p in advance_payments:
-        split = advance_tax_split(p, seller_state_code)
-        if split['kind'] == 'goods' or Decimal(str(p.amount or 0)) <= 0:
-            continue
-        at.append({
-            'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA',
-            'pos': split['pos'],
-            'rt': float(split['rate']),
-            'ad_amt': float(p.amount),
-            'camt': float(split['cgst']),
-            'samt': float(split['sgst']),
-            'iamt': float(split['igst']),
-            'csamt': 0.0,
-        })
-        at_totals['txval'] += split['taxable']
-        at_totals['iamt'] += split['igst']
-        at_totals['camt'] += split['cgst']
-        at_totals['samt'] += split['sgst']
-
-    adjusted = Payment.objects.filter(
-        created_by=tenant,
-        adjusted_on__gte=from_date,
-        adjusted_on__lte=to_date,
-        customer__isnull=False,
-    ).select_related('customer')
-    atadj_totals = {'txval': ZERO, 'iamt': ZERO, 'camt': ZERO, 'samt': ZERO}
-    for p in adjusted:
-        split = advance_tax_split(p, seller_state_code)
-        if split['kind'] == 'goods' or split['tax'] <= 0:
-            continue
-        atadj.append({
-            'sply_ty': 'INTER' if split['is_interstate'] else 'INTRA',
-            'pos': split['pos'],
-            'rt': float(split['rate']),
-            'ad_amt': float(p.amount),
-            'camt': float(split['cgst']),
-            'samt': float(split['sgst']),
-            'iamt': float(split['igst']),
-            'csamt': 0.0,
-        })
-        atadj_totals['txval'] += split['taxable']
-        atadj_totals['iamt'] += split['igst']
-        atadj_totals['camt'] += split['cgst']
-        atadj_totals['samt'] += split['sgst']
+    from billing.advances import advance_tables
+    at, txpd, at_totals, txpd_totals = advance_tables(tenant, from_date, to_date, seller_state_code)
 
     hsn_data = []
     for idx, (_key, hval) in enumerate(sorted(hsn_dict.items()), 1):
@@ -346,13 +293,25 @@ def compute_gstr1(tenant, from_date, to_date):
     gstin = tenant.gstin if hasattr(tenant, 'gstin') and tenant.gstin else ''
     fp = datetime.datetime.strptime(str(from_date), '%Y-%m-%d').strftime('%m%Y')
 
-    # 3.1(a) base = taxable invoices − CNs + at − atadj (taxable value and tax)
+    # 3.1(a) base = taxable invoices − CNs + at − txpd (taxable value and tax)
     a31 = {
-        'txval': bucket_totals['taxable']['txval'] + at_totals['txval'] - atadj_totals['txval'],
-        'iamt': bucket_totals['taxable']['iamt'] + at_totals['iamt'] - atadj_totals['iamt'],
-        'camt': bucket_totals['taxable']['camt'] + at_totals['camt'] - atadj_totals['camt'],
-        'samt': bucket_totals['taxable']['samt'] + at_totals['samt'] - atadj_totals['samt'],
+        'txval': bucket_totals['taxable']['txval'] + at_totals['txval'] - txpd_totals['txval'],
+        'iamt': bucket_totals['taxable']['iamt'] + at_totals['iamt'] - txpd_totals['iamt'],
+        'camt': bucket_totals['taxable']['camt'] + at_totals['camt'] - txpd_totals['camt'],
+        'samt': bucket_totals['taxable']['samt'] + at_totals['samt'] - txpd_totals['samt'],
     }
+
+    # Never a negative 3.1(a) (Rudra CA, VERIFY): floor each head at 0 and carry the unadjusted
+    # advance adjustment into the next month(s). GSTR-1 txpd still goes out in full.
+    a31_raw = dict(a31)
+    carry_in = {k: ZERO for k in a31}
+    carry_from = None
+    if apply_carry:
+        from billing.advances import carry_into
+        carry_in, carry_from = carry_into(tenant, from_date)
+    if apply_carry:
+        a31 = {k: max(a31_raw[k] - carry_in[k], ZERO) for k in a31_raw}
+    carry_out = {k: max(carry_in[k] - a31_raw[k], ZERO) for k in a31_raw}
 
     return {
         'gstin': gstin,
@@ -365,7 +324,7 @@ def compute_gstr1(tenant, from_date, to_date):
         'cdnur': cdnur,
         'hsn_data': hsn_data,
         'at': at,
-        'atadj': atadj,
+        'txpd': txpd,
         'doc_issue': {
             'doc_det': [
                 {
@@ -390,6 +349,10 @@ def compute_gstr1(tenant, from_date, to_date):
         },
         'bucket_totals': bucket_totals,
         'table_3_1_a': a31,
+        'table_3_1_a_raw': a31_raw,
+        'carry_forward_in': carry_in,
+        'carry_forward_from': carry_from,
+        'carry_forward_out': carry_out,
         'table_3_2': table32,
         'invoices': invoices,
         'credit_notes': credit_notes,

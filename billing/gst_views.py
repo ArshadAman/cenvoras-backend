@@ -123,6 +123,26 @@ def hsn_summary_report(request):
                 hsn_dict[code]['igst'] -= igst
                 hsn_dict[code]['total_tax'] -= tax
                 hsn_dict[code]['total_value'] -= item.amount
+        # Advances (GSTR-1 at / txpd) so the register ties to 3.1(a) and the Output GST ledgers
+        if from_date and to_date:
+            from billing.advances import advance_tables
+            at_rows, adj_rows, _t1, _t2 = advance_tables(tenant, from_date, to_date, seller_state_code)
+            for sign, rows, label in ((1, at_rows, 'advance'), (-1, adj_rows, 'advance_adjustment')):
+                for r in rows:
+                    tx = Decimal(str(r['ad_amt'])) * sign
+                    c, s_, i = (Decimal(str(r[k])) * sign for k in ('camt', 'samt', 'iamt'))
+                    results.append({
+                        'id': r['payment_id'], 'invoice_number': 'Advance' if sign > 0 else 'Advance adjusted',
+                        'date': str(to_date), 'party_name': '', 'gstin': '',
+                        'taxable_value': float(tx), 'cgst': float(c), 'sgst': float(s_), 'igst': float(i),
+                        'total_tax': float(c + s_ + i), 'total_amount': float(tx + c + s_ + i), 'doc_type': label,
+                    })
+                    totals['taxable'] += tx
+                    totals['cgst'] += c
+                    totals['sgst'] += s_
+                    totals['igst'] += i
+                    totals['total_tax'] += c + s_ + i
+                    totals['total'] += tx + c + s_ + i
     else:
         bills = PurchaseBill.objects.filter(
             created_by=tenant
@@ -487,8 +507,9 @@ def gstr1_json_export(request):
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
     from billing.gstr1_compute import compute_gstr1
+    from billing.advances import group_for_portal
     data = compute_gstr1(tenant, from_date, to_date)
-    return Response({
+    payload = {
         'gstin': data['gstin'],
         'fp': data['fp'],
         'b2b': data['b2b'],
@@ -501,10 +522,84 @@ def gstr1_json_export(request):
             'b2b': data['hsn_data'],
             'b2c': [],
         },
-        'at': data['at'],
-        'atadj': data['atadj'],
         'doc_issue': data['doc_issue'],
-    })
+    }
+    from django.conf import settings as dj_settings
+    has_adv = bool(data['at'] or data['txpd'])
+    if getattr(dj_settings, 'GSTR1_ADVANCES_JSON_ENABLED', False):
+        # Table 11A 'at' / 11B (key from settings, default 'txpd'). VERIFY against the offline-tool schema.
+        payload['at'] = group_for_portal(data['at'])
+        payload[getattr(dj_settings, 'GSTR1_ADVANCE_ADJ_JSON_KEY', 'txpd')] = group_for_portal(data['txpd'])
+        note = None
+    else:
+        note = ('Advances: report via the GSTN offline tool AT/ATADJ sheets (download the CSVs below).'
+                if has_adv else None)
+    # Underscore key = Cenvora metadata; the frontend strips it before downloading the JSON.
+    payload['_cenvora'] = {'advances_in_json': getattr(dj_settings, 'GSTR1_ADVANCES_JSON_ENABLED', False),
+                           'advances_note': note, 'has_advances': has_adv}
+    return Response(payload)
+
+
+from billing.advances import is_qrmp as _is_qrmp, QRMP_WARNING as _QRMP_WARNING  # noqa: E402
+
+
+def _pos_label(pos):
+    from billing.gst_utils import CODE_TO_STATE_NAME
+    pos = str(pos).zfill(2)
+    return f"{pos}-{CODE_TO_STATE_NAME.get(pos, '')}".rstrip('-')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def gstr1_advances_csv(request):
+    """
+    GSTR-1 Table 11A / 11B rows laid out like the GSTN offline tool AT / ATADJ sheets.
+    ?from=&to=&sheet=at|atadj. VERIFY: column headers follow the offline-tool Excel template as we
+    understand it; the official field tables could not be read. Amounts are TAXABLE value (Rudra CA).
+    """
+    import csv
+    from django.http import HttpResponse
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    from_date, to_date = request.query_params.get('from'), request.query_params.get('to')
+    sheet = (request.query_params.get('sheet') or 'at').lower()
+    if not from_date or not to_date or sheet not in ('at', 'atadj'):
+        return Response({'error': 'from, to and sheet=at|atadj are required'}, status=400)
+    from billing.gstr1_compute import compute_gstr1
+    data = compute_gstr1(tenant, from_date, to_date)
+    rows = data['at'] if sheet == 'at' else data['txpd']
+    agg = {}
+    for r in rows:
+        key = (r['pos'], r['rt'])
+        agg[key] = agg.get(key, Decimal('0')) + Decimal(str(r['ad_amt']))
+    resp = HttpResponse(content_type='text/csv')
+    resp['Content-Disposition'] = f'attachment; filename="GSTR1_{sheet.upper()}_{from_date}_{to_date}.csv"'
+    w = csv.writer(resp)
+    amount_col = 'Gross Advance Received' if sheet == 'at' else 'Gross Advance Adjusted'
+    w.writerow(['Place Of Supply', 'Applicable % of Tax Rate', 'Rate', amount_col, 'Cess Amount'])
+    for (pos, rt), amt in sorted(agg.items()):
+        w.writerow([_pos_label(pos), '', f'{rt:g}', f'{amt.quantize(Decimal("0.01"))}', '0.00'])
+    w.writerow([])
+    w.writerow(['# VERIFY: columns per GSTN offline tool AT/ATADJ sheets; amounts are taxable value '
+                '(excluding tax), as per Rudra CA. Generated by Cenvora.'])
+    return resp
+
+
+def _advance_carry_notes(g1):
+    """3.1(a) is floored at 0; show what advance adjustment is carried in/out (VERIFY with CA)."""
+    out = []
+    cin, cout = g1.get('carry_forward_in') or {}, g1.get('carry_forward_out') or {}
+    tax = lambda d: sum((Decimal(d.get(k, 0)) for k in ('iamt', 'camt', 'samt')), Decimal('0'))
+    if any(Decimal(v) > 0 for v in cin.values()):
+        out.append({'code': 'advance_adjustment_carried_in',
+                    'message': f"₹{Decimal(cin.get('txval', 0)):,.2f} of advance adjustment carried forward from "
+                               f"{g1.get('carry_forward_from') or 'an earlier month'} (tax ₹{tax(cin):,.2f}).",
+                    'amounts': {k: float(v) for k, v in cin.items()}})
+    if any(Decimal(v) > 0 for v in cout.values()):
+        out.append({'code': 'advance_adjustment_carried_out',
+                    'message': f"3.1(a) floored at 0: ₹{Decimal(cout.get('txval', 0)):,.2f} of advance adjustment "
+                               f"(tax ₹{tax(cout):,.2f}) is carried forward to next month.",
+                    'amounts': {k: float(v) for k, v in cout.items()}})
+    return out
 
 
 # ─── GSTR-3B Summary Report ──────────────────────────────────
@@ -627,7 +722,7 @@ def gstr3b_summary(request):
                     'samt': float(excess_sgst),
                 },
             }] if excess_total > 0 else []
-        ),
+        ) + _advance_carry_notes(g1),
         'table_3_1': {
             'outward_taxable': {
                 'desc': '(a) Outward taxable supplies (other than zero-rated, nil and exempted)',
@@ -903,3 +998,36 @@ def generate_eway_bill(request):
         'message': 'E-Way Bill generated locally (stub). Connect NIC API for production.',
     }, status=status.HTTP_201_CREATED if created else 200)
 
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def gstr1_filing_status(request):
+    """
+    GSTR-1 filed flag per month (Cenvora does not file returns; the user records that they filed).
+    GET  ?period=YYYY-MM            -> {period, filed, filed_on}
+    POST {period: 'YYYY-MM', filed: true|false, confirm: true}
+    Unfiled by default. Filed periods are not rewritten by advance applications.
+    """
+    import datetime as _dt
+    from billing.models import GSTR1Filing
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    raw = request.query_params.get('period') if request.method == 'GET' else request.data.get('period')
+    try:
+        period = _dt.date.fromisoformat(f"{str(raw)[:7]}-01")
+    except (ValueError, TypeError):
+        return Response({'error': 'period must be YYYY-MM'}, status=400)
+    if request.method == 'POST':
+        if not request.data.get('confirm'):
+            return Response({'error': 'Confirmation required.'}, status=400)
+        if request.data.get('filed', True):
+            from billing.advances import today_ist
+            GSTR1Filing.objects.get_or_create(created_by=tenant, period=period,
+                                              defaults={'filed_on': today_ist(), 'marked_by': request.user})
+        else:
+            GSTR1Filing.objects.filter(created_by=tenant, period=period).delete()
+    row = GSTR1Filing.objects.filter(created_by=tenant, period=period).first()
+    return Response({'period': period.strftime('%Y-%m'), 'filed': bool(row),
+                     'filed_on': str(row.filed_on) if row else None,
+                     # No filing-frequency setting exists yet; QRMP is read from a future attribute only.
+                     'qrmp': _is_qrmp(tenant), 'qrmp_warning': _QRMP_WARNING if _is_qrmp(tenant) else None})

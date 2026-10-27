@@ -54,6 +54,7 @@ urlpatterns = [
     # Payments
     path('payments/', payment_views.payment_list_create, name='payment_list_create'),
     path('payments/<uuid:pk>/', payment_views.payment_detail, name='payment_detail'),
+    path('payments/adjustments/<uuid:pk>/reverse/', payment_views.reverse_advance_adjustment, name='reverse_advance_adjustment'),
     path('payments/<uuid:pk>/allocate/', payment_views.allocate_existing_payment, name='allocate_existing_payment'),
     
     # Reports
@@ -92,6 +93,8 @@ urlpatterns = [
     path('gst/hsn-summary/', gst_views.hsn_summary_report, name='hsn_summary_report'),
     path('gst/tax-register/', gst_views.tax_register, name='tax_register'),
     path('gst/tax-register/<uuid:invoice_id>/', gst_views.tax_register_invoice_detail, name='tax_register_invoice_detail'),
+    path('gst/gstr1-advances-csv/', gst_views.gstr1_advances_csv, name='gstr1_advances_csv'),
+    path('gst/gstr1-filing/', gst_views.gstr1_filing_status, name='gstr1_filing_status'),
     path('gst/gstr1-export/', gst_views.gstr1_json_export, name='gstr1_json_export'),
     path('gst/gstr3b/', gst_views.gstr3b_summary, name='gstr3b_summary'),
     path('gst/gstr-3b/', gst_views.gstr3b_summary, name='gstr3b_summary_alias'),

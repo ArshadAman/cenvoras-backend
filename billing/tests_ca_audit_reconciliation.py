@@ -364,7 +364,8 @@ class CAAuditReconciliationTests(TestCase):
             "amount": "5000.00",
             "date": str(date.today()),
             "mode": "bank_transfer",
-            "auto_allocate": True
+            "auto_allocate": True,
+            "supply_kind": "goods",  # R18: remainder kept as advance must be classified
         }, format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
 

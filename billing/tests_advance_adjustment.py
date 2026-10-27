@@ -33,7 +33,8 @@ class AdvanceAdjustmentTests(FourFixesBase):
     def _advance(self, amount, on, kind="services", mode="upi"):
         res = self.client.post("/api/billing/payments/", {
             "customer": str(self.cust.id), "date": str(on), "amount": str(amount), "mode": mode,
-            "supply_kind": kind, "auto_allocate": False, "notes": "Advance"}, format="json")
+            "supply_kind": kind, "auto_allocate": False, "notes": "Advance",
+            "gst_rate": "18", "place_of_supply": "Karnataka"}, format="json")
         self.assertEqual(res.status_code, 201, res.data)
         return Payment.objects.get(pk=res.data["id"])
 

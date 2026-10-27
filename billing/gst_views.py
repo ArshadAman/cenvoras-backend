@@ -493,6 +493,15 @@ def tax_register_invoice_detail(request, invoice_id):
 
 # ─── GSTR-1 JSON Export ──────────────────────────────────────
 
+def _adv_rows(rows):
+    keep = ('sply_ty', 'pos', 'rt', 'ad_amt', 'iamt', 'camt', 'samt', 'csamt')
+    return [{**{k: r[k] for k in keep}, 'pos_label': _pos_label(r['pos'])} for r in rows]
+
+
+def _adv_total(rows):
+    return {k: round(sum(float(r[k]) for r in rows), 2) for k in ('ad_amt', 'iamt', 'camt', 'samt')}
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def gstr1_json_export(request):
@@ -536,7 +545,11 @@ def gstr1_json_export(request):
                 if has_adv else None)
     # Underscore key = Cenvora metadata; the frontend strips it before downloading the JSON.
     payload['_cenvora'] = {'advances_in_json': getattr(dj_settings, 'GSTR1_ADVANCES_JSON_ENABLED', False),
-                           'advances_note': note, 'has_advances': has_adv}
+                           'advances_note': note, 'has_advances': has_adv,
+                           # R18 P0-B: on-screen Table 11A/11B (taxable value), shown even when empty.
+                           'advances': {'at': _adv_rows(data['at']), 'txpd': _adv_rows(data['txpd']),
+                                        'at_total': _adv_total(data['at']),
+                                        'txpd_total': _adv_total(data['txpd'])}}
     return Response(payload)
 
 

@@ -69,6 +69,13 @@ class Payment(models.Model):
         blank=True,
         help_text="Set when an advance is allocated to an invoice (GSTR-1 atadj).",
     )
+    # R18 (Rudra CA): service-advance classification confirmed by the user, and the Rule 50 receipt voucher.
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True,
+                                   help_text="Service advance GST rate (18% when it cannot be determined, Rule 50 proviso).")
+    place_of_supply = models.CharField(max_length=50, blank=True, default='',
+                                       help_text="Service advance POS state; 'UNKNOWN' = treated as inter-state (IGST).")
+    receipt_voucher_number = models.CharField(max_length=50, blank=True, default='',
+                                              help_text="Rule 50 receipt voucher number (service advances).")
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

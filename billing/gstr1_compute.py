@@ -5,7 +5,7 @@ from decimal import Decimal
 import datetime
 import re
 
-from billing.gst_rules import EXPORT_TREATMENTS, section34_deadline, advance_tax_split, classify_outward_supply, customer_pos
+from billing.gst_rules import EXPORT_TREATMENTS, cn_time_bar, section34_deadline, advance_tax_split, classify_outward_supply, customer_pos
 from billing.gst_utils import (
     calculate_item_tax_breakup,
     credit_note_tax_breakup,
@@ -323,11 +323,11 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         bucket = classify_outward_supply(orig_inv)
         clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
         deadline = section34_deadline(orig_inv.invoice_date)
-        if cn.date > deadline:
-            # Rudra CA: a CN dated after the s.34(2) deadline reduces GST nowhere (GSTR-1 tables, Table 8, 3B).
+        bar = cn_time_bar(tenant, orig_inv.invoice_date, cn.date)
+        if bar:
+            # Rudra CA: a time-barred CN reduces GST nowhere (GSTR-1 tables, Table 8, 3B).
             cn_warnings.append({'code': 'cn_after_s34', 'message': (
-                f"{clean_cn_number} excluded from GST returns: dated after the s.34(2) deadline "
-                f"{deadline.isoformat()} for invoice {orig_inv.invoice_number}. Re-issue it as a credit note "
+                f"{clean_cn_number} excluded from GST returns (s.34(2)): {bar}. Re-issue it as a credit note "
                 f"without GST.")})
             continue
         cn_tax = cn_cgst + cn_sgst + cn_igst

@@ -92,14 +92,14 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         if not items:
             raise serializers.ValidationError({'items': 'At least one item is required.'})
         # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
-        from billing.gst_rules import section34_deadline
+        from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
         _nd = attrs.get('date') or getattr(self.instance, 'date', None)
-        _dl = section34_deadline(invoice.invoice_date)
-        time_barred = bool(_nd and _nd > _dl)
+        bar_reason = cn_time_bar(invoice.created_by, invoice.invoice_date, _nd)
+        time_barred = bool(bar_reason)
         without_gst = bool(attrs.pop('without_gst', False))
         if without_gst and not time_barred:
             raise serializers.ValidationError({'without_gst': (
-                f"A credit note without GST is only for time-barred notes (after {_dl.isoformat()}).")})
+                "A credit note without GST is only for time-barred credit notes (s.34(2)); this one is in time.")})
         if without_gst:
             for it in items:
                 it['tax'] = Decimal('0')
@@ -108,11 +108,14 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'code': 'cn_time_barred',
                 'section34': (
-                    f"GST can't be reduced: the s.34(2) deadline for invoice {invoice.invoice_number} was "
-                    f"{_dl.isoformat()}. Issue it as 'Credit note without GST (time-barred under s.34)'? "
+                    f"GST can't be reduced on invoice {invoice.invoice_number} (s.34(2)): {bar_reason}. Issue it as 'Credit note without GST (time-barred under s.34)'? "
                     f"It will reduce the customer balance and sales value with no output-tax reversal."),
                 'offer_without_gst': True,
             })
+        if not without_gst:
+            cap_errors = cn_tax_cap_errors(invoice, items)
+            if cap_errors:
+                raise serializers.ValidationError({'code': 'cn_tax_cap', 'tax': cap_errors})
         remaining = remaining_invoice_returns(invoice)
         this_taxable = Decimal('0.00')
         this_total = Decimal('0.00')

@@ -173,14 +173,13 @@ class Gstr1CnFloorCarryTests(_G1Helpers, FourFixesBase):
         self.assertEqual(self.g1(2026, 10)['nil'][0]['nil_amt'], 2500.0)
 
     def test_carry_blocked_after_s34_deadline(self):
-        # FY 2024-25 invoice -> s.34(2) deadline 30 Nov 2025.
+        # R23: a 20 Nov 2025 CN on a FY 2024-25 invoice is itself time-barred (after 31 Oct): not netted.
         old = self.inv(self.od, "11800.00", price="10000.00", d=date(2024, 6, 1))
         self.inv(self.od, "1180.00", price="1000.00", d=date(2025, 11, 5))
         self.cn(old, "3000.00", d=date(2025, 11, 20))
-        self.inv(self.od, "5900.00", price="5000.00", d=date(2025, 12, 5))
-        dec = self.g1(2025, 12)
-        self.assertEqual(dec['b2cs'][0]['txval'], 5000.0)
-        self.assertTrue(any(w['code'] == 'cn_carry_expired' for w in dec['cn_warnings']))
+        nov = self.g1(2025, 11)
+        self.assertEqual(nov['b2cs'][0]['txval'], 1000.0)
+        self.assertTrue(any(w['code'] == 'cn_after_s34' for w in nov['cn_warnings']))
 
     def test_cn_dated_after_s34_deadline_not_netted(self):
         old = self.inv(self.od, "11800.00", price="10000.00", d=date(2024, 6, 1))
@@ -227,6 +226,7 @@ class Gstr1S34RudraR22Tests(_G1Helpers, FourFixesBase):
         old = self.inv(self.od, "11800.00", price="10000.00", d=date(2024, 6, 1))   # deadline 30 Nov 2025
         self.inv(self.od, "1180.00", price="1000.00", d=date(2025, 9, 5))
         self.cn(old, "3000.00", d=date(2025, 9, 20))                                # 2,000 excess carried
+        self._file(2025, 9, date(2025, 10, 11))  # R23: the CN's own period must be filed by 30 Nov
         self.inv(self.od, "5900.00", price="5000.00", d=date(2025, 10, 5))
 
     def _file(self, y, m, on):
@@ -331,3 +331,78 @@ class Gstr1S34RudraR22Tests(_G1Helpers, FourFixesBase):
         csv_res = self.client.get("/api/billing/gst/gstr1-advances-csv/?from=2026-09-01&to=2026-09-30&sheet=nil")
         body = csv_res.content.decode()
         self.assertIn('Intra-State supplies to unregistered persons,9000.00,0.00,0.00', body)
+
+
+class CnTimeBarAndTaxCapR23Tests(_G1Helpers, FourFixesBase):
+    """Rudra CA final changes: prior-FY time bar (31 Oct / 30 Sep + filed by 30 Nov) and s.34 tax cap."""
+
+    def _file(self, y, m, on):
+        from billing.models import GSTR1Filing
+        GSTR1Filing.objects.create(created_by=self.tenant, period=date(y, m, 1), filed_on=on)
+
+    def test_rule_monthly(self):
+        from billing.gst_rules import cn_time_bar
+        inv_d = date(2024, 6, 1)  # FY 2024-25
+        self.assertIsNotNone(cn_time_bar(self.tenant, inv_d, date(2025, 11, 15)))
+        # 31 Oct 2025 is OK if October is filed by 30 Nov
+        self._file(2025, 10, date(2025, 11, 11))
+        self.assertIsNone(cn_time_bar(self.tenant, inv_d, date(2025, 10, 31)))
+
+    def test_rule_october_filed_late_or_never(self):
+        from billing.gst_rules import cn_time_bar
+        inv_d = date(2024, 6, 1)
+        self.assertIn('not filed', cn_time_bar(self.tenant, inv_d, date(2025, 10, 31)))
+        self._file(2025, 10, date(2025, 12, 1))
+        self.assertIn('after 30 Nov', cn_time_bar(self.tenant, inv_d, date(2025, 10, 31)))
+
+    def test_rule_current_fy_unaffected(self):
+        from billing.gst_rules import cn_time_bar
+        self.assertIsNone(cn_time_bar(self.tenant, date(2025, 4, 1), date(2026, 3, 31)))
+
+    def test_rule_qrmp_sep30(self):
+        from billing.gst_rules import cn_time_bar
+        self.tenant.gst_filing_frequency = 'qrmp'
+        self.assertIsNotNone(cn_time_bar(self.tenant, date(2024, 6, 1), date(2025, 10, 5)))
+        self._file(2025, 9, date(2025, 10, 13))
+        self.assertIsNone(cn_time_bar(self.tenant, date(2024, 6, 1), date(2025, 9, 30)))
+
+    def _post(self, inv, price="1000.00", tax="18.00", d=None, qty=1):
+        payload = {"date": str(d or date.today()), "original_invoice": str(inv.id), "customer": str(inv.customer_id),
+                   "reason": "discount", "total_amount": "0",
+                   "items": [{"product": str(self.product.id), "quantity": qty, "price": price, "tax": tax,
+                              "amount": "0"}]}
+        return self.client.post("/api/billing/credit-notes/", payload, format="json")
+
+    def _inv2(self, tax="18"):
+        self.n += 1
+        inv = SalesInvoice.objects.create(customer=self.customer, customer_name="KA Buyer", invoice_number=f"INV-C{self.n}",
+                                          invoice_date=date.today(), total_amount=Decimal("1180.00"), created_by=self.tenant)
+        SalesInvoiceItem.objects.create(sales_invoice=inv, product=self.product, hsn_sac_code="847130", quantity=2,
+                                        price=Decimal("500.00"), tax=Decimal(tax),
+                                        amount=Decimal("1180.00") if tax != "0" else Decimal("1000.00"))
+        return inv
+
+    def test_taxed_cn_on_zero_tax_invoice_rejected(self):
+        res = self._post(self._inv2(tax="0"), price="500.00")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("This invoice carried no GST; the credit note can't carry GST", str(res.data))
+        self.assertFalse(CreditNote.objects.exists())
+
+    def test_cn_tax_capped_by_remaining_invoice_tax(self):
+        inv = self._inv2()
+        self.assertEqual(self._post(inv, price="500.00").status_code, 201)
+        res = self._post(inv, price="600.00")       # 108 CGST+SGST > 90 left
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn('cn_tax_cap', str(res.data))
+        self.assertIn('CGST at 18%', str(res.data))
+
+    def test_cn_rate_not_on_invoice_rejected(self):
+        res = self._post(self._inv2(), price="100.00", tax="28.00")
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn('at 28%', str(res.data))
+
+    def test_15_nov_cn_on_prior_fy_invoice_offers_without_gst(self):
+        old = self.inv(self.customer, "11800.00", price="10000.00", d=date(2024, 6, 1))
+        res = self._post(old, d=date(2025, 11, 15))
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn('offer_without_gst', str(res.data))

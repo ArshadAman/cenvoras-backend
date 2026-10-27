@@ -47,8 +47,13 @@ class CreditNote(models.Model):
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)  # tenant (owner)
+    created_at = models.DateTimeField(auto_now_add=True)  # entry time (audit), separate from `date`
+    # R21 (Rudra CA): who actually keyed the CN (staff user), for the back-dated-entry audit trail.
+    entered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='+')
+    # R21: did this CN put goods back into stock? None = created before this field (old code always did).
+    stock_restored = models.BooleanField(null=True, blank=True, default=None)
 
     class Meta:
         unique_together = [['created_by', 'credit_note_number']]

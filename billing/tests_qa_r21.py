@@ -141,3 +141,86 @@ class R21CreditNoteDateQtyTests(FourFixesBase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, stock0)  # part-quantity credit does not move stock
         self.assertIn('2 decimal', str(self._post(qty="0.555", reason="discount").data))
+
+
+class R21CnStockAndBackdateTests(R21CreditNoteDateQtyTests):
+    """Rudra CA on #192: only Goods Returned / Defective move stock; back-dated flag; audit fields."""
+
+    def _stock(self):
+        self.product.refresh_from_db()
+        return self.product.stock
+
+    def _no_stock(self, reason):
+        if True:
+            s0 = self._stock()
+            res = self._post(qty=1, reason=reason)
+            self.assertEqual(res.status_code, 201, res.data)
+            self.assertEqual(self._stock(), s0, reason)
+            self.assertIs(CreditNote.objects.get(pk=res.data['id']).stock_restored, False)
+
+    def test_discount_never_touches_stock(self):
+        self._no_stock('discount')
+
+    def test_rate_diff_never_touches_stock(self):
+        self._no_stock('rate_diff')
+
+    def test_other_never_touches_stock(self):
+        self._no_stock('other')
+
+    def test_returned_and_defective_restore_stock(self):
+        s0 = self._stock()
+        res = self._post(qty=1, reason='return')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(self._stock(), s0 + 1)
+        res = self._post(qty=1, reason='defective')
+        self.assertEqual(self._stock(), s0 + 2)
+        self.assertIs(CreditNote.objects.get(pk=res.data['id']).stock_restored, True)
+
+    def test_back_dated_flag_and_audit_fields(self):
+        res = self._post(qty=1, reason='discount', d=date.today() - timedelta(days=1))
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertIn('Back-dated entry', res.data['back_dated']['message'])
+        cn = CreditNote.objects.get(pk=res.data['id'])
+        self.assertEqual(cn.entered_by_id, self.tenant.id)
+        self.assertNotEqual(cn.created_at.date(), cn.date)
+        self.assertTrue(res.data['entered_by_name'])
+        res = self._post(qty=1, reason='discount')
+        self.assertIsNone(res.data['back_dated'])
+
+
+class ListCnStockRestoresCommandTests(R21CreditNoteDateQtyTests):
+    def test_lists_only_value_cns_that_restored_stock_and_writes_nothing(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from billing.models_returns import CreditNoteItem
+
+        def cn(num, reason, restored):
+            c = CreditNote.objects.create(credit_note_number=num, date=date.today(), original_invoice=self.inv,
+                                          customer=self.customer, reason=reason, total_amount=Decimal("1180"),
+                                          created_by=self.tenant, stock_restored=restored)
+            CreditNoteItem.objects.create(credit_note=c, product=self.product, quantity=1, price=Decimal("1000"),
+                                          tax=Decimal("18"), amount=Decimal("1180"))
+        cn("CN-LEG", "discount", None)      # pre-R21: inferred restore
+        cn("CN-REC", "rate_diff", True)     # recorded restore
+        cn("CN-OK", "discount", False)      # correct: no restore
+        cn("CN-RET", "return", None)        # goods return: fine
+        out = StringIO()
+        with CaptureQueriesContext(connection) as ctx:
+            call_command('list_cn_stock_restores', stdout=out)
+        text = out.getvalue()
+        self.assertIn('CN-LEG', text)
+        self.assertIn('CN-REC', text)
+        self.assertNotIn('CN-OK', text)
+        self.assertNotIn('CN-RET', text)
+        self.assertIn('inferred', text)
+        self.assertIn('READ-ONLY', text)
+        writes = [q['sql'] for q in ctx.captured_queries
+                  if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))]
+        self.assertEqual(writes, [])
+
+    def test_no_apply_flag(self):
+        from django.core.management import call_command, CommandError
+        with self.assertRaises((CommandError, SystemExit, TypeError)):
+            call_command('list_cn_stock_restores', '--apply')

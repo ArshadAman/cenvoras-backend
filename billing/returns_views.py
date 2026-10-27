@@ -25,6 +25,9 @@ class CreditNoteItemSerializer(serializers.ModelSerializer):
                   'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
 
 
+STOCK_RETURN_REASONS = ('return', 'defective')
+
+
 class CreditNoteSerializer(serializers.ModelSerializer):
     items = CreditNoteItemSerializer(many=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
@@ -32,15 +35,18 @@ class CreditNoteSerializer(serializers.ModelSerializer):
     tax_breakup = serializers.SerializerMethodField()
     section34_warning = serializers.SerializerMethodField()
     without_gst = serializers.BooleanField(write_only=True, required=False, default=False)
+    back_dated = serializers.SerializerMethodField()
+    entered_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = CreditNote
         fields = ['id', 'credit_note_number', 'date', 'original_invoice', 'original_invoice_number',
                   'customer', 'customer_name', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items', 'tax_breakup',
-                  'section34_warning', 'gst_time_barred', 'without_gst']
+                  'section34_warning', 'gst_time_barred', 'without_gst', 'back_dated', 'entered_by_name',
+                  'stock_restored']
         read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at', 'section34_warning',
-                            'gst_time_barred']
+                            'gst_time_barred', 'stock_restored']
         extra_kwargs = {
             'original_invoice': {'required': True, 'allow_null': False},
             'date': {'required': False},  # R21: defaults to today (IST)
@@ -61,6 +67,24 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             ],
             'totals': {k: m(v) for k, v in brk['totals'].items()},
         }
+
+    def get_back_dated(self, obj):
+        """R21 (Rudra CA): non-blocking flag when the CN date is before the day it was entered (IST)."""
+        if not obj.created_at or not obj.date:
+            return None
+        from django.utils import timezone
+        entered = timezone.localtime(obj.created_at).date()
+        if obj.date < entered:
+            return {'entered_on': entered.isoformat(),
+                    'message': f"Back-dated entry: dated {obj.date.isoformat()}, entered on {entered.isoformat()}."}
+        return None
+
+    def get_entered_by_name(self, obj):
+        u = obj.entered_by
+        if not u:
+            return None
+        full = (getattr(u, 'get_full_name', lambda: '')() or '').strip()
+        return full or getattr(u, 'email', None) or getattr(u, 'username', None)
 
     def get_section34_warning(self, obj):
         from billing.gst_rules import section34_warning
@@ -110,7 +134,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'items': 'Quantities must be greater than 0.'})
             if q != q.quantize(Decimal('0.01')):
                 raise serializers.ValidationError({'items': 'Quantities can have at most 2 decimals.'})
-            if attrs.get('reason', 'return') in ('return', 'defective') and q != q.to_integral_value():
+            if attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value():
                 raise serializers.ValidationError({'items': (
                     'Returned goods must be whole units (stock is kept in whole units). For a part-quantity '
                     'credit, choose the reason "Post-Sale Discount", "Rate Difference" or "Other".')})
@@ -238,6 +262,12 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         if not validated_data.get('total_amount') or Decimal(str(validated_data['total_amount'])) < total_gross:
             validated_data['total_amount'] = total_gross
 
+        # R21 (Rudra CA): only goods actually coming back move stock. Discount / rate difference / other
+        # credit notes NEVER touch stock. TODO(Rudra): Defective should go to a damaged/scrap bucket, not
+        # saleable stock (ticket: engineering/lock-date-ticket.md, 'Defective returns -> damaged/scrap stock').
+        restores_stock = validated_data.get('reason', 'return') in STOCK_RETURN_REASONS
+        validated_data['stock_restored'] = restores_stock
+        validated_data['entered_by'] = self.context['request'].user
         credit_note = CreditNote.objects.create(**validated_data)
 
         target_warehouse = credit_note.warehouse
@@ -247,7 +277,9 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         for item_data in processed_items:
             CreditNoteItem.objects.create(credit_note=credit_note, **item_data)
 
-            # Restore stock (returned goods come back in). R21: only whole quantities move stock.
+            # Restore stock (returned goods come back in). R21: only Goods Returned / Defective, whole units.
+            if not restores_stock:
+                continue
             qty = Decimal(str(item_data['quantity']))
             if qty != qty.to_integral_value():
                 continue

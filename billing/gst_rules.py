@@ -309,6 +309,9 @@ def customer_pos(customer):
     return code, CODE_TO_STATE_NAME.get(code)
 
 
+MIXED_POS_WARNING = 'Mixed goods and services: confirm POS.'
+
+
 def _is_services_line(item):
     get = (item.get if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d)))
     if (get('row_type', 'item') or 'item') == 'note':
@@ -340,12 +343,14 @@ def invoice_pos_decision(customer, pos_value, items, bill_to_ship_to=False, cust
     if not default and len(g) == 15:
         default = get_state_code_from_gstin(g)
     chosen = normalize_state_code(pos_value) if pos_value else None
-    if not chosen:
-        return default, None, None
-    if not default or chosen == default:
-        return chosen, None, None
     kinds = [k for k in (_is_services_line(i) for i in (items or [])) if k is not None]
     services = bool(kinds) and all(kinds)
+    # Rudra CA: mixed goods + services = treated as goods (never blocked), but always flagged.
+    mixed = MIXED_POS_WARNING if (any(kinds) and not all(kinds)) else None
+    if not chosen:
+        return default, mixed, None
+    if not default or chosen == default:
+        return chosen, mixed, None
     from billing.gst_utils import CODE_TO_STATE_NAME
     names = f"{CODE_TO_STATE_NAME.get(chosen, chosen)} vs customer's {CODE_TO_STATE_NAME.get(default, default)}"
     if services:
@@ -354,8 +359,9 @@ def invoice_pos_decision(customer, pos_value, items, bill_to_ship_to=False, cust
     if bill_to_ship_to:
         return None, None, (f"Bill-to-ship-to supply: place of supply is the bill-to customer's state "
                             f"(s.10(1)(b) IGST Act): {names}.")
-    return chosen, (f"Place of supply differs from the customer's state ({names}). "
-                    f"Allowed for goods shipped to another state; check the ship-to address."), None
+    warn = (f"Place of supply differs from the customer's state ({names}). "
+            f"Allowed for goods shipped to another state; check the ship-to address.")
+    return chosen, (f"{mixed} {warn}" if mixed else warn), None
 
 
 def advance_pos_code(payment, seller_state_code):

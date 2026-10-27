@@ -169,6 +169,14 @@ def normalize_state_code(val):
     return None
 
 
+def pos_display(val):
+    """Rule 46: place of supply as 'State name (GST code)', e.g. 'Odisha (21)'."""
+    code = normalize_state_code(val) if val else None
+    if not code:
+        return str(val or '')
+    return f"{CODE_TO_STATE_NAME.get(code, code)} ({code})"
+
+
 def get_state_code_from_gstin(gstin):
     """
     Extracts the 2-digit state code from the first 2 characters of a GSTIN.

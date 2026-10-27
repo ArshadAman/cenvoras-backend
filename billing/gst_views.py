@@ -533,6 +533,8 @@ def gstr1_json_export(request):
         },
         'doc_issue': data['doc_issue'],
     }
+    if data['nil']:
+        payload['nil'] = {'inv': data['nil']}  # Table 8 (nil / exempt / non-GST), net of CNs, floored at 0
     from django.conf import settings as dj_settings
     has_adv = bool(data['at'] or data['txpd'])
     if getattr(dj_settings, 'GSTR1_ADVANCES_JSON_ENABLED', False):
@@ -549,7 +551,8 @@ def gstr1_json_export(request):
                            # R18 P0-B: on-screen Table 11A/11B (taxable value), shown even when empty.
                            'advances': {'at': _adv_rows(data['at']), 'txpd': _adv_rows(data['txpd']),
                                         'at_total': _adv_total(data['at']),
-                                        'txpd_total': _adv_total(data['txpd'])}}
+                                        'txpd_total': _adv_total(data['txpd'])},
+                           'warnings': data['cn_warnings']}
     return Response(payload)
 
 

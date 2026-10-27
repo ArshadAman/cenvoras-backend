@@ -312,6 +312,8 @@ def advance_tax_split(payment, seller_state_code):
 
     customer = getattr(payment, 'customer', None)
     pos_raw = getattr(payment, 'place_of_supply', None) or (customer.state if customer else None)
+    if str(pos_raw or '').strip().upper() == 'UNKNOWN':
+        pos_raw = None  # user confirmed POS cannot be determined -> inter-state
     used_fallback_pos = not bool(pos_raw)
     if used_fallback_pos:
         # Law: treat as inter-state when POS cannot be worked out
@@ -321,7 +323,8 @@ def advance_tax_split(payment, seller_state_code):
         pos = get_pos_state_code(pos_raw, fallback_state=seller_state_code)
         is_inter = seller_state_code != pos
 
-    rate = infer_advance_rate(payment)
+    explicit = getattr(payment, 'gst_rate', None)
+    rate = Decimal(str(explicit)) if explicit is not None else infer_advance_rate(payment)
     used_fallback_rate = rate is None
     if rate is None:
         rate = Decimal('18')

@@ -100,7 +100,9 @@ def posted_advance_split(payment):
     from ledger.models import GeneralLedgerEntry
     from ledger.services import AccountingService
     accounts = AccountingService.get_or_create_default_accounts(payment.created_by)
-    lines = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}", created_by=payment.created_by)
+    # Receipt journals plus any edit reversals/re-posts (audit trail: 'Payment Received <id> rev N' / 'v N').
+    lines = list(GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {payment.id}",
+                                                   created_by=payment.created_by))
     by = lambda acc: sum((l.credit - l.debit for l in lines if acc and l.account_id == acc.id), ZERO)
     adv = by(accounts.get('customer_advances') or accounts.get('2102'))
     cgst = by(accounts.get('output_cgst'))
@@ -331,6 +333,8 @@ def advance_tables(tenant, from_date, to_date, seller_state_code):
                 for k in acc[table]:
                     acc[table][k] += sign * getattr(a, k)
         pos_raw = getattr(p, 'place_of_supply', None) or (p.customer.state if p.customer else None)
+        if str(pos_raw or '').strip().upper() == 'UNKNOWN':
+            pos_raw = None
         pos = get_pos_state_code(pos_raw, fallback_state=seller_state_code) if pos_raw else seller_state_code
         if split['is_interstate'] and pos == seller_state_code:
             pos = '97'

@@ -9,6 +9,8 @@ from billing.tests_four_fixes import FourFixesBase
 from ledger.models import GeneralLedgerEntry
 
 D = Decimal
+SVC = {"supply_kind": "services", "gst_rate": "18", "place_of_supply": "Karnataka"}
+FILED = "This month's GSTR-1 is filed. Record the correction in the current month"
 
 
 class R18AdvanceTests(FourFixesBase):
@@ -39,7 +41,7 @@ class R18AdvanceTests(FourFixesBase):
     # P0-A
     def test_receipt_before_invoice_date_is_not_auto_applied(self):
         inv = self._invoice("R18-INV-2", "1000.00", self.today)
-        res = self._receipt("1180.00", self.prev_from + timedelta(days=14))  # no supply_kind, auto_allocate default
+        res = self._receipt("1180.00", self.prev_from + timedelta(days=14), auto_allocate=True, **SVC)
         self.assertEqual(res.status_code, 201, res.data)
         pay = Payment.objects.get(pk=res.data["id"])
         self.assertIsNone(pay.invoice_id)
@@ -49,8 +51,8 @@ class R18AdvanceTests(FourFixesBase):
 
     def test_recorded_advance_is_never_auto_applied_services_and_goods(self):
         self._invoice("R18-INV-OLD", "1000.00", self.prev_from)  # open, dated before the receipts
-        svc = self._receipt("1180.00", self.today, supply_kind="services")
-        gds = self._receipt("2000.00", self.today, supply_kind="goods")
+        svc = self._receipt("1180.00", self.today, **SVC)
+        gds = self._receipt("2000.00", self.today, supply_kind="goods")  # legacy client: no auto_allocate
         self.assertEqual(svc.status_code, 201, svc.data)
         self.assertEqual(gds.status_code, 201, gds.data)
         svc, gds = Payment.objects.get(pk=svc.data["id"]), Payment.objects.get(pk=gds.data["id"])
@@ -67,7 +69,7 @@ class R18AdvanceTests(FourFixesBase):
     def test_plain_receipt_still_fifo_to_earlier_invoice(self):
         inv = self._invoice("R18-INV-OLD", "1000.00", self.prev_from)
         later = self._invoice("R18-INV-NEW", "1000.00", self.today)
-        res = self._receipt("1180.00", self.today - timedelta(days=0))
+        res = self._receipt("1180.00", self.today, auto_allocate=True)  # exactly covered: no remainder
         self.assertEqual(res.status_code, 201, res.data)
         inv.refresh_from_db(); later.refresh_from_db()
         self.assertEqual(inv.amount_paid, D("1180.00"))
@@ -134,16 +136,94 @@ class R18AdvanceTests(FourFixesBase):
         adv_date = self.prev_from + timedelta(days=5)
         pay = self._advance("1180.00", adv_date)
         GSTR1Filing.objects.create(created_by=self.tenant, period=self.prev_from, filed_on=self.today)
-        res = self._receipt("118.00", self.prev_from + timedelta(days=19), supply_kind="services")
+        res = self._receipt("118.00", self.prev_from + timedelta(days=19), **SVC)
         self.assertEqual(res.status_code, 400)
-        self.assertIn("filed", str(res.data))
+        self.assertEqual(res.data["date"][0], FILED)
         put = self.client.put(f"/api/billing/payments/{pay.id}/", {
             "customer": str(self.cust.id), "date": str(adv_date), "amount": "2000.00", "mode": "upi",
-            "supply_kind": "services"}, format="json")
+            **SVC}, format="json")
         self.assertEqual(put.status_code, 400)
         dele = self.client.delete(f"/api/billing/payments/{pay.id}/")
         self.assertEqual(dele.status_code, 400)
-        self.assertIn("filed", dele.data["error"])
+        self.assertEqual(dele.data["error"], FILED)
         self.assertTrue(Payment.objects.filter(pk=pay.pk).exists())
         # An unfiled month is unaffected
-        self.assertEqual(self._receipt("118.00", self.today, supply_kind="services").status_code, 201)
+        self.assertEqual(self._receipt("118.00", self.today, **SVC).status_code, 201)
+
+    # ── Rudra CA corrections ──
+    def test_receipt_with_unclassified_remainder_rejected(self):
+        inv = self._invoice("R18-INV-OLD", "1000.00", self.prev_from)  # 1180 due
+        res = self._receipt("2000.00", self.today, auto_allocate=True)
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn("remainder", res.data)
+        self.assertEqual(Payment.objects.filter(customer=self.cust).count(), 0)  # nothing half-saved
+        inv.refresh_from_db()
+        self.assertEqual(inv.amount_paid, D("0"))
+        # services without rate/POS also rejected
+        res = self._receipt("2000.00", self.today, auto_allocate=True, supply_kind="services")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(Payment.objects.filter(customer=self.cust).count(), 0)
+        # classified remainder accepted: 1180 to the invoice, 820 stays a service advance with a voucher
+        res = self._receipt("2000.00", self.today, auto_allocate=True, **SVC)
+        self.assertEqual(res.status_code, 201, res.data)
+        adv = Payment.objects.get(customer=self.cust, invoice__isnull=True)
+        self.assertEqual(adv.amount, D("820.00"))
+        self.assertTrue(adv.receipt_voucher_number.startswith("RV"))
+
+    def test_service_advance_unknown_rate_and_pos_posts_18pct_igst(self):
+        res = self._receipt("1180.00", self.today, supply_kind="services", gst_rate="unknown",
+                            place_of_supply="unknown", auto_allocate=False)
+        self.assertEqual(res.status_code, 201, res.data)
+        pay = Payment.objects.get(pk=res.data["id"])
+        self.assertEqual(pay.gst_rate, D("18"))
+        self.assertEqual(self._credit(pay, "customer_advances"), D("1000.00"))
+        self.assertEqual(self._credit(pay, "output_igst"), D("180.00"))
+        self.assertEqual(self._credit(pay, "output_cgst"), D("0"))
+
+    def test_receipt_voucher_sequential_and_viewable(self):
+        a = Payment.objects.get(pk=self._receipt("118.00", self.today, auto_allocate=False, **SVC).data["id"])
+        b = Payment.objects.get(pk=self._receipt("236.00", self.today, auto_allocate=False, **SVC).data["id"])
+        g = Payment.objects.get(pk=self._receipt("500.00", self.today, auto_allocate=False, supply_kind="goods").data["id"])
+        self.assertEqual(a.receipt_voucher_number, "RV-001")
+        self.assertEqual(b.receipt_voucher_number, "RV-002")
+        self.assertEqual(g.receipt_voucher_number, "")
+        html = self.client.get(f"/api/billing/payments/{b.id}/receipt-voucher/")
+        self.assertEqual(html.status_code, 200)
+        self.assertIn("RV-002", html.content.decode())
+        self.assertEqual(self.client.get(f"/api/billing/payments/{g.id}/receipt-voucher/").status_code, 404)
+
+    def test_advance_defaults_from_past_invoice_lines(self):
+        self._invoice("R18-D1", "100.00", self.prev_from)
+        res = self.client.get("/api/billing/payments/advance-defaults/", {"customer": str(self.cust.id)})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["supply_kind"], "services")  # SAC 998311
+        self.assertTrue(res.data["needs_confirmation"])
+
+    def test_allocate_advance_to_later_invoice_lands_in_txpd_for_invoice_month(self):
+        pay = self._advance("1180.00", self.prev_from + timedelta(days=3))
+        inv = self._invoice("R18-LATER", "1000.00", self.today)
+        res = self._allocate(pay, inv)
+        self.assertEqual(res.status_code, 200, res.data)
+        js = self.client.get("/api/billing/gst/gstr1-export/", {"from": str(self.m_from), "to": str(self.m_to)})
+        self.assertEqual(js.data["_cenvora"]["advances"]["txpd_total"]["ad_amt"], 1000.0)
+        prev = self.client.get("/api/billing/gst/gstr1-export/", {"from": str(self.prev_from), "to": str(self.prev_to)})
+        self.assertEqual(prev.data["_cenvora"]["advances"]["txpd"], [])
+
+    def test_receipt_edit_reverses_and_reposts_never_deletes(self):
+        pay = self._advance("1180.00", self.today)
+        before = list(self._receipt_lines(pay).values_list("id", flat=True))
+        put = self.client.put(f"/api/billing/payments/{pay.id}/", {
+            "customer": str(self.cust.id), "date": str(self.today), "amount": "2360.00", "mode": "upi",
+            **SVC}, format="json")
+        self.assertEqual(put.status_code, 200, put.data)
+        ids = set(GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {pay.id}")
+                  .values_list("id", flat=True))
+        self.assertTrue(set(before) <= ids)  # originals kept
+        rev = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {pay.id} rev 1")
+        self.assertTrue(rev.exists())
+        net = lambda key: sum((l.credit - l.debit for l in GeneralLedgerEntry.objects.filter(
+            reference__startswith=f"Payment Received {pay.id}", account=self.acc[key])), D("0"))
+        self.assertEqual(net("customer_advances"), D("2000.00"))
+        self.assertEqual(net("output_cgst") + net("output_sgst"), D("360.00"))
+        pay.refresh_from_db()
+        self.assertEqual(pay.receipt_voucher_number, "RV-001")  # voucher number kept on edit

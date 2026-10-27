@@ -1692,9 +1692,28 @@ class PaymentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
             'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at',
-            'unapplied_amount', 'adjustments',
+            'unapplied_amount', 'adjustments', 'gst_rate', 'place_of_supply', 'receipt_voucher_number',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number']
+        read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number', 'receipt_voucher_number']
+        extra_kwargs = {'gst_rate': {'required': False, 'allow_null': True},
+                        'place_of_supply': {'required': False, 'allow_blank': True}}
+
+    def to_internal_value(self, data):
+        # 'unknown' rate -> 18% (Rule 50 proviso); 'unknown' POS kept as UNKNOWN -> inter-state (IGST).
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        self._rate_given = 'gst_rate' in data
+        self._pos_given = 'place_of_supply' in data
+        if str(data.get('gst_rate', '')).strip().lower() == 'unknown':
+            data['gst_rate'] = '18'
+        elif data.get('gst_rate') == '':
+            data['gst_rate'] = None
+        pos = str(data.get('place_of_supply') or '').strip()
+        if pos.lower() == 'unknown':
+            data['place_of_supply'] = 'UNKNOWN'
+        return super().to_internal_value(data)
 
     def get_unapplied_amount(self, obj):
         from billing.advances import unapplied_amount
@@ -1744,7 +1763,32 @@ class PaymentSerializer(serializers.ModelSerializer):
         # R18 P1: GSTR-1 filed-month lock for advances (unlinked receipts feed GSTR-1 'at'), same rule as
         # advance applications (billing.advances._check_open_period).
         self._check_filed(attrs, invoice, pay_date)
+        if not invoice:
+            self._check_classified(attrs)
+        else:
+            attrs['supply_kind'] = ''
+            attrs['gst_rate'] = None
+            attrs['place_of_supply'] = ''
         return attrs
+
+    def _check_classified(self, attrs):
+        """R18 (Rudra CA): money kept as an advance must be classified by the user; never a silent default."""
+        kind = (attrs.get('supply_kind', getattr(self.instance, 'supply_kind', '')) or '').strip().lower()
+        if kind not in ('goods', 'services'):
+            raise serializers.ValidationError({'supply_kind': (
+                'Classify the advance (or the part not applied to invoices) as goods or services before saving.')})
+        if kind == 'goods':
+            attrs['gst_rate'] = None
+            attrs['place_of_supply'] = ''
+            return
+        rate = attrs.get('gst_rate', getattr(self.instance, 'gst_rate', None))
+        pos = attrs.get('place_of_supply', getattr(self.instance, 'place_of_supply', '')) or ''
+        if rate is None or not pos.strip():
+            raise serializers.ValidationError({'gst_rate': (
+                'A service advance needs a GST rate and place of supply. Choose "Unknown" to use 18% '
+                '(Rule 50 proviso) or inter-state (IGST).')})
+        if rate < 0 or rate > 28:
+            raise serializers.ValidationError({'gst_rate': 'GST rate must be between 0 and 28.'})
 
     def _check_filed(self, attrs, invoice, pay_date):
         from billing.advances import is_gstr1_filed
@@ -1763,11 +1807,26 @@ class PaymentSerializer(serializers.ModelSerializer):
                 checks.append(inst.date)
         for d in checks:
             if is_gstr1_filed(tenant, d):
-                raise serializers.ValidationError({'date': (
-                    f"GSTR-1 for {d:%b %Y} is marked filed; advances dated in that month cannot be "
-                    f"recorded or changed. Un-mark the month on the GSTR-1 page first if this is a correction.")})
+                raise serializers.ValidationError({'date': FILED_MONTH_MESSAGE})
 
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['created_by'] = getattr(user, 'active_tenant', user)
-        return super().create(validated_data)
+        return _with_receipt_voucher(super().create(validated_data))
+
+    def update(self, instance, validated_data):
+        return _with_receipt_voucher(super().update(instance, validated_data))
+
+
+FILED_MONTH_MESSAGE = "This month's GSTR-1 is filed. Record the correction in the current month"
+
+
+def _with_receipt_voucher(payment):
+    """Rule 50: every service advance (incl. the remainder of a receipt) gets a sequential receipt voucher."""
+    if payment.invoice_id or payment.supply_kind != 'services' or payment.receipt_voucher_number:
+        return payment
+    from billing.sequence_service import allocate_next_number
+    number = allocate_next_number(payment.created_by, document_type='receipt_voucher')
+    Payment.objects.filter(pk=payment.pk).update(receipt_voucher_number=number)
+    payment.receipt_voucher_number = number
+    return payment

@@ -495,11 +495,12 @@ def credit_note_tax_breakup(credit_note, seller_state_code=None):
     if seller_state_code is None:
         user = credit_note.created_by
         seller_state_code = get_seller_state_code(getattr(user, 'active_tenant', user))
+    from billing.gst_rules import customer_pos as _customer_pos
     orig_inv = credit_note.original_invoice
     customer = credit_note.customer
     pos_raw = (
         (orig_inv.place_of_supply if orig_inv else None)
-        or (customer.state if customer else None)
+        or (_customer_pos(customer)[0] if customer else None)
         or seller_state_code
     )
     pos_code = get_pos_state_code(pos_raw, fallback_state=seller_state_code)

@@ -309,6 +309,55 @@ def customer_pos(customer):
     return code, CODE_TO_STATE_NAME.get(code)
 
 
+def _is_services_line(item):
+    get = (item.get if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d)))
+    if (get('row_type', 'item') or 'item') == 'note':
+        return None
+    h = str(get('hsn_sac_code', '') or '').strip()
+    prod = get('product', None)
+    if not h and prod is not None and not isinstance(prod, (str, int)):
+        h = str(getattr(prod, 'hsn_sac_code', '') or '').strip()
+    if not h and isinstance(prod, str):
+        try:
+            from inventory.models import Product
+            p = Product.objects.filter(pk=prod).only('hsn_sac_code').first()
+            h = (p.hsn_sac_code or '').strip() if p else ''
+        except Exception:
+            h = ''
+    return h.startswith('99') if h else None
+
+
+def invoice_pos_decision(customer, pos_value, items, bill_to_ship_to=False, customer_gstin=''):
+    """
+    Rudra CA (s.10 / s.12 IGST Act). Default POS = customer's GSTIN state, else address state.
+      goods: a different POS (ship-to state) is allowed, with a visible warning;
+      services, or a bill-to-ship-to supply: a POS different from the default is blocked.
+    Returns (pos_code, warning, error).
+    """
+    from billing.gst_utils import get_state_code_from_gstin, normalize_state_code
+    default = customer_pos(customer)[0] if customer else None
+    g = (customer_gstin or '').strip()
+    if not default and len(g) == 15:
+        default = get_state_code_from_gstin(g)
+    chosen = normalize_state_code(pos_value) if pos_value else None
+    if not chosen:
+        return default, None, None
+    if not default or chosen == default:
+        return chosen, None, None
+    kinds = [k for k in (_is_services_line(i) for i in (items or [])) if k is not None]
+    services = bool(kinds) and all(kinds)
+    from billing.gst_utils import CODE_TO_STATE_NAME
+    names = f"{CODE_TO_STATE_NAME.get(chosen, chosen)} vs customer's {CODE_TO_STATE_NAME.get(default, default)}"
+    if services:
+        return None, None, (f"Place of supply for services is the recipient's location (s.12 IGST Act): "
+                            f"{names}. Use the customer's state.")
+    if bill_to_ship_to:
+        return None, None, (f"Bill-to-ship-to supply: place of supply is the bill-to customer's state "
+                            f"(s.10(1)(b) IGST Act): {names}.")
+    return chosen, (f"Place of supply differs from the customer's state ({names}). "
+                    f"Allowed for goods shipped to another state; check the ship-to address."), None
+
+
 def advance_pos_code(payment, seller_state_code):
     """Single place that decides the POS state code reported/posted for an advance."""
     from billing.gst_utils import normalize_state_code

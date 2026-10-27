@@ -5,7 +5,7 @@ from decimal import Decimal
 import datetime
 import re
 
-from billing.gst_rules import advance_tax_split, classify_outward_supply
+from billing.gst_rules import EXPORT_TREATMENTS, advance_tax_split, classify_outward_supply, customer_pos
 from billing.gst_utils import (
     calculate_item_tax_breakup,
     credit_note_tax_breakup,
@@ -20,9 +20,32 @@ from billing.models_returns import CreditNote
 ZERO = Decimal('0.00')
 
 
+# Notification 12/2024-CT: B2CL = inter-state B2C invoice with invoice value MORE THAN Rs 1,00,000.
+B2CL_THRESHOLD = Decimal('100000')
+
+
 def _invoice_pos(inv, seller_state_code):
-    pos_raw = inv.place_of_supply or (inv.customer.state if inv.customer else None) or seller_state_code
+    # Rudra CA: invoice POS, else customer's GSTIN state, else address state, else seller state.
+    pos_raw = inv.place_of_supply or customer_pos(inv.customer)[0] or seller_state_code
     return get_pos_state_code(pos_raw, fallback_state=seller_state_code)
+
+
+def _is_b2cl(inv, pos_code, seller_state_code, has_gstin):
+    return (not has_gstin and seller_state_code != pos_code
+            and Decimal(str(inv.total_amount or 0)) > B2CL_THRESHOLD)
+
+
+def _add_b2cs(b2cs, pos_code, is_inter, rt, txval, camt, samt, iamt):
+    sply = 'INTER' if is_inter else 'INTRA'
+    row = next((b for b in b2cs if b['pos'] == pos_code and b['rt'] == rt and b['sply_ty'] == sply), None)
+    if row is None:
+        row = {'sply_ty': sply, 'pos': pos_code, 'rt': rt, 'txval': 0.0, 'camt': 0.0,
+               'samt': 0.0, 'iamt': 0.0, 'csamt': 0.0}
+        b2cs.append(row)
+    row['txval'] = round(row['txval'] + txval, 2)
+    row['camt'] = round(row['camt'] + camt, 2)
+    row['samt'] = round(row['samt'] + samt, 2)
+    row['iamt'] = round(row['iamt'] + iamt, 2)
 
 
 def _customer_gstin(inv):
@@ -134,7 +157,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
                 existing['inv'].append(inv_entry)
             else:
                 b2b.append({'ctin': cust_gstin, 'inv': [inv_entry]})
-        elif is_inter and inv.total_amount > Decimal('250000'):
+        elif _is_b2cl(inv, pos_code, seller_state_code, has_gstin):
             b2cl.append({
                 'pos': pos_code,
                 'inv': [{
@@ -151,28 +174,8 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         else:
             for item_payload in items_data:
                 det = item_payload['itm_det']
-                existing_b2cs = next(
-                    (b for b in b2cs
-                     if b['pos'] == pos_code and b['rt'] == det['rt']
-                     and b['sply_ty'] == ('INTER' if is_inter else 'INTRA')),
-                    None
-                )
-                if existing_b2cs:
-                    existing_b2cs['txval'] = round(existing_b2cs['txval'] + det['txval'], 2)
-                    existing_b2cs['camt'] = round(existing_b2cs['camt'] + det['camt'], 2)
-                    existing_b2cs['samt'] = round(existing_b2cs['samt'] + det['samt'], 2)
-                    existing_b2cs['iamt'] = round(existing_b2cs['iamt'] + det['iamt'], 2)
-                else:
-                    b2cs.append({
-                        'sply_ty': 'INTER' if is_inter else 'INTRA',
-                        'pos': pos_code,
-                        'rt': det['rt'],
-                        'txval': det['txval'],
-                        'camt': det['camt'],
-                        'samt': det['samt'],
-                        'iamt': det['iamt'],
-                        'csamt': 0.0,
-                    })
+                _add_b2cs(b2cs, pos_code, is_inter, det['rt'], det['txval'], det['camt'],
+                          det['samt'], det['iamt'])
 
     cdnr, cdnur = [], []
     credit_notes = CreditNote.objects.filter(
@@ -260,11 +263,21 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
                 existing_cdnr['nt'].append(nt_entry)
             else:
                 cdnr.append({'ctin': cust_gstin, 'nt': [nt_entry]})
+        elif bucket == 'zero_rated' and (getattr(orig_inv, 'gst_treatment', '') or '').strip().lower() in EXPORT_TREATMENTS:
+            # cdnur only for CNs on B2CL or export invoices (Rudra CA).
+            treat = (orig_inv.gst_treatment or '').strip().lower()
+            typ = 'EXPWOP' if (treat in ('lut', 'bond') or cn_igst == ZERO) else 'EXPWP'
+            cdnur.append({**{k: v for k, v in nt_entry.items() if k != 'rchrg'}, 'typ': typ})
+        elif bucket != 'taxable':
+            continue  # nil/exempt/non-GST: not reported in b2cs/cdnur
+        elif _is_b2cl(orig_inv, _invoice_pos(orig_inv, seller_state_code), seller_state_code,
+                      len(_customer_gstin(orig_inv)) == 15):
+            cdnur.append({**{k: v for k, v in nt_entry.items() if k != 'rchrg'}, 'typ': 'B2CL'})
         else:
-            cdnur.append({
-                **{k: v for k, v in nt_entry.items() if k != 'rchrg'},
-                'typ': 'B2CL' if (is_inter and cn_val > Decimal('250000')) else 'B2CS',
-            })
+            # CN on a b2cs invoice: net into b2cs by POS + rate + supply type.
+            for ln in brk['lines']:
+                _add_b2cs(b2cs, pos_code, is_inter, float(ln['rate']), -float(ln['taxable']),
+                          -float(ln['cgst']), -float(ln['sgst']), -float(ln['igst']))
 
     from billing.advances import advance_tables
     at, txpd, at_totals, txpd_totals = advance_tables(tenant, from_date, to_date, seller_state_code)

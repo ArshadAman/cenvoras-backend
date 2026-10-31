@@ -68,4 +68,8 @@ class PayrollRunAPITests(APITestCase):
             object_id=str(run.id)
         ).first()
         self.assertIsNotNone(audit)
-        self.assertEqual(audit.changes['after']['status'], 'finalised')
+        after_status = (
+            (audit.changes.get('after') or {}).get('status')
+            or (audit.changes.get('status') or {}).get('new')
+        )
+        self.assertEqual(after_status, 'finalised')

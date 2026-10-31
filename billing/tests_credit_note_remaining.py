@@ -95,9 +95,12 @@ class CreditNoteRemainingTests(FourFixesBase):
             amount=Decimal("4720.00"),
         )
 
+        over = self._cn_payload(3)
+        over["items"][0]["tax"] = "0.00"
+        over["items"][0]["amount"] = "3000.00"
         res = self.client.post(
             "/api/billing/credit-notes/",
-            self._cn_payload(3),
+            over,
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, res.data)

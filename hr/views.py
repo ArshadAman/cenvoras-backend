@@ -1401,15 +1401,28 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def finalise(self, request, pk=None):
-        """Backward-compatible action mapping to approval."""
+        """Backward-compatible action mapping to approval — posts the same accrual as approve."""
         instance = self.get_object()
         if instance.status not in ['completed', 'calculated']:
             raise ValidationError("Only completed or calculated payroll runs can be finalised.")
 
+        before_status = instance.status
+        before_finalised_at = instance.finalised_at
         before = {'status': instance.status, 'finalised_at': str(instance.finalised_at)}
         instance.status = 'finalised'
         instance.finalised_at = timezone.now()
         instance.save(update_fields=['status', 'finalised_at'])
+
+        try:
+            HRAccountingService.post_payroll_accrual(instance, request.user)
+        except Exception as exc:
+            logger.exception("Failed to post accounting accrual for payroll run %s", instance.id)
+            instance.status = before_status
+            instance.finalised_at = before_finalised_at
+            instance.save(update_fields=['status', 'finalised_at'])
+            raise ValidationError(
+                f"Accounting accrual failed: {str(exc)}. Please check ledger chart of accounts."
+            )
 
         after = {'status': instance.status, 'finalised_at': str(instance.finalised_at)}
         audit_service.log_update(request, instance, before=before, after=after)
@@ -1465,7 +1478,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             raise ValidationError(
                 "payment_account_id is required. Select a Bank account for salary disbursement."
             )
-        from ledger.models import Account, AccountType
+        from ledger.models import Account, AccountType, GeneralLedgerEntry
         from ledger.services import AccountingService
         try:
             payment_account = Account.objects.get(id=payment_account_id, created_by=instance.tenant)
@@ -1495,6 +1508,13 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         # Hard block for Bank and (when enabled) Cash when the balance is insufficient.
         assert_sufficient_balance(payment_account, instance.tenant, total_net)
         warnings = cash_40a3_warnings(instance) if kind == 'cash' else []
+
+        accrual_ref = f"PAYROLL-ACCRUAL-{instance.year}-{instance.month:02d}"
+        if not GeneralLedgerEntry.objects.filter(created_by=instance.tenant, reference=accrual_ref).exists():
+            raise ValidationError(
+                "Payroll accrual has not been posted. Approve or finalise this run before paying "
+                "so Salaries Payable is credited."
+            )
 
         before = {'status': instance.status}
         instance.status = 'paid'

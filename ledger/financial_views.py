@@ -4,6 +4,7 @@ Financial Statement Views:
 - Balance Sheet
 - Bank Reconciliation
 """
+from datetime import date as date_cls, timedelta
 from decimal import Decimal
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -11,7 +12,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Sum, Q
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from billing.models import SalesInvoiceItem
+from billing.gst_thresholds import fy_bounds
 from .models import Account, AccountType, GeneralLedgerEntry
 from .services import AccountingService
 
@@ -49,6 +52,15 @@ def compute_gl_net_profit(tenant, from_date=None, to_date=None, as_of=None):
         expense_total += _account_balance(acc, tenant, from_date=from_date, to_date=to_date, as_of=as_of)
 
     return revenue_total, expense_total, revenue_total - expense_total
+
+
+def _as_of_date(as_of):
+    if as_of:
+        try:
+            return date_cls.fromisoformat(str(as_of)[:10])
+        except ValueError:
+            pass
+    return timezone.localdate()
 
 
 
@@ -111,6 +123,7 @@ def balance_sheet(request):
     """
     tenant = getattr(request.user, 'active_tenant', request.user)
     as_of = request.query_params.get('as_of')
+    as_of_date = _as_of_date(as_of)
 
     # Ensure default accounts exist
     AccountingService.get_or_create_default_accounts(tenant)
@@ -165,18 +178,34 @@ def balance_sheet(request):
             })
             total_liabilities += bal
 
-    # Equity (skip booked RE — computed RE added once below)
+    # Equity (skip booked RE — current-year P&L added once below)
     equity_accounts = Account.objects.filter(
         created_by=tenant, account_type=AccountType.EQUITY, is_active=True
     ).order_by('code', 'name')
+    fy_start, fy_end = fy_bounds(as_of_date)
+    pl_to = min(as_of_date, fy_end)
+    from .pnl import compute_net_profit, PNL_PRESENTATION
+    _rev, _exp, current_year_pl, inv = compute_net_profit(
+        tenant, from_date=fy_start, to_date=pl_to
+    )
+    prior_as_of = fy_start - timedelta(days=1)
+    _prev_rev, _prev_exp, prior_year_pl, _prior_inv = compute_net_profit(
+        tenant, as_of=prior_as_of
+    )
+
     equity_items = []
     total_equity = Decimal('0')
+    prior_folded = False
     for acc in equity_accounts:
         code = (acc.code or '').strip().upper()
         name_l = (acc.name or '').lower()
         if code in RETAINED_EARNINGS_CODES or 'retained earning' in name_l:
             continue
         bal = get_balance(acc)
+        is_owner_equity = code == '3001' or ('owner' in name_l and 'equity' in name_l)
+        if is_owner_equity and not prior_folded:
+            bal += prior_year_pl
+            prior_folded = True
         if bal != 0:
             equity_items.append({
                 'id': str(acc.id),
@@ -186,9 +215,17 @@ def balance_sheet(request):
             })
             total_equity += bal
 
-    # Retained Earnings — same helper as P&L net profit (cumulative, incl. inventory change)
-    from .pnl import compute_net_profit, PNL_PRESENTATION
-    _rev, _exp, retained_earnings, inv = compute_net_profit(tenant, as_of=as_of or None)
+    if not prior_folded and prior_year_pl != 0:
+        equity_items.append({
+            'id': 'opening-equity',
+            'code': '3001',
+            'name': 'Opening equity',
+            'amount': float(prior_year_pl),
+        })
+        total_equity += prior_year_pl
+
+    # Retained Earnings — current-year P&L only (matches default P&L, incl. inventory change)
+    retained_earnings = current_year_pl
     total_equity += retained_earnings
     if PNL_PRESENTATION == 'schedule_iii':
         # Periodic inventory: stock is not in the GL, so show closing stock as an asset and the

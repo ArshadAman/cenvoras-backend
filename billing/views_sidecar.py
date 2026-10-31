@@ -334,7 +334,7 @@ def convert_order_to_invoice(request, pk):
             except Exception:
                 pass
 
-            for r_item in raw_items:
+            for idx, r_item in enumerate(raw_items):
                 inv_item = SalesInvoiceItem(
                     sales_invoice=invoice,
                     product=r_item['product'],
@@ -347,6 +347,7 @@ def convert_order_to_invoice(request, pk):
                     discount=r_item['discount'],
                     hsn_sac_code=r_item.get('hsn_sac_code') or '',
                     source_item_id=str(r_item['order_item'].id) if r_item.get('order_item') else None,
+                    sort_order=idx,
                 )
                 if is_post_delivery_invoicing or has_linked_challans:
                     inv_item._skip_stock_deduction = True
@@ -358,7 +359,7 @@ def convert_order_to_invoice(request, pk):
                     o_item.dispatched_quantity = (o_item.dispatched_quantity or 0) + r_item['quantity']
                     o_item.save(update_fields=['dispatched_quantity'])
 
-            for b_item in bonus_items:
+            for j, b_item in enumerate(bonus_items):
                 b_prod = b_item.get('product')
                 if b_prod:
                     bonus_line = SalesInvoiceItem(
@@ -372,6 +373,7 @@ def convert_order_to_invoice(request, pk):
                         tax=Decimal('0.00'),
                         discount=Decimal('0.00'),
                         hsn_sac_code=getattr(b_prod, 'hsn_sac_code', None) or '',
+                        sort_order=len(raw_items) + j,
                     )
                     if is_post_delivery_invoicing or has_linked_challans:
                         bonus_line._skip_stock_deduction = True
@@ -848,7 +850,7 @@ def convert_order_to_challan(request, pk):
         total_amount = Decimal('0.00')
         from django.db.models import F
 
-        for order_item, dispatch_qty in items_to_dispatch:
+        for idx, (order_item, dispatch_qty) in enumerate(items_to_dispatch):
             item_unit = getattr(order_item, 'unit', None) or (order_item.product.unit if order_item.product else 'pcs') or 'pcs'
             item_tax = getattr(order_item, 'tax', None) if getattr(order_item, 'tax', None) is not None else (order_item.product.tax if order_item.product else Decimal('0.00'))
             item_discount = getattr(order_item, 'discount', Decimal('0.00')) or Decimal('0.00')
@@ -871,6 +873,9 @@ def convert_order_to_challan(request, pk):
                 tax=item_tax,
                 discount=item_discount,
                 source_item_id=str(order_item.id),
+                sort_order=getattr(order_item, 'sort_order', idx),
+                row_type=getattr(order_item, 'row_type', 'item') or 'item',
+                description=getattr(order_item, 'description', '') or '',
             )
 
             # Deduct stock for dispatched item
@@ -961,7 +966,7 @@ def convert_challan_to_invoice(request, pk):
             invoice.save()
 
             total_items_amount = Decimal('0.00')
-            for c_item in challan.items.all():
+            for idx, c_item in enumerate(challan.items.all()):
                 is_note = getattr(c_item, 'row_type', 'item') == 'note' or not c_item.product_id
                 prod = c_item.product
                 if is_note:
@@ -1004,6 +1009,7 @@ def convert_challan_to_invoice(request, pk):
                     tax=tax,
                     description=getattr(c_item, 'description', '') or '',
                     source_item_id=str(c_item.id),
+                    sort_order=idx,
                 )
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
@@ -1151,6 +1157,7 @@ def bulk_convert_challans_to_invoice(request):
             invoice.save()
 
             total_items_amount = Decimal('0.00')
+            line_idx = 0
             for challan in challans:
                 for c_item in challan.items.all():
                     is_note = getattr(c_item, 'row_type', 'item') == 'note' or not c_item.product_id
@@ -1195,9 +1202,11 @@ def bulk_convert_challans_to_invoice(request):
                         tax=tax,
                         description=getattr(c_item, 'description', '') or '',
                         source_item_id=str(c_item.id),
+                        sort_order=line_idx,
                     )
                     inv_item._skip_stock_deduction = True
                     inv_item.save()
+                    line_idx += 1
 
             final_total = (total_items_amount + combined_round_off).quantize(Decimal('0.01'))
             invoice.total_amount = final_total
@@ -1553,7 +1562,7 @@ def quotation_convert_to_sales_order(request, pk):
         from billing.sync_service import DocumentSyncService
         total_amount = Decimal('0.00')
 
-        for item in selected_items:
+        for idx, item in enumerate(selected_items):
             override = items_override_map.get(str(item.id), {})
 
             raw_qty = override.get('quantity')
@@ -1589,6 +1598,8 @@ def quotation_convert_to_sales_order(request, pk):
                 tax=tax,
                 description=getattr(item, 'description', '') or '',
                 source_item_id=str(item.id),
+                row_type=getattr(item, 'row_type', 'item') or 'item',
+                sort_order=idx,
             )
             item.converted_to_order = True
             item.approval_status = 'approved'

@@ -271,6 +271,10 @@ class SalesOrderItem(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
     source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source QuotationItem")
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
 
     @property
     def pending_quantity(self):
@@ -362,6 +366,10 @@ class DeliveryChallanItem(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
     source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source SalesOrderItem")
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
 
     def __str__(self):
         prod_name = self.product.name if self.product else (self.description or 'Note')
@@ -452,13 +460,16 @@ class QuotationItem(models.Model):
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
     source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of upstream item if applicable")
-
+    sort_order = models.PositiveIntegerField(default=0)
     approval_status = models.CharField(
         max_length=20,
         choices=[('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected')],
         default='approved'
     )
     converted_to_order = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
 
 
 # =============================================================================

@@ -173,13 +173,17 @@ class DocumentSyncService:
         existing_items = list(document.items.all())
         existing_by_id = {str(item.id): item for item in existing_items}
         existing_by_source_id = {str(item.source_item_id): item for item in existing_items if getattr(item, 'source_item_id', None)}
+        ItemModel = document.items.model
+        has_sort_order = hasattr(ItemModel, 'sort_order')
 
         matched_existing_ids = set()
         to_update = []  # list of (existing_item, new_data)
         to_create = []  # list of new_data
 
-        for raw_entry in incoming_items_data:
+        for idx, raw_entry in enumerate(incoming_items_data):
             entry = dict(raw_entry)
+            if has_sort_order:
+                entry['sort_order'] = idx
             item_id = str(entry.get('id') or '') if entry.get('id') else None
             source_id = str(entry.get('source_item_id') or '') if entry.get('source_item_id') else None
 
@@ -235,6 +239,11 @@ class DocumentSyncService:
                 item.hsn_sac_code = new_data['hsn_sac_code']
             if 'source_item_id' in new_data and hasattr(item, 'source_item_id') and new_data['source_item_id']:
                 item.source_item_id = str(new_data['source_item_id'])
+            if hasattr(item, 'sort_order'):
+                try:
+                    item.sort_order = int(new_data.get('sort_order') or 0)
+                except (TypeError, ValueError):
+                    item.sort_order = 0
 
             # Recalculate item line amount
             item.amount = cls.calculate_line_amount(
@@ -283,13 +292,17 @@ class DocumentSyncService:
             item.delete()
 
         # 3. Apply Creations
-        ItemModel = document.items.model
         for new_data in to_create:
             clean_data = dict(new_data)
             clean_data.pop('id', None)
             clean_data.pop('applied_scheme', None)
             clean_data.pop('product_detail', None)
             clean_data.pop('is_scheme_bonus', None)
+            clean_data.pop('product_name', None)
+            clean_data.pop('product_description', None)
+            clean_data.pop('confirm_create_product', None)
+            clean_data.pop('fulfillment_status', None)
+            clean_data.pop('pending_quantity', None)
 
             # Resolve product
             prod_val = clean_data.get('product')
@@ -319,6 +332,13 @@ class DocumentSyncService:
                 discount = Decimal(str(clean_data.get('discount', 0) or 0))
                 tax = Decimal(str(clean_data.get('tax', 0) or 0))
                 clean_data['amount'] = cls.calculate_line_amount(qty, price, discount, tax)
+            if has_sort_order:
+                try:
+                    clean_data['sort_order'] = int(clean_data.get('sort_order') or 0)
+                except (TypeError, ValueError):
+                    clean_data['sort_order'] = 0
+            else:
+                clean_data.pop('sort_order', None)
 
             # Determine FK field name for document (order, challan, sales_invoice, etc.)
             fk_field = None

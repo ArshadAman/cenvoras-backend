@@ -80,8 +80,10 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 class SalesOrderItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
+    sort_order = serializers.IntegerField(required=False, default=0, min_value=0)
     product_name = serializers.CharField(source='product.name', read_only=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -97,7 +99,7 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalesOrderItem
         fields = [
-            'id', 'row_type', 'product', 'product_name', 'description', 'hsn_sac_code', 'quantity',
+            'id', 'sort_order', 'row_type', 'product', 'product_name', 'description', 'hsn_sac_code', 'quantity',
             'dispatched_quantity', 'pending_quantity', 'fulfillment_status', 'free_quantity', 'unit',
             'price', 'discount', 'tax', 'amount', 'source_item_id'
         ]
@@ -363,7 +365,9 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
         order = SalesOrder.objects.create(**validated_data)
         
-        for item_data in items_data:
+        for i, item_data in enumerate(items_data):
+            item_data.pop('id', None)
+            item_data['sort_order'] = i
             SalesOrderItem.objects.create(order=order, **item_data)
             
         return order
@@ -415,8 +419,10 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         return instance
 
 class DeliveryChallanItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
+    sort_order = serializers.IntegerField(required=False, default=0, min_value=0)
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_detail = serializers.SerializerMethodField(read_only=True)
     batch = serializers.PrimaryKeyRelatedField(queryset=ProductBatch.objects.all(), required=False, allow_null=True)
@@ -427,6 +433,7 @@ class DeliveryChallanItemSerializer(serializers.ModelSerializer):
         model = DeliveryChallanItem
         fields = [
             'id',
+            'sort_order',
             'row_type',
             'product',
             'product_name',
@@ -732,7 +739,9 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         challan = DeliveryChallan.objects.create(**validated_data)
 
-        for item_data in processed_items:
+        for i, item_data in enumerate(processed_items):
+            item_data.pop('id', None)
+            item_data['sort_order'] = i
             DeliveryChallanItem.objects.create(challan=challan, **item_data)
 
         # Deduct stock for dispatched goods only if confirmed (not a draft)
@@ -829,8 +838,10 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
 
 
 class QuotationItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
+    sort_order = serializers.IntegerField(required=False, default=0, min_value=0)
     product_name = serializers.CharField(source='product.name', read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -839,6 +850,7 @@ class QuotationItemSerializer(serializers.ModelSerializer):
         model = QuotationItem
         fields = [
             'id',
+            'sort_order',
             'row_type',
             'product',
             'product_name',
@@ -1166,7 +1178,9 @@ class QuotationSerializer(serializers.ModelSerializer):
 
         quotation = Quotation.objects.create(**validated_data)
         from billing.sync_service import DocumentSyncService
-        for item_data in items_data:
+        for i, item_data in enumerate(items_data):
+            item_data.pop('id', None)
+            item_data['sort_order'] = i
             if item_data.get('row_type') != 'note':
                 item_data['amount'] = DocumentSyncService.calculate_line_amount(
                     item_data.get('quantity', 0),

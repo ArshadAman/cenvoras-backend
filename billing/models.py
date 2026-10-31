@@ -479,9 +479,10 @@ class SalesInvoiceItem(models.Model):
     # Scheme Support (Phase 6)
     free_quantity = models.PositiveIntegerField(default=0, help_text="Qty given free under scheme (Buy X Get Y)")
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ['created_at', 'id']
+        ordering = ['sort_order', 'id']
 
 # Import Sidecar Models to ensure they are registered
 from .models_sidecar import TransactionMeta, InvoiceSettings, TenantLearnedHsnGst, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem

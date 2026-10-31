@@ -1519,19 +1519,17 @@ def quotation_convert_to_sales_order(request, pk):
         order_number = allocate_next_number(tenant, document_type='sales_order')
 
         order_customer = quotation.customer
-        if not order_customer:
+        if not order_customer and quotation.customer_name:
             from .models import Customer
-            order_customer = Customer.objects.filter(name__iexact=quotation.customer_name, created_by=tenant).first()
-            if not order_customer and quotation.customer_name:
-                order_customer = Customer.objects.create(
-                    name=quotation.customer_name,
-                    address=quotation.customer_address,
-                    created_by=tenant,
-                )
-                PartyMeta.objects.get_or_create(customer=order_customer)
+            order_customer = Customer.objects.filter(
+                name__iexact=quotation.customer_name, created_by=tenant
+            ).first()
 
         if not order_customer:
-            return Response({'message': 'Quotation must have a customer to convert.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'message': 'Save this customer first before converting this quotation.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         po_number = (request.data.get('po_number') or quotation.po_number or '').strip() or None
         po_date = request.data.get('po_date') or quotation.po_date or None
@@ -1540,6 +1538,8 @@ def quotation_convert_to_sales_order(request, pk):
             order_number=order_number,
             date=date.today(),
             customer=order_customer,
+            customer_name=quotation.customer_name or (order_customer.name if order_customer else ''),
+            customer_address=quotation.customer_address or '',
             total_amount=Decimal('0.00'),
             po_number=po_number,
             po_date=po_date,

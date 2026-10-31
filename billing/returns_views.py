@@ -1,4 +1,5 @@
 from decimal import Decimal
+from collections import defaultdict
 """
 Views for Sales Returns (Credit Notes) and Purchase Returns (Debit Notes).
 """
@@ -7,11 +8,42 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Sum
 from django.db.models.functions import Greatest
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
-from .models import Customer
+from .models import Customer, SalesInvoice
 from inventory.models import Product, ProductBatch, StockPoint, Warehouse
+
+TWOPLACES = Decimal('0.01')
+
+
+def remaining_qty_for_invoice(invoice):
+    """Per product on the original invoice: remaining = invoiced qty − credited qty."""
+    invoiced = defaultdict(lambda: Decimal('0'))
+    for item in invoice.items.all():
+        if not item.product_id:
+            continue
+        invoiced[str(item.product_id)] += Decimal(str(item.quantity or 0))
+
+    credited_rows = (
+        CreditNoteItem.objects
+        .filter(credit_note__original_invoice=invoice)
+        .values('product_id')
+        .annotate(total=Sum('quantity'))
+    )
+    credited = {
+        str(row['product_id']): Decimal(str(row['total'] or 0))
+        for row in credited_rows
+        if row['product_id']
+    }
+
+    remaining = {}
+    for pid, qty in invoiced.items():
+        rem = qty - credited.get(pid, Decimal('0'))
+        if rem < 0:
+            rem = Decimal('0')
+        remaining[pid] = rem.quantize(TWOPLACES)
+    return remaining
 
 
 # ─── Serializers ──────────────────────────────────────────────
@@ -108,6 +140,17 @@ class CreditNoteSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         from billing.gst_rules import remaining_invoice_returns, section34_warning
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        customer = attrs.get('customer')
+        if not customer:
+            raise serializers.ValidationError({
+                'customer': 'Save this customer first before creating a credit note.'
+            })
+        if tenant and getattr(customer, 'created_by_id', None) != getattr(tenant, 'id', None):
+            raise serializers.ValidationError({
+                'customer': 'Customer not found for this business.'
+            })
         invoice = attrs.get('original_invoice')
         if not invoice:
             raise serializers.ValidationError({
@@ -348,6 +391,26 @@ class DebitNoteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'original_bill': 'Debit notes must reference an original purchase bill.'
             })
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        from .models import Vendor
+        vendor_name = (attrs.get('vendor_name') or '').strip()
+        if not vendor_name:
+            vendor_name = (
+                (getattr(bill, 'vendor_name', None) or '').strip()
+                or (bill.vendor.name if getattr(bill, 'vendor_id', None) else '')
+            )
+            if vendor_name:
+                attrs['vendor_name'] = vendor_name
+
+        vendor = bill.vendor if getattr(bill, 'vendor_id', None) else None
+        if not vendor and vendor_name and tenant:
+            vendor = Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).first()
+        if not vendor:
+            raise serializers.ValidationError({
+                'vendor_name': 'Save this vendor first before creating a debit note.'
+            })
+        attrs['vendor_name'] = vendor.name
         items = attrs.get('items') or []
         if not items:
             raise serializers.ValidationError({

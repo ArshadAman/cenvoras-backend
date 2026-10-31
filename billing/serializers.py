@@ -276,6 +276,18 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'items': 'At least one item is required.'})
         request = self.context.get('request')
         tenant = getattr(getattr(request, 'user', None), 'active_tenant', getattr(request, 'user', None)) if request else None
+        vendor = data.get('vendor')
+        vendor_name = (data.get('vendor_name') or '').strip()
+        if not vendor and vendor_name and tenant:
+            vendor = Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).first()
+            if not vendor:
+                raise serializers.ValidationError({
+                    'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+                })
+        elif not vendor and self.instance is None:
+            raise serializers.ValidationError({
+                'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+            })
         bill_number = data.get('bill_number', getattr(self.instance, 'bill_number', None))
         if tenant and bill_number:
             from billing.sequence_service import is_placeholder_number, number_taken, DuplicateDocumentNumber
@@ -323,24 +335,20 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         vendor_gstin = validated_data.get('vendor_gstin')
         
         if vendor_name:
-            try:
-                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
-                updated = False
-                if vendor_address and not vendor.address:
-                    vendor.address = vendor_address
-                    updated = True
-                if vendor_gstin and not vendor.gstin:
-                    vendor.gstin = vendor_gstin
-                    updated = True
-                if updated:
-                    vendor.save()
-            except Vendor.DoesNotExist:
-                vendor = Vendor.objects.create(
-                    name=vendor_name,
-                    address=vendor_address,
-                    gstin=vendor_gstin,
-                    created_by=user
-                )
+            vendor = Vendor.objects.filter(name__iexact=str(vendor_name).strip(), created_by=user).first()
+            if not vendor:
+                raise serializers.ValidationError({
+                    'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+                })
+            updated = False
+            if vendor_address and not vendor.address:
+                vendor.address = vendor_address
+                updated = True
+            if vendor_gstin and not vendor.gstin:
+                vendor.gstin = vendor_gstin
+                updated = True
+            if updated:
+                vendor.save()
             validated_data['vendor'] = vendor
         
         # Recalculate total amount from items to ensure integrity (line amount + tax)
@@ -407,24 +415,20 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         vendor_gstin = validated_data.get('vendor_gstin', instance.vendor_gstin)
         
         if vendor_name:
-            try:
-                vendor = Vendor.objects.get(name=vendor_name, created_by=user)
-                updated = False
-                if vendor_address and not vendor.address:
-                    vendor.address = vendor_address
-                    updated = True
-                if vendor_gstin and not vendor.gstin:
-                    vendor.gstin = vendor_gstin
-                    updated = True
-                if updated:
-                    vendor.save()
-            except Vendor.DoesNotExist:
-                vendor = Vendor.objects.create(
-                    name=vendor_name,
-                    address=vendor_address,
-                    gstin=vendor_gstin,
-                    created_by=user
-                )
+            vendor = Vendor.objects.filter(name__iexact=str(vendor_name).strip(), created_by=user).first()
+            if not vendor:
+                raise serializers.ValidationError({
+                    'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+                })
+            updated = False
+            if vendor_address and not vendor.address:
+                vendor.address = vendor_address
+                updated = True
+            if vendor_gstin and not vendor.gstin:
+                vendor.gstin = vendor_gstin
+                updated = True
+            if updated:
+                vendor.save()
             validated_data['vendor'] = vendor
 
         from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
@@ -1102,105 +1106,54 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
-        customer_obj = getattr(self.instance, 'customer', None) if self.instance else None
-        
-        # Create/find Customer object by email when available, else by name.
-        if customer_email and customer_email.strip():
-            print("DEBUG SalesInvoiceSerializer: Email provided, will create/find Customer object")
+        # Link an existing Customer when the typed name/email already exists.
+        # Never create a master record from document text — that only happens
+        # via Add Customer (POST /customers/).
+        customer_obj = None
+        if customer_email and str(customer_email).strip():
+            print("DEBUG SalesInvoiceSerializer: Email provided, matching existing customer")
             customer_obj = Customer.objects.filter(email=customer_email, created_by=user).first()
             if customer_obj:
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
-                # Update details if different
-                updated = False
-                if customer_obj.name != customer_name:
-                    customer_obj.name = customer_name
+
+        if not customer_obj and customer_name and customer_name.strip():
+            print("DEBUG SalesInvoiceSerializer: Matching customer by name")
+            customer_obj = Customer.objects.filter(name__iexact=customer_name.strip(), created_by=user).first()
+            if customer_obj:
+                print("DEBUG SalesInvoiceSerializer: Found existing customer by name:", customer_obj.name)
+
+        if customer_obj:
+            updated = False
+            if customer_name and customer_obj.name != customer_name:
+                customer_obj.name = customer_name
+                updated = True
+            if customer_phone and customer_phone != customer_obj.phone:
+                customer_obj.phone = customer_phone
+                updated = True
+            if customer_address and customer_address != customer_obj.address:
+                customer_obj.address = customer_address
+                updated = True
+            if customer_gstin and customer_gstin != customer_obj.gstin:
+                customer_obj.gstin = customer_gstin
+                updated = True
+            if not customer_obj.state and customer_gstin and len(customer_gstin) >= 2:
+                st = normalize_indian_state_choice(customer_gstin[:2])
+                if st:
+                    customer_obj.state = st
                     updated = True
-                if customer_phone and customer_phone != customer_obj.phone:
-                    customer_obj.phone = customer_phone
-                    updated = True
-                if customer_address and customer_address != customer_obj.address:
-                    customer_obj.address = customer_address
-                    updated = True
-                if customer_gstin and customer_gstin != customer_obj.gstin:
-                    customer_obj.gstin = customer_gstin
-                    updated = True
-                if not customer_obj.state and customer_gstin and len(customer_gstin) >= 2:
-                    st = normalize_indian_state_choice(customer_gstin[:2])
-                    if st:
-                        customer_obj.state = st
-                        updated = True
-                elif not customer_obj.state and data.get('place_of_supply'):
-                    customer_obj.state = normalize_indian_state_choice(data.get('place_of_supply'))
-                    updated = True
-                if updated:
-                    customer_obj.save()
-                    print("DEBUG SalesInvoiceSerializer: Updated customer details")
-                PartyMeta.objects.get_or_create(customer=customer_obj)
-            else:
-                # Create new customer with email
-                print("DEBUG SalesInvoiceSerializer: Creating new customer with email:", customer_name)
-                cust_state = None
-                if customer_gstin and len(customer_gstin) >= 2:
-                    cust_state = normalize_indian_state_choice(customer_gstin[:2])
-                if not cust_state and data.get('place_of_supply'):
-                    cust_state = normalize_indian_state_choice(data.get('place_of_supply'))
-                try:
-                    customer_obj = Customer.objects.create(
-                        name=customer_name,
-                        email=customer_email,
-                        phone=customer_phone,
-                        address=customer_address,
-                        state=cust_state,
-                        gstin=customer_gstin or None,
-                        created_by=user,
-                    )
-                    PartyMeta.objects.get_or_create(customer=customer_obj)
-                    print("DEBUG SalesInvoiceSerializer: New customer created:", customer_obj.id)
-                except Exception as e:
-                    error_msg = f'Failed to create customer: {str(e)}'
-                    print("DEBUG SalesInvoiceSerializer: Error creating customer -", error_msg)
-                    raise serializers.ValidationError({'customer_email': error_msg})
+            elif not customer_obj.state and data.get('place_of_supply'):
+                customer_obj.state = normalize_indian_state_choice(data.get('place_of_supply'))
+                updated = True
+            if updated:
+                customer_obj.save()
+                print("DEBUG SalesInvoiceSerializer: Updated customer details")
+            PartyMeta.objects.get_or_create(customer=customer_obj)
+        elif customer_name and customer_name.strip():
+            raise serializers.ValidationError({
+                'customer_name': 'Save this customer first before billing or quoting them.'
+            })
         else:
-            print("DEBUG SalesInvoiceSerializer: No email provided, matching customer by name")
-            if customer_name and customer_name.strip():
-                customer_obj = Customer.objects.filter(name__iexact=customer_name.strip(), created_by=user).first()
-                if customer_obj:
-                    updated = False
-                    if customer_phone and customer_phone != customer_obj.phone:
-                        customer_obj.phone = customer_phone
-                        updated = True
-                    if customer_address and customer_address != customer_obj.address:
-                        customer_obj.address = customer_address
-                        updated = True
-                    if customer_gstin and customer_gstin != customer_obj.gstin:
-                        customer_obj.gstin = customer_gstin
-                        updated = True
-                    if not customer_obj.state and customer_gstin and len(customer_gstin) >= 2:
-                        st = normalize_indian_state_choice(customer_gstin[:2])
-                        if st:
-                            customer_obj.state = st
-                            updated = True
-                    elif not customer_obj.state and data.get('place_of_supply'):
-                        customer_obj.state = normalize_indian_state_choice(data.get('place_of_supply'))
-                        updated = True
-                    if updated:
-                        customer_obj.save()
-                    PartyMeta.objects.get_or_create(customer=customer_obj)
-                else:
-                    cust_state = None
-                    if customer_gstin and len(customer_gstin) >= 2:
-                        cust_state = normalize_indian_state_choice(customer_gstin[:2])
-                    if not cust_state and data.get('place_of_supply'):
-                        cust_state = normalize_indian_state_choice(data.get('place_of_supply'))
-                    customer_obj = Customer.objects.create(
-                        name=customer_name.strip(),
-                        phone=customer_phone or None,
-                        address=customer_address or None,
-                        state=cust_state,
-                        gstin=customer_gstin or None,
-                        created_by=user,
-                    )
-                    PartyMeta.objects.get_or_create(customer=customer_obj)
+            print("DEBUG SalesInvoiceSerializer: No saved customer match; storing name on document only")
 
         if not customer_address:
             if self.instance and getattr(self.instance, 'customer_address', None):
@@ -1401,7 +1354,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Update the sales invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        if resolved_customer is not None:
+        if hasattr(self, '_customer_obj'):
             instance.customer = resolved_customer
         instance.save()
 

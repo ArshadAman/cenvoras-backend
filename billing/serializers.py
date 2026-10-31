@@ -537,8 +537,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         return ret
 
 class SalesInvoiceItemSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(required=False, allow_null=True)
     product = ProductField(required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
+    sort_order = serializers.IntegerField(required=False, default=0, min_value=0)
     product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -577,7 +579,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch', 'source_item_id']
+        fields = ['id', 'sort_order', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch', 'source_item_id']
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -1234,12 +1236,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 item_data.pop('applied_scheme', None)
                 item_data.pop('product_detail', None)
                 item_data.pop('is_scheme_bonus', None)
+                item_data.pop('id', None)
+                item_data['sort_order'] = i
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Creating item {i+1}:", item_data)
                 SalesInvoiceItem.objects.create(sales_invoice=sales_invoice, **item_data)
                 print(f"DEBUG SalesInvoiceSerializer: Item {i+1} created successfully")
 
-            for bonus_item in bonus_items:
+            for j, bonus_item in enumerate(bonus_items):
                 bonus_product = bonus_item.get('product')
                 if bonus_product:
                     SalesInvoiceItem.objects.create(
@@ -1252,6 +1256,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                         discount=bonus_item.get('discount', Decimal('0.00')),
                         tax=bonus_item.get('tax', Decimal('0.00')),
                         amount=Decimal('0.00'),
+                        sort_order=len(items_data) + j,
                     )
 
             print("DEBUG SalesInvoiceSerializer: All items created successfully")

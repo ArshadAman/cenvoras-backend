@@ -1797,7 +1797,9 @@ class HRDashboardView(APIView):
                 "items": [
                     {
                         "id": str(ex.id),
+                        "exception_id": str(ex.id),
                         "employee_id": str(ex.employee.id) if ex.employee else None,
+                        "name": ex.employee.full_name if ex.employee else "General",
                         "employee_name": ex.employee.full_name if ex.employee else "General",
                         "employee_code": ex.employee.employee_code if ex.employee else "",
                         "code": ex.code,
@@ -1824,6 +1826,8 @@ class HRDashboardView(APIView):
                 "items": [
                     {
                         "id": str(emp.id),
+                        "employee_id": str(emp.id),
+                        "name": emp.full_name,
                         "employee_name": emp.full_name,
                         "employee_code": emp.employee_code,
                         "department": emp.department.name if emp.department else "",
@@ -1848,6 +1852,8 @@ class HRDashboardView(APIView):
                 "items": [
                     {
                         "id": str(emp.id),
+                        "employee_id": str(emp.id),
+                        "name": emp.full_name,
                         "employee_name": emp.full_name,
                         "employee_code": emp.employee_code,
                         "department": emp.department.name if emp.department else "",

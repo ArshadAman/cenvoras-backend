@@ -381,46 +381,36 @@ def dashboard_summary(request):
         )
         total_purchases = purchase_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
-        # Inventory
+        # Inventory — same WAC helper as the Stock Valuation report (negatives included)
+        from reports.services import get_stock_valuation
         products = Product.objects.filter(created_by=tenant)
-        total_inventory_value = products.aggregate(
-            value=Sum(F('stock') * F('price'))
-        )['value'] or 0
-        low_stock_count = products.filter(stock__lte=F('low_stock_alert')).count()
+        total_inventory_value = get_stock_valuation(tenant)['total_value']
+        low_stock_count = products.filter(
+            low_stock_alert__gt=0,
+            stock__lt=F('low_stock_alert'),
+        ).count()
 
-        # GST Calculation (FIXED: Calculate actual tax amount, not sum of percentages)
-        # For sales: tax_amount = (quantity * price - discount_amount) * tax_rate / 100
-        sales_items = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=tenant,
-        ).exclude(sales_invoice__status='draft')
+        # GST credit card = GSTR-3B 4(C) for the current IST GST month (ledger Input GST)
+        from zoneinfo import ZoneInfo
+        from django.utils import timezone
+        from django.db.models import Sum as _Sum
+        from ledger.models import GeneralLedgerEntry
+        today_ist = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).date()
+        gst_from = today_ist.replace(day=1)
+        gst_to = today_ist
+
+        def _net_itc(code):
+            qs = GeneralLedgerEntry.objects.filter(
+                created_by=tenant, date__gte=gst_from, date__lte=gst_to, account__code=code,
+            )
+            dr = qs.filter(debit__gt=0, purchase_bill__isnull=False).aggregate(s=_Sum('debit'))['s'] or Decimal('0')
+            cr = qs.filter(credit__gt=0, debit_note__isnull=False).aggregate(s=_Sum('credit'))['s'] or Decimal('0')
+            return max(Decimal(str(dr)) - Decimal(str(cr)), Decimal('0.00'))
+
+        gst_credit_4c = _net_itc('1301') + _net_itc('1302') + _net_itc('1303')
         gst_collected = Decimal('0.00')
-        for item in sales_items:
-            qty = Decimal(item.quantity)
-            price = Decimal(item.price)
-            discount_pct = Decimal(item.discount or 0)
-            tax_rate = Decimal(item.tax or 0)
-
-            line_value = qty * price
-            discount_amount = (line_value * discount_pct) / Decimal('100')
-            taxable_value = line_value - discount_amount
-            tax_amount = (taxable_value * tax_rate) / Decimal('100')
-            gst_collected += tax_amount
-
-        purchase_items = PurchaseBillItem.objects.filter(purchase_bill__created_by=tenant)
         gst_paid = Decimal('0.00')
-        for item in purchase_items:
-            qty = Decimal(item.quantity)
-            price = Decimal(item.price)
-            discount_pct = Decimal(item.discount or 0)
-            tax_rate = Decimal(item.tax or 0)
-
-            line_value = qty * price
-            discount_amount = (line_value * discount_pct) / Decimal('100')
-            taxable_value = line_value - discount_amount
-            tax_amount = (taxable_value * tax_rate) / Decimal('100')
-            gst_paid += tax_amount
-
-        gst_payable = (gst_collected - gst_paid).quantize(Decimal('0.01'))
+        gst_payable = -gst_credit_4c  # negative => UI shows "GST Credit"
 
         # Sales vs Purchases Chart Data (Monthly aggregation)
         sales_by_month = sales_qs.annotate(
@@ -455,13 +445,17 @@ def dashboard_summary(request):
         return {
             'total_sales': float(total_sales),
             'sales_mtd': mtd,
-            'sales_label': mtd.get('label'),
+            'sales_label': mtd.get('label') or 'Sales this month (incl. GST)',
+            'sales_taxable_net': mtd.get('taxable_net'),
+            'sales_taxable_label': 'Taxable this month (excl. GST, net of CNs)',
             'total_purchases': total_purchases,
             'total_inventory_value': total_inventory_value,
             'low_stock_count': low_stock_count,
             'gst_collected': float(gst_collected),
             'gst_paid': float(gst_paid),
             'gst_payable': float(gst_payable),
+            'gst_credit_4c': float(gst_credit_4c),
+            'gst_label': 'GST Credit (3B 4C this month)',
             'sales_vs_purchases': sales_vs_purchases,
         }
 

@@ -299,3 +299,53 @@ class PartnerStatementTests(TestCase):
 		self.assertEqual(entries[1]['running_balance_type'], 'Dr')
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
+class BankDepositTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.user = User.objects.create_user(
+			username="deposit_user",
+			email="deposit@test.com",
+			password="testpassword",
+		)
+		self.client.force_authenticate(user=self.user)
+		AccountingService.get_or_create_default_accounts(self.user)
+
+	def test_owner_deposit_increases_bank(self):
+		res = self.client.post('/api/ledger/bank-deposit/', {
+			'amount': '10000.00',
+			'source': 'owner',
+			'date': date.today().isoformat(),
+			'notes': 'Seed capital',
+		}, format='json')
+		self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+		self.assertEqual(res.data['source'], 'owner')
+		self.assertEqual(res.data['balances']['bank']['balance'], '10000.00')
+
+	def test_cash_deposit_moves_cash_to_bank(self):
+		bank = Account.objects.get(created_by=self.user, code='1002')
+		cash = Account.objects.get(created_by=self.user, code='1001')
+		GeneralLedgerEntry.objects.create(
+			date=date.today(), account=cash, debit=5000, credit=0,
+			description='Cash sales', created_by=self.user,
+		)
+		res = self.client.post('/api/ledger/bank-deposit/', {
+			'amount': '2000',
+			'source': 'cash',
+			'date': date.today().isoformat(),
+		}, format='json')
+		self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+		self.assertEqual(res.data['balances']['bank']['balance'], '2000.00')
+		self.assertEqual(res.data['balances']['cash']['balance'], '3000.00')
+		self.assertTrue(GeneralLedgerEntry.objects.filter(account=bank, debit=2000).exists())
+
+	def test_cash_deposit_blocked_when_cash_empty(self):
+		res = self.client.post('/api/ledger/bank-deposit/', {
+			'amount': '500',
+			'source': 'cash',
+			'date': date.today().isoformat(),
+		}, format='json')
+		self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('Cash', str(res.data))
+
+

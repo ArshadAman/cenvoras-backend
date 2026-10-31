@@ -1,5 +1,5 @@
 from decimal import Decimal
-from django.db.models import Sum, F, Q
+from django.db.models import Sum, F, Q, Value, DecimalField, ExpressionWrapper
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from inventory.models import Product, StockPoint, ProductBatch
@@ -24,7 +24,7 @@ def get_stock_valuation(tenant=None):
     2. Purchase Bill History: Volume-weighted average of all supplier purchase bills.
        WAC = Sum(item.quantity * item.price) / Sum(item.quantity + item.free_quantity)
     3. Baseline Catalog Cost: product.price (opening/catalog cost)
-    4. Fallback: product.sale_price or 0.00
+    Negative stock is included (qty × cost). Sale price is never used.
 
     Optimized with bulk SQL aggregation to operate in O(1) queries (zero N+1 loops).
     """
@@ -73,7 +73,10 @@ def get_stock_valuation(tenant=None):
             purchase_items_qs.values('product_id')
             .annotate(
                 total_qty=Sum(F('quantity') + F('free_quantity')),
-                total_val=Sum(F('quantity') * F('price'))
+                # Net of line discount (%), excl. GST (price is pre-tax). AS 2: trade discounts reduce cost.
+                total_val=Sum(ExpressionWrapper(
+                    F('quantity') * F('price') * (Value(100) - Coalesce(F('discount'), Value(0))) / Value(100),
+                    output_field=DecimalField(max_digits=18, decimal_places=4)))
             )
         )
         purchase_wac_map = {}
@@ -99,14 +102,11 @@ def get_stock_valuation(tenant=None):
                 avg_cost = cost_price
                 method = 'catalog_cost'
             else:
-                avg_cost = sale_price
-                method = 'sale_price_fallback'
+                avg_cost = Decimal('0.00')
+                method = 'unvalued'
 
             avg_cost = avg_cost.quantize(Decimal('0.01'))
-            if stock > 0:
-                value = (stock * avg_cost).quantize(Decimal('0.01'))
-            else:
-                value = Decimal('0.00')
+            value = (stock * avg_cost).quantize(Decimal('0.01'))
 
             total_value += value
 

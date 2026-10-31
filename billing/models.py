@@ -57,12 +57,77 @@ class Payment(models.Model):
     mode = models.CharField(max_length=20, choices=PaymentMode.choices, default=PaymentMode.CASH)
     reference = models.CharField(max_length=100, blank=True, help_text="Cheque No / UPI Transaction ID")
     notes = models.TextField(blank=True)
-    
+    supply_kind = models.CharField(
+        max_length=16,
+        blank=True,
+        default='',
+        choices=[('goods', 'Goods'), ('services', 'Services')],
+        help_text="Drives GST on advances. Goods: no tax at receipt (Notfn 66/2017).",
+    )
+    adjusted_on = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Set when an advance is allocated to an invoice (GSTR-1 atadj).",
+    )
+    # R18 (Rudra CA): service-advance classification confirmed by the user, and the Rule 50 receipt voucher.
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True,
+                                   help_text="Service advance GST rate (18% when it cannot be determined, Rule 50 proviso).")
+    place_of_supply = models.CharField(max_length=50, blank=True, default='',
+                                       help_text="Service advance POS state; 'UNKNOWN' = treated as inter-state (IGST).")
+    receipt_voucher_number = models.CharField(max_length=50, blank=True, default='',
+                                              help_text="Rule 50 receipt voucher number (service advances).")
+
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.customer.name} - {self.amount} ({self.date})"
+
+class AdvanceAdjustment(models.Model):
+    """
+    Application of a customer advance (an unlinked Payment) to a final invoice.
+    The advance's own receipt journals are never touched; this row carries its own
+    adjusting entry dated `date` (and a mirror entry dated `reversed_on` if undone).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name='adjustments')
+    invoice = models.ForeignKey('SalesInvoice', on_delete=models.PROTECT, related_name='advance_adjustments')
+    date = models.DateField(help_text="Application date (GSTR-1 atadj period).")
+    gross = models.DecimalField(max_digits=12, decimal_places=2)
+    taxable = models.DecimalField(max_digits=12, decimal_places=2)
+    cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    reversed_on = models.DateField(null=True, blank=True)
+    # GSTR-1 classification snapshot, fixed when the application is recorded (never recomputed):
+    gstr1_period = models.DateField(null=True, blank=True, help_text="First day of the GSTR-1 period this application belongs to.")
+    netted = models.BooleanField(default=False, help_text="Advance and invoice in the same unfiled period: in neither at nor txpd.")
+    recorded_on = models.DateField(null=True, blank=True, help_text="Date the user recorded the application.")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date', 'created_at']
+
+    @property
+    def tax(self):
+        return self.cgst + self.sgst + self.igst
+
+
+class GSTR1Filing(models.Model):
+    """Per-company, per-month 'GSTR-1 filed' flag. No row = unfiled (default). Set from the GSTR-1 page."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='gstr1_filings')
+    period = models.DateField(help_text="First day of the return month.")
+    filed_on = models.DateField()
+    marked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('created_by', 'period')]
+
 
 class Vendor(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -118,6 +183,12 @@ class PurchaseBill(models.Model):
     vendor_address = models.TextField(blank=True, null=True)
     vendor_gstin = models.CharField(max_length=15, blank=True, null=True)
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)
+    place_of_supply = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Place of supply for the purchase (defaults to buyer's registered state).",
+    )
     journal = models.CharField(max_length=50, default="Purchases")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse where items are received")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)

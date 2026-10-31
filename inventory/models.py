@@ -4,7 +4,46 @@ from django.conf import settings
 
 # Create your models here.
 
+
+def _invalidate_catalog_on_commit(tenant_ids):
+    """R22: bulk .update() fires no signals, so stock changes made with F() expressions (credit notes,
+    debit notes, challans, sync) left the 5-minute product-list cache (inventory.views, keyed by the
+    tenant catalog version) serving old stock. Bump the tenant version after the transaction commits."""
+    from django.db import transaction
+    tenant_ids = {t for t in tenant_ids if t}
+    if not tenant_ids:
+        return
+
+    def _bump():
+        from inventory.views import invalidate_tenant_catalog
+        for tid in tenant_ids:
+            try:
+                invalidate_tenant_catalog(tid)
+            except Exception:
+                pass
+    transaction.on_commit(_bump)
+
+
+class ProductQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        tenant_ids = set(self.values_list('created_by_id', flat=True).distinct()) if 'stock' in kwargs else ()
+        rows = super().update(**kwargs)
+        if tenant_ids:
+            _invalidate_catalog_on_commit(tenant_ids)
+        return rows
+
+
+class StockPointQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        tenant_ids = (set(self.values_list('warehouse__created_by_id', flat=True).distinct())
+                      if 'quantity' in kwargs else ())
+        rows = super().update(**kwargs)
+        if tenant_ids:
+            _invalidate_catalog_on_commit(tenant_ids)
+        return rows
+
 class Product(models.Model):
+    objects = ProductQuerySet.as_manager()
     UNIT_CHOICES = [
         ("pcs", "pcs"),
         ("kg", "kg"),
@@ -140,7 +179,8 @@ class StockPoint(models.Model):
     batch = models.ForeignKey(ProductBatch, on_delete=models.CASCADE, related_name='stock_points')
     warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock_points')
     quantity = models.IntegerField(default=0)
-    
+    objects = StockPointQuerySet.as_manager()
+
     last_updated = models.DateTimeField(auto_now=True)
 
     class Meta:

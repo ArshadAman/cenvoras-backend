@@ -261,7 +261,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
-            'warehouse', 'journal', 'is_reverse_charge',
+            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge',
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
@@ -360,6 +360,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
+        if not validated_data.get('place_of_supply'):
+            from billing.gst_utils import get_seller_state_code, CODE_TO_STATE_NAME
+            buyer_code = get_seller_state_code(user)
+            validated_data['place_of_supply'] = CODE_TO_STATE_NAME.get(buyer_code, buyer_code)
 
         from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         try:
@@ -931,6 +935,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['display_number'] = display_document_number(instance.invoice_number)
         data['bank_account_id'] = getattr(getattr(instance, 'meta', None), 'bank_account_id', None)
         data['template_id'] = getattr(getattr(instance, 'meta', None), 'template_id', None)
+        try:
+            from billing.gst_rules import invoice_pos_decision
+            _c, warn, _e = invoice_pos_decision(customer, instance.place_of_supply, list(instance.items.all()))
+            data['pos_warning'] = warn
+        except Exception:
+            data['pos_warning'] = None
         return data
 
 
@@ -1004,6 +1014,18 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
+        # Rudra CA POS rules (s.10/s.12 IGST Act): block mismatched POS for services / bill-to-ship-to.
+        if 'place_of_supply' in data or not self.instance:
+            from billing.gst_rules import invoice_pos_decision
+            init = getattr(self, 'initial_data', {}) or {}
+            btst = str(init.get('bill_to_ship_to', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+            pos_items = items if items is not None else (list(self.instance.items.all()) if self.instance else [])
+            _code, _warn, pos_error = invoice_pos_decision(
+                customer or getattr(self.instance, 'customer', None), data.get('place_of_supply'), pos_items,
+                bill_to_ship_to=btst, customer_gstin=init.get('customer_gstin', ''))
+            if pos_error:
+                raise serializers.ValidationError({'place_of_supply': pos_error})
+
         if customer:
             if not customer.allow_credit:
                 # Check current balance (Owes us positive) + New Bill delta
@@ -1633,14 +1655,44 @@ class PaymentSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default='')
+    unapplied_amount = serializers.SerializerMethodField()
+    adjustments = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
-            'mode', 'reference', 'notes', 'created_by', 'created_at'
+            'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at',
+            'unapplied_amount', 'adjustments', 'gst_rate', 'place_of_supply', 'receipt_voucher_number',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number']
+        read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number', 'receipt_voucher_number']
+        extra_kwargs = {'gst_rate': {'required': False, 'allow_null': True},
+                        'place_of_supply': {'required': False, 'allow_blank': True}}
+
+    def to_internal_value(self, data):
+        # 'unknown' rate -> 18% (Rule 50 proviso); 'unknown' POS kept as UNKNOWN -> inter-state (IGST).
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        self._rate_given = 'gst_rate' in data
+        self._pos_given = 'place_of_supply' in data
+        if str(data.get('gst_rate', '')).strip().lower() == 'unknown':
+            data['gst_rate'] = '18'
+        elif data.get('gst_rate') == '':
+            data['gst_rate'] = None
+        return super().to_internal_value(data)
+
+    def get_unapplied_amount(self, obj):
+        from billing.advances import unapplied_amount
+        return str(unapplied_amount(obj))
+
+    def get_adjustments(self, obj):
+        return [
+            {'id': str(a.id), 'invoice': str(a.invoice_id), 'invoice_number': a.invoice.invoice_number,
+             'date': str(a.date), 'amount': str(a.gross), 'reversed_on': str(a.reversed_on) if a.reversed_on else None}
+            for a in obj.adjustments.all()
+        ]
 
     def validate(self, attrs):
         customer = attrs.get('customer') or getattr(self.instance, 'customer', None)
@@ -1669,9 +1721,91 @@ class PaymentSerializer(serializers.ModelSerializer):
         elif not customer:
             raise serializers.ValidationError({'customer': 'Customer is required.'})
 
+        pay_date = attrs.get('date', getattr(self.instance, 'date', None))
+        if invoice and pay_date and invoice.invoice_date and pay_date < invoice.invoice_date:
+            # R18 P0-A: money received before the invoice date is an advance (GST at receipt for services).
+            raise serializers.ValidationError({'date': (
+                f'Receipt date {pay_date:%d/%m/%Y} is before invoice {invoice.invoice_number} '
+                f'({invoice.invoice_date:%d/%m/%Y}). Record it as an advance and apply it to the invoice later.')})
+
+        # R18 P1: GSTR-1 filed-month lock for advances (unlinked receipts feed GSTR-1 'at'), same rule as
+        # advance applications (billing.advances._check_open_period).
+        self._check_filed(attrs, invoice, pay_date)
+        if not invoice:
+            self._check_classified(attrs)
+        else:
+            attrs['supply_kind'] = ''
+            attrs['gst_rate'] = None
+            attrs['place_of_supply'] = ''
         return attrs
+
+    def _check_classified(self, attrs):
+        """R18 (Rudra CA): money kept as an advance must be classified by the user; never a silent default."""
+        kind = (attrs.get('supply_kind', getattr(self.instance, 'supply_kind', '')) or '').strip().lower()
+        if kind not in ('goods', 'services'):
+            raise serializers.ValidationError({'supply_kind': (
+                'Classify the advance (or the part not applied to invoices) as goods or services before saving.')})
+        if kind == 'goods':
+            attrs['gst_rate'] = None
+            attrs['place_of_supply'] = ''
+            return
+        rate = attrs.get('gst_rate', getattr(self.instance, 'gst_rate', None))
+        pos = (attrs.get('place_of_supply', getattr(self.instance, 'place_of_supply', '')) or '').strip()
+        if rate is None:
+            raise serializers.ValidationError({'gst_rate': (
+                'A service advance needs a GST rate. Choose "Unknown" to use 18% (Rule 50 proviso).')})
+        # Rudra CA (R19): POS is mandatory on service advances; no 'unknown' / 97. Default = customer state.
+        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
+        code = normalize_state_code(pos) if pos and pos.upper() != 'UNKNOWN' else None
+        if not code or code == '97':
+            raise serializers.ValidationError({'place_of_supply': (
+                'Select the place of supply (state) for this service advance.')})
+        attrs['place_of_supply'] = CODE_TO_STATE_NAME[code]
+        if rate < 0 or rate > 28:
+            raise serializers.ValidationError({'gst_rate': 'GST rate must be between 0 and 28.'})
+
+    def _check_filed(self, attrs, invoice, pay_date):
+        from billing.advances import is_gstr1_filed
+        request = self.context.get('request')
+        if not request:
+            return
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        checks = []
+        if not invoice and pay_date:
+            checks.append(pay_date)
+        inst = self.instance
+        if inst is not None and not inst.invoice_id and inst.date:
+            changed = any(k in attrs and attrs[k] != getattr(inst, k) for k in
+                          ('date', 'amount', 'customer', 'invoice', 'supply_kind'))
+            if changed:
+                checks.append(inst.date)
+        for d in checks:
+            if is_gstr1_filed(tenant, d):
+                raise serializers.ValidationError({'date': FILED_MONTH_MESSAGE})
 
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['created_by'] = getattr(user, 'active_tenant', user)
-        return super().create(validated_data)
+        # Allocate the RV number before insert so the receipt journals can carry it in their narration.
+        if not validated_data.get('invoice') and validated_data.get('supply_kind') == 'services':
+            from billing.sequence_service import allocate_next_number
+            validated_data['receipt_voucher_number'] = allocate_next_number(
+                validated_data['created_by'], document_type='receipt_voucher')
+        return _with_receipt_voucher(super().create(validated_data))
+
+    def update(self, instance, validated_data):
+        return _with_receipt_voucher(super().update(instance, validated_data))
+
+
+FILED_MONTH_MESSAGE = "This month's GSTR-1 is filed. Record the correction in the current month"
+
+
+def _with_receipt_voucher(payment):
+    """Rule 50: every service advance (incl. the remainder of a receipt) gets a sequential receipt voucher."""
+    if payment.invoice_id or payment.supply_kind != 'services' or payment.receipt_voucher_number:
+        return payment
+    from billing.sequence_service import allocate_next_number
+    number = allocate_next_number(payment.created_by, document_type='receipt_voucher')
+    Payment.objects.filter(pk=payment.pk).update(receipt_voucher_number=number)
+    payment.receipt_voucher_number = number
+    return payment

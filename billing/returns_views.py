@@ -57,18 +57,32 @@ class CreditNoteItemSerializer(serializers.ModelSerializer):
                   'quantity', 'unit', 'price', 'discount', 'tax', 'amount']
 
 
+STOCK_RETURN_REASONS = ('return', 'defective')
+
+
 class CreditNoteSerializer(serializers.ModelSerializer):
     items = CreditNoteItemSerializer(many=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
     original_invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True, default=None)
     tax_breakup = serializers.SerializerMethodField()
+    section34_warning = serializers.SerializerMethodField()
+    without_gst = serializers.BooleanField(write_only=True, required=False, default=False)
+    back_dated = serializers.SerializerMethodField()
+    entered_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = CreditNote
         fields = ['id', 'credit_note_number', 'date', 'original_invoice', 'original_invoice_number',
                   'customer', 'customer_name', 'reason', 'notes', 'warehouse',
-                  'total_amount', 'created_by', 'created_at', 'items', 'tax_breakup']
-        read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at']
+                  'total_amount', 'created_by', 'created_at', 'items', 'tax_breakup',
+                  'section34_warning', 'gst_time_barred', 'without_gst', 'back_dated', 'entered_by_name',
+                  'stock_restored']
+        read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at', 'section34_warning',
+                            'gst_time_barred', 'stock_restored']
+        extra_kwargs = {
+            'original_invoice': {'required': True, 'allow_null': False},
+            'date': {'required': False},  # R21: defaults to today (IST)
+        }
 
     def get_tax_breakup(self, obj):
         """Same computation as GSTR-1 CDNR (billing.gst_utils.credit_note_tax_breakup). Money as strings."""
@@ -86,7 +100,46 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             'totals': {k: m(v) for k, v in brk['totals'].items()},
         }
 
+    def get_back_dated(self, obj):
+        """R21 (Rudra CA): non-blocking flag when the CN date is before the day it was entered (IST)."""
+        if not obj.created_at or not obj.date:
+            return None
+        from django.utils import timezone
+        entered = timezone.localtime(obj.created_at).date()
+        if obj.date < entered:
+            return {'entered_on': entered.isoformat(),
+                    'message': f"Back-dated entry: dated {obj.date:%d/%m/%Y}, entered on {entered:%d/%m/%Y}."}
+        return None
+
+    def get_entered_by_name(self, obj):
+        u = obj.entered_by
+        if not u:
+            return None
+        full = (getattr(u, 'get_full_name', lambda: '')() or '').strip()
+        return full or getattr(u, 'email', None) or getattr(u, 'username', None)
+
+    def get_section34_warning(self, obj):
+        from billing.gst_rules import section34_warning
+        orig = obj.original_invoice
+        if not orig:
+            return None
+        has_tax = any(Decimal(str(i.tax or 0)) > 0 for i in obj.items.all())
+        return section34_warning(orig.invoice_date, obj.date, has_tax)
+
+    def validate_original_invoice(self, value):
+        if not value:
+            raise serializers.ValidationError('Credit notes must reference the original posted invoice.')
+        if getattr(value, 'status', None) != 'final':
+            raise serializers.ValidationError('A credit note needs a posted, issued invoice — drafts are not allowed.')
+        request = self.context.get('request')
+        if request:
+            tenant = getattr(request.user, 'active_tenant', request.user)
+            if getattr(value, 'created_by_id', None) != getattr(tenant, 'id', None):
+                raise serializers.ValidationError('Invoice not found for this business.')
+        return value
+
     def validate(self, attrs):
+        from billing.gst_rules import remaining_invoice_returns, section34_warning
         request = self.context.get('request')
         tenant = getattr(request.user, 'active_tenant', request.user) if request else None
         customer = attrs.get('customer')
@@ -98,30 +151,113 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'customer': 'Customer not found for this business.'
             })
-
-        original_invoice = attrs.get('original_invoice')
-        if original_invoice:
-            remaining_map = remaining_qty_for_invoice(original_invoice)
-            requested = defaultdict(lambda: Decimal('0'))
-            for item in attrs.get('items') or []:
-                product = item.get('product')
-                if not product:
-                    continue
-                pid = str(getattr(product, 'pk', product))
-                requested[pid] += Decimal(str(item.get('quantity') or 0))
-            for pid, qty in requested.items():
-                rem = remaining_map.get(pid, Decimal('0'))
-                if qty > rem:
-                    raise serializers.ValidationError({
-                        'items': (
-                            f'Quantity {qty} exceeds remaining creditable quantity {rem} '
-                            f'for this invoice.'
-                        )
-                    })
+        invoice = attrs.get('original_invoice')
+        if not invoice:
+            raise serializers.ValidationError({
+                'original_invoice': 'Credit notes must reference the original posted invoice.'
+            })
+        items = attrs.get('items') or []
+        if not items:
+            raise serializers.ValidationError({'items': 'At least one item is required.'})
+        # R21: CN date (default today): not before the invoice, not in the future, not in a filed month.
+        from billing.advances import today_ist, is_gstr1_filed
+        if not attrs.get('date'):
+            attrs['date'] = today_ist()
+        if attrs['date'] < invoice.invoice_date:
+            raise serializers.ValidationError({'date': (
+                f"The credit note date can't be before the invoice date ({invoice.invoice_date:%d/%m/%Y}).")})
+        if attrs['date'] > today_ist():
+            raise serializers.ValidationError({'date': "The credit note date can't be in the future."})
+        if is_gstr1_filed(invoice.created_by, attrs['date']):
+            raise serializers.ValidationError({'date': (
+                "That month's GSTR-1 is filed. Date the credit note in the current month.")})
+        for it in items:
+            q = Decimal(str(it.get('quantity', 0) or 0))
+            if q <= 0:
+                raise serializers.ValidationError({'items': 'Quantities must be greater than 0.'})
+            if q != q.quantize(Decimal('0.01')):
+                raise serializers.ValidationError({'items': 'Quantities can have at most 2 decimals.'})
+            if attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value():
+                raise serializers.ValidationError({'items': (
+                    'Returns and defective items must be whole units. For a part-quantity '
+                    'credit, choose the reason "Post-Sale Discount", "Rate Difference" or "Other".')})
+        # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
+        from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
+        _nd = attrs.get('date') or getattr(self.instance, 'date', None)
+        bar_reason = cn_time_bar(invoice.created_by, invoice.invoice_date, _nd)
+        time_barred = bool(bar_reason)
+        without_gst = bool(attrs.pop('without_gst', False))
+        if without_gst and not time_barred:
+            raise serializers.ValidationError({'without_gst': (
+                "A credit note without GST is only for time-barred credit notes (s.34(2)); this one is in time.")})
+        if without_gst:
+            for it in items:
+                it['tax'] = Decimal('0')
+            attrs['gst_time_barred'] = True
+        elif time_barred and any(Decimal(str(it.get('tax', 0) or 0)) > 0 for it in items):
+            raise serializers.ValidationError({
+                'code': 'cn_time_barred',
+                'section34': (
+                    f"GST can't be reduced on invoice {invoice.invoice_number} (s.34(2)): {bar_reason}. Issue it as 'Credit note without GST (time-barred under s.34)'? "
+                    f"It will reduce the customer balance and sales value with no output-tax reversal."),
+                'offer_without_gst': True,
+            })
+        if not without_gst:
+            cap_errors = cn_tax_cap_errors(invoice, items)
+            if cap_errors:
+                raise serializers.ValidationError({'code': 'cn_tax_cap', 'tax': cap_errors})
+        remaining = remaining_invoice_returns(invoice)
+        this_taxable = Decimal('0.00')
+        this_total = Decimal('0.00')
+        this_has_tax = False
+        qty_by_product = {}
+        for item in items:
+            product = item.get('product')
+            pid = str(getattr(product, 'pk', product))
+            qty = Decimal(str(item.get('quantity', 0) or 0))
+            qty_by_product[pid] = qty_by_product.get(pid, Decimal('0.00')) + qty
+            price = Decimal(str(item.get('price', 0) or 0))
+            discount = Decimal(str(item.get('discount', 0) or 0))
+            tax_rate = Decimal(str(item.get('tax', 0) or 0))
+            base = qty * price
+            disc = ((base * discount) / Decimal('100')).quantize(Decimal('0.01'))
+            taxable = (base - disc).quantize(Decimal('0.01'))
+            tax_amt = ((taxable * tax_rate) / Decimal('100')).quantize(Decimal('0.01')) if tax_rate > 0 else Decimal('0.00')
+            this_taxable += taxable
+            this_total += taxable + tax_amt
+            if tax_rate > 0:
+                this_has_tax = True
+        if without_gst:
+            attrs['total_amount'] = this_total  # commercial CN: no tax component
+        for pid, qty in qty_by_product.items():
+            allowed = remaining['remaining_qty'].get(pid, Decimal('0.00'))
+            if qty > allowed:
+                raise serializers.ValidationError({
+                    'items': f'Return quantity exceeds remaining quantity on the original invoice ({allowed}).'
+                })
+        if this_taxable > remaining['remaining_taxable'] + Decimal('0.05'):
+            raise serializers.ValidationError({
+                'items': 'Credit note taxable value exceeds the remaining value of the original invoice.'
+            })
+        if this_total + remaining['used_total'] > remaining['invoice_total'] + Decimal('0.05'):
+            raise serializers.ValidationError({
+                'items': 'Total credit notes against this invoice cannot exceed the invoice value.'
+            })
+        note_date = attrs.get('date') or getattr(self.instance, 'date', None)
+        warning = section34_warning(invoice.invoice_date, note_date, this_has_tax)
+        attrs['_section34_warning'] = warning
         return attrs
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        extra = getattr(self, '_section34_warning', None)
+        if extra and not ret.get('section34_warning'):
+            ret['section34_warning'] = extra
+        return ret
 
     @transaction.atomic
     def create(self, validated_data):
+        self._section34_warning = validated_data.pop('_section34_warning', None)
         from decimal import Decimal
         items_data = validated_data.pop('items')
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
@@ -169,6 +305,12 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         if not validated_data.get('total_amount') or Decimal(str(validated_data['total_amount'])) < total_gross:
             validated_data['total_amount'] = total_gross
 
+        # R21 (Rudra CA): only goods actually coming back move stock. Discount / rate difference / other
+        # credit notes NEVER touch stock. TODO(Rudra): Defective should go to a damaged/scrap bucket, not
+        # saleable stock (ticket: engineering/lock-date-ticket.md, 'Defective returns -> damaged/scrap stock').
+        restores_stock = validated_data.get('reason', 'return') in STOCK_RETURN_REASONS
+        validated_data['stock_restored'] = restores_stock
+        validated_data['entered_by'] = self.context['request'].user
         credit_note = CreditNote.objects.create(**validated_data)
 
         target_warehouse = credit_note.warehouse
@@ -178,8 +320,13 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         for item_data in processed_items:
             CreditNoteItem.objects.create(credit_note=credit_note, **item_data)
 
-            # Restore stock (returned goods come back in)
-            qty = item_data['quantity']
+            # Restore stock (returned goods come back in). R21: only Goods Returned / Defective, whole units.
+            if not restores_stock:
+                continue
+            qty = Decimal(str(item_data['quantity']))
+            if qty != qty.to_integral_value():
+                continue
+            qty = int(qty)
             Product.objects.filter(pk=item_data['product'].pk).update(stock=F('stock') + qty)
 
             if item_data.get('batch') and target_warehouse:
@@ -213,10 +360,11 @@ class DebitNoteItemSerializer(serializers.ModelSerializer):
 
 class DebitNoteSerializer(serializers.ModelSerializer):
     items = DebitNoteItemSerializer(many=True)
+    original_bill_number = serializers.CharField(source='original_bill.bill_number', read_only=True, default=None)
 
     class Meta:
         model = DebitNote
-        fields = ['id', 'debit_note_number', 'date', 'original_bill',
+        fields = ['id', 'debit_note_number', 'date', 'original_bill', 'original_bill_number',
                   'vendor_name', 'vendor_gstin', 'reason', 'notes', 'warehouse',
                   'total_amount', 'created_by', 'created_at', 'items']
         read_only_fields = ['id', 'debit_note_number', 'created_by', 'created_at']
@@ -237,24 +385,25 @@ class DebitNoteSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        if not attrs.get('original_bill'):
+        from billing.gst_rules import remaining_bill_returns
+        bill = attrs.get('original_bill')
+        if not bill:
             raise serializers.ValidationError({
                 'original_bill': 'Debit notes must reference an original purchase bill.'
             })
         request = self.context.get('request')
         tenant = getattr(request.user, 'active_tenant', request.user) if request else None
         from .models import Vendor
-        original_bill = attrs.get('original_bill')
         vendor_name = (attrs.get('vendor_name') or '').strip()
-        if not vendor_name and original_bill:
+        if not vendor_name:
             vendor_name = (
-                (getattr(original_bill, 'vendor_name', None) or '').strip()
-                or (original_bill.vendor.name if getattr(original_bill, 'vendor_id', None) else '')
+                (getattr(bill, 'vendor_name', None) or '').strip()
+                or (bill.vendor.name if getattr(bill, 'vendor_id', None) else '')
             )
             if vendor_name:
                 attrs['vendor_name'] = vendor_name
 
-        vendor = original_bill.vendor if original_bill and getattr(original_bill, 'vendor_id', None) else None
+        vendor = bill.vendor if getattr(bill, 'vendor_id', None) else None
         if not vendor and vendor_name and tenant:
             vendor = Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).first()
         if not vendor:
@@ -262,6 +411,43 @@ class DebitNoteSerializer(serializers.ModelSerializer):
                 'vendor_name': 'Save this vendor first before creating a debit note.'
             })
         attrs['vendor_name'] = vendor.name
+        items = attrs.get('items') or []
+        if not items:
+            raise serializers.ValidationError({
+                'items': 'Header-only debit notes are not allowed. Add lines from the original bill.'
+            })
+        remaining = remaining_bill_returns(bill)
+        this_taxable = Decimal('0.00')
+        this_tax = Decimal('0.00')
+        qty_by_product = {}
+        for item in items:
+            product = item.get('product')
+            pid = str(getattr(product, 'pk', product))
+            qty = Decimal(str(item.get('quantity', 0) or 0))
+            qty_by_product[pid] = qty_by_product.get(pid, Decimal('0.00')) + qty
+            price = Decimal(str(item.get('price', 0) or 0))
+            discount = Decimal(str(item.get('discount', 0) or 0))
+            tax_rate = Decimal(str(item.get('tax', 0) or 0))
+            base = qty * price
+            disc = ((base * discount) / Decimal('100')).quantize(Decimal('0.01'))
+            taxable = (base - disc).quantize(Decimal('0.01'))
+            tax_amt = ((taxable * tax_rate) / Decimal('100')).quantize(Decimal('0.01')) if tax_rate > 0 else Decimal('0.00')
+            this_taxable += taxable
+            this_tax += tax_amt
+        for pid, qty in qty_by_product.items():
+            allowed = remaining['remaining_qty'].get(pid, Decimal('0.00'))
+            if qty > allowed:
+                raise serializers.ValidationError({
+                    'items': f'Return quantity exceeds remaining quantity on the original bill ({allowed}).'
+                })
+        if this_taxable > remaining['remaining_taxable'] + Decimal('0.05'):
+            raise serializers.ValidationError({
+                'items': 'Debit note taxable value exceeds remaining purchases on the original bill.'
+            })
+        if this_tax > remaining['remaining_tax'] + Decimal('0.05'):
+            raise serializers.ValidationError({
+                'items': 'Debit note GST reversal exceeds remaining ITC on the original bill.'
+            })
         return attrs
 
     @transaction.atomic
@@ -358,26 +544,49 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 
 # ─── API Views ────────────────────────────────────────────────
 
+def _remaining_payload(remaining):
+    q = lambda d: str(Decimal(d).quantize(Decimal('0.01')))
+    return {
+        'remaining_qty': {pid: q(max(v, Decimal('0'))) for pid, v in remaining['remaining_qty'].items()},
+        'remaining_taxable': q(remaining['remaining_taxable']),
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def debit_note_remaining(request):
+    """Qty still debitable per product id on a purchase bill (same rule the DN serializer enforces)."""
+    from billing.models import PurchaseBill
+    from billing.gst_rules import remaining_bill_returns
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    bill = PurchaseBill.objects.filter(pk=request.query_params.get('bill'), created_by=tenant).first() \
+        if _is_uuid(request.query_params.get('bill')) else None
+    if not bill:
+        return Response({'error': 'Purchase bill not found'}, status=404)
+    return Response(_remaining_payload(remaining_bill_returns(bill)))
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def credit_note_remaining(request):
-    """Remaining creditable qty per product on an original sales invoice."""
+    """Qty still creditable per product id on a sales invoice (same rule the CN serializer enforces)."""
+    from billing.models import SalesInvoice
+    from billing.gst_rules import remaining_invoice_returns
     tenant = getattr(request.user, 'active_tenant', request.user)
-    invoice_id = request.query_params.get('invoice')
-    if not invoice_id:
-        return Response({'error': 'invoice is required'}, status=status.HTTP_400_BAD_REQUEST)
+    inv = SalesInvoice.objects.filter(pk=request.query_params.get('invoice'), created_by=tenant).first() \
+        if _is_uuid(request.query_params.get('invoice')) else None
+    if not inv:
+        return Response({'error': 'Invoice not found'}, status=404)
+    return Response(_remaining_payload(remaining_invoice_returns(inv)))
+
+
+def _is_uuid(v):
+    import uuid
     try:
-        invoice = (
-            SalesInvoice.objects
-            .prefetch_related('items')
-            .get(pk=invoice_id, created_by=tenant)
-        )
-    except (SalesInvoice.DoesNotExist, ValueError):
-        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
-    remaining = remaining_qty_for_invoice(invoice)
-    return Response({
-        'remaining_qty': {pid: str(qty) for pid, qty in remaining.items()},
-    })
+        uuid.UUID(str(v))
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 @api_view(['GET', 'POST'])
@@ -386,7 +595,7 @@ def credit_note_list_create(request):
     tenant = getattr(request.user, 'active_tenant', request.user)
     if request.method == 'GET':
         notes = (CreditNote.objects.filter(created_by=tenant)
-                 .select_related('customer', 'original_invoice', 'created_by')
+                 .select_related('customer', 'original_invoice', 'created_by', 'entered_by')  # R22: no per-note user query
                  .prefetch_related('items__product').order_by('-date'))
         serializer = CreditNoteSerializer(notes, many=True)
         return Response(serializer.data)
@@ -406,7 +615,7 @@ def credit_note_list_create(request):
 def credit_note_detail(request, pk):
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        note = (CreditNote.objects.select_related('customer', 'original_invoice', 'created_by')
+        note = (CreditNote.objects.select_related('customer', 'original_invoice', 'created_by', 'entered_by')  # R22: no per-note user query
                 .prefetch_related('items__product').get(pk=pk, created_by=tenant))
     except CreditNote.DoesNotExist:
         return Response({'error': 'Not found'}, status=404)

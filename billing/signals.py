@@ -415,6 +415,9 @@ def track_payment_pre_save(sender, instance, **kwargs):
                 'date': old.date,
                 'reference': old.reference,
                 'notes': old.notes,
+                'supply_kind': old.supply_kind,
+                'gst_rate': old.gst_rate,
+                'place_of_supply': old.place_of_supply,
             }
         except Payment.DoesNotExist:
             instance._old_state = None
@@ -523,24 +526,71 @@ def update_balance_on_payment(sender, instance, created, **kwargs):
                     pass
             logger.debug(f"Payment {instance.pk} edit - Swapped invoices: {old_invoice_id} -> {new_invoice_id}")
 
-        # 3. Rebuild General Ledger Entries for this payment
-        try:
-            from ledger.models import GeneralLedgerEntry
-            from ledger.services import AccountingService
-            GeneralLedgerEntry.objects.filter(reference=f"Payment Received {instance.id}").delete()
-            AccountingService.create_payment_received_entries(
-                customer=instance.customer,
-                amount=instance.amount,
-                description=instance.notes or f"Payment received ({instance.get_mode_display()}) - {instance.reference or ''}".strip(' -'),
-                date=instance.date,
-                user=instance.created_by,
-                invoice=instance.invoice,
-                payment_id=instance.id,
-                payment_mode=instance.mode,
-            )
-            logger.debug(f"Rebuilt ledger entries for edited payment {instance.id}")
-        except Exception as e:
-            logger.error(f"Error updating ledger entries for payment edit: {e}")
+        # 3. Audit trail (R18, Rudra CA): never overwrite/delete posted journals. Post a reversal of what is
+        # currently on the books for this receipt (dated as originally posted), then re-post the edited receipt.
+        keys = ('customer_id', 'invoice_id', 'amount', 'mode', 'date', 'notes', 'reference',
+                'supply_kind', 'gst_rate', 'place_of_supply')
+        if any(old_state.get(k) != getattr(instance, k) for k in keys):
+            try:
+                repost_payment_journals(instance, user=getattr(instance, '_edited_by', None),
+                                        reason=getattr(instance, '_edit_reason', None))
+            except Exception as e:
+                logger.error(f"Error re-posting ledger entries for payment edit: {e}")
+                raise
+
+
+def repost_payment_journals(instance, user=None, reason=None):
+    """Reversal dated on the ORIGINAL posting date(s); re-post dated on the corrected (edited) payment date.
+    Each new line records entered_by, created_at (auto), correction_of (original entry) and correction_reason."""
+    from collections import defaultdict
+    from ledger.models import GeneralLedgerEntry
+    from ledger.services import AccountingService
+    prefix = f"Payment Received {instance.id}"
+    lines = GeneralLedgerEntry.objects.filter(reference__startswith=prefix, created_by=instance.created_by)
+    version = lines.filter(reference__startswith=f"{prefix} rev ").values('reference').distinct().count() + 1
+    reason = (reason or '').strip() or 'Receipt edited'
+    user = user if getattr(user, 'pk', None) else None
+    lines = list(lines.order_by('created_at'))
+    before_ids = {l.id for l in lines}
+    originals = [l for l in lines if not l.correction_kind]
+    first_original = {}
+    for l in originals:
+        first_original.setdefault(l.account_id, l)
+    net = defaultdict(lambda: Decimal('0'))
+    latest = {}
+    for l in lines:
+        k = (l.account_id, l.date, l.customer_id, l.sales_invoice_id)
+        net[k] += (l.debit or 0) - (l.credit or 0)
+        if l.correction_kind != 'reversal':
+            latest[k] = l  # the entry currently in force for this key
+    for (account_id, d, customer_id, sales_invoice_id), bal in net.items():
+        if bal == 0:
+            continue
+        GeneralLedgerEntry.objects.create(
+            account_id=account_id, date=d, customer_id=customer_id, sales_invoice_id=sales_invoice_id,
+            payment=instance, created_by=instance.created_by, reference=f"{prefix} rev {version}",
+            debit=-bal if bal < 0 else 0, credit=bal if bal > 0 else 0,
+            description=f"Reversal: {reason} (version {version})",
+            entered_by=user, correction_kind='reversal', correction_of=latest.get((account_id, d, customer_id, sales_invoice_id)),
+            correction_reason=reason)
+    AccountingService.create_payment_received_entries(
+        customer=instance.customer,
+        amount=instance.amount,
+        description=instance.notes or f"Payment received ({instance.get_mode_display()}) - {instance.reference or ''}".strip(' -'),
+        date=instance.date,
+        user=instance.created_by,
+        invoice=instance.invoice,
+        payment_id=instance.id,
+        payment_mode=instance.mode,
+    )
+    any_original = originals[0] if originals else None
+    for l in GeneralLedgerEntry.objects.filter(reference__startswith=prefix, created_by=instance.created_by
+                                               ).exclude(id__in=before_ids).exclude(correction_kind='reversal'):
+        l.entered_by = user
+        l.correction_kind = 'repost'
+        l.correction_of = first_original.get(l.account_id) or any_original
+        l.correction_reason = reason
+        l.save(update_fields=['entered_by', 'correction_kind', 'correction_of', 'correction_reason'])
 
 
 @receiver(post_delete, sender=Payment)
@@ -569,7 +619,7 @@ def revert_balance_on_payment_delete(sender, instance, **kwargs):
         # Clean up General Ledger entries
         try:
             from ledger.models import GeneralLedgerEntry
-            GeneralLedgerEntry.objects.filter(reference=f"Payment Received {instance.id}").delete()
+            GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {instance.id}").delete()
             logger.debug(f"Deleted ledger entries for deleted payment {instance.id}")
         except Exception as e:
             logger.error(f"Error deleting ledger entries for payment delete: {e}")

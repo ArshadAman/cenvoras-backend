@@ -80,6 +80,8 @@ def get_tenant_full_prefix(tenant, document_type='sales_invoice', prefix=None, i
         base = prefix or 'BILL'
     elif document_type == 'purchase_order':
         base = prefix or 'PO'
+    elif document_type == 'receipt_voucher':
+        base = prefix or 'RV'
     else:
         base = prefix or 'DOC'
 
@@ -152,7 +154,7 @@ def make_draft_placeholder(document_type='sales_invoice'):
 
 
 def _get_model_and_field(document_type):
-    from billing.models import SalesInvoice, PurchaseBill, PurchaseOrder
+    from billing.models import SalesInvoice, PurchaseBill, PurchaseOrder, Payment
     from billing.models_returns import CreditNote, DebitNote
     from billing.models_sidecar import Quotation, SalesOrder, DeliveryChallan
 
@@ -165,6 +167,7 @@ def _get_model_and_field(document_type):
         'delivery_challan': (DeliveryChallan, 'challan_number'),
         'purchase_bill': (PurchaseBill, 'bill_number'),
         'purchase_order': (PurchaseOrder, 'po_number'),
+        'receipt_voucher': (Payment, 'receipt_voucher_number'),
     }
     return mapping.get(document_type, (SalesInvoice, 'invoice_number'))
 

@@ -67,109 +67,38 @@ def profit_loss_statement(request):
     # Ensure default accounts exist
     AccountingService.get_or_create_default_accounts(user)
 
-    # Get Revenue accounts
-    revenue_accounts = Account.objects.filter(
-        created_by=user, account_type=AccountType.REVENUE, is_active=True
-    ).order_by('code', 'name')
-
-    # Get Expense accounts
-    expense_accounts = Account.objects.filter(
-        created_by=user, account_type=AccountType.EXPENSE, is_active=True
-    ).order_by('code', 'name')
-
-    def get_balance(account):
-        entries = GeneralLedgerEntry.objects.filter(account=account, created_by=user)
-        if from_date:
-            entries = entries.filter(date__gte=from_date)
-        if to_date:
-            entries = entries.filter(date__lte=to_date)
-        totals = entries.aggregate(
-            total_debit=Sum('debit'),
-            total_credit=Sum('credit')
-        )
-        dr = totals['total_debit'] or Decimal('0')
-        cr = totals['total_credit'] or Decimal('0')
-        if account.account_type in [AccountType.ASSET, AccountType.EXPENSE]:
-            return dr - cr
-        return cr - dr
-
-    revenue_items = []
-    total_revenue = Decimal('0')
-    for acc in revenue_accounts:
-        bal = get_balance(acc)
-        if bal != 0:
-            revenue_items.append({
-                'id': str(acc.id),
-                'code': acc.code,
-                'name': acc.name,
-                'amount': float(bal),
-            })
-            total_revenue += bal
-
-    expense_items = []
-    total_expenses = Decimal('0')
-    for acc in expense_accounts:
-        bal = get_balance(acc)
-        if bal != 0:
-            expense_items.append({
-                'id': str(acc.id),
-                'code': acc.code,
-                'name': acc.name,
-                'amount': float(bal),
-            })
-            total_expenses += bal
-
-    sales_items = SalesInvoiceItem.objects.filter(
-        Q(sales_invoice__created_by=user) | Q(sales_invoice__created_by__parent=user),
-        sales_invoice__status='final',
-    )
-    if from_date:
-        sales_items = sales_items.filter(sales_invoice__invoice_date__gte=from_date)
-    if to_date:
-        sales_items = sales_items.filter(sales_invoice__invoice_date__lte=to_date)
-
-    # Synthetic COGS only when GL has no COGS — never include GST (liability)
-    has_gl_cogs = any(
-        (item.get('code') or '') in {'5001', 'COGS'} or 'cost of goods' in (item.get('name') or '').lower()
-        for item in expense_items
-    )
-    sales_cogs = Decimal('0')
-    if not has_gl_cogs:
-        for item in sales_items.select_related('product', 'batch'):
-            qty = Decimal(str(item.quantity or 0))
-            if item.batch and item.batch.cost_price:
-                cost_price = Decimal(str(item.batch.cost_price))
-            elif item.product and item.product.price:
-                cost_price = Decimal(str(item.product.price))
-            else:
-                cost_price = Decimal('0')
-            sales_cogs += qty * cost_price
-
-        if sales_cogs:
-            expense_items.append({
-                'id': 'sales-cogs',
-                'code': 'COGS',
-                'name': 'Cost of Goods Sold (Sales Invoices)',
-                'amount': float(sales_cogs),
-            })
-            # Informational only — net_profit uses GL so P&L matches Balance Sheet RE
-
-    _rev, _exp, net_profit = compute_gl_net_profit(user, from_date=from_date, to_date=to_date)
+    from .pnl import build_statement, cogs_memo
+    st = build_statement(user, from_date=from_date, to_date=to_date)
+    total_revenue = st['total_revenue']
+    net_profit = st['net_profit']
     margin = (net_profit / total_revenue * 100) if total_revenue > 0 else Decimal('0')
+    inv = st['inventory']
+    f = lambda d: float(Decimal(d).quantize(Decimal('0.01')))
+
+    def ser(items):
+        return [{**i, 'amount': f(i['amount'])} for i in items]
 
     return Response({
         'from_date': from_date,
         'to_date': to_date,
-        'revenue': {
-            'items': revenue_items,
-            'total': float(total_revenue),
+        'basis': st['basis'],
+        'revenue': {'items': ser(st['revenue_items']), 'total': f(total_revenue)},
+        'expenses': {'items': ser(st['expense_items']), 'total': f(st['total_expenses'])},
+        'inventory': {
+            'opening_stock': f(inv['opening']),
+            'closing_stock': f(inv['closing']),
+            'change': f(inv['change']),
+            'valuation': ('At cost (weighted average), excluding GST where ITC is claimed and net of discounts. '
+                          'Inward freight is not included (bills have no freight field). '
+                          'Lower of cost and NRV is not applied: no NRV data.'),
+            'negative_stock_items': inv['negative_items'][:50],
+            'stock_data_incomplete': inv['stock_data_incomplete'],
+            'warnings': inv['warnings'],
         },
-        'expenses': {
-            'items': expense_items,
-            'total': float(total_expenses),
-        },
-        'net_profit': float(net_profit),
-        'profit_margin': float(margin.quantize(Decimal('0.01'))) if isinstance(margin, Decimal) else float(margin),
+        # Memo only, never added to expenses (Schedule III has no COGS line for traders).
+        'memo': {'cogs_estimate': f(cogs_memo(user, from_date, to_date))},
+        'net_profit': f(net_profit),
+        'profit_margin': float(Decimal(margin).quantize(Decimal('0.01'))),
     })
 
 
@@ -257,9 +186,24 @@ def balance_sheet(request):
             })
             total_equity += bal
 
-    # Retained Earnings — same helper as P&L net profit
-    _rev, _exp, retained_earnings = compute_gl_net_profit(tenant, as_of=as_of)
+    # Retained Earnings — same helper as P&L net profit (cumulative, incl. inventory change)
+    from .pnl import compute_net_profit, PNL_PRESENTATION
+    _rev, _exp, retained_earnings, inv = compute_net_profit(tenant, as_of=as_of or None)
     total_equity += retained_earnings
+    if PNL_PRESENTATION == 'schedule_iii':
+        # Periodic inventory: stock is not in the GL, so show closing stock as an asset and the
+        # opening position brought into Cenvora (before any dated document) as capital. Balances because
+        # cumulative profit already includes (opening - closing).
+        # Current assets: closing stock (never negative; see stock_data_incomplete)
+        asset_items.append({'id': 'inventories', 'code': 'INV', 'name': 'Inventories (stock-in-trade)',
+                            'group': 'Current assets', 'amount': float(inv['closing'])})
+        total_assets += inv['closing']
+        # Reserves & Surplus: go-live opening stock only. Later periods roll closing -> opening via RE.
+        if inv['golive'] != 0:
+            equity_items.append({'id': 'opening-stock-adjustment', 'code': 'INV-OB',
+                                 'name': 'Opening stock adjustment', 'group': 'Reserves & Surplus',
+                                 'amount': float(inv['golive'])})
+            total_equity += inv['golive']
 
     is_balanced = abs(total_assets - (total_liabilities + total_equity)) < Decimal('0.01')
     difference = total_assets - (total_liabilities + total_equity)
@@ -281,6 +225,12 @@ def balance_sheet(request):
         },
         'is_balanced': is_balanced,
         'difference': float(difference),
+        'inventory': {
+            'closing_stock': float(inv['closing']) if PNL_PRESENTATION == 'schedule_iii' else 0.0,
+            'stock_data_incomplete': inv['stock_data_incomplete'] if PNL_PRESENTATION == 'schedule_iii' else False,
+            'warnings': inv['warnings'] if PNL_PRESENTATION == 'schedule_iii' else [],
+            'negative_stock_items': inv['negative_items'][:50] if PNL_PRESENTATION == 'schedule_iii' else [],
+        },
     })
 
 

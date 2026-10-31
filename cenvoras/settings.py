@@ -99,6 +99,7 @@ MIDDLEWARE = [
     'audit_log.middleware.AuditMiddleware',
     'users.middleware.ManagerPermissionMiddleware',
     'users.middleware.RegionalContextMiddleware',
+    'cenvoras.nocache_middleware.ApiNoStoreMiddleware',
 ]
 
 # OWASP Security Hardening
@@ -169,8 +170,8 @@ else:
         }
     }
 
-# Redis Caching
-if os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
+# Redis Caching — LocMem in tests so throttle never needs a live Redis.
+if TESTING or os.environ.get('USE_LOCAL_CACHE', 'False').lower() == 'true':
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
@@ -408,3 +409,10 @@ BACKUP_ALERT_EMAIL = os.environ.get('BACKUP_ALERT_EMAIL', 'support@cenvora.app')
 # Google OAuth Settings
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip('"').strip("'")
 
+
+# GSTR-1 advances (Rudra CA): JSON key for Table 11B advance adjustments, and whether at/<key> go in the JSON.
+# Export is OFF by default until the offline-tool schema is verified; users then report advances via the
+# GSTN offline tool AT/ATADJ sheets (CSV export provided).
+GSTR1_ADVANCE_ADJ_JSON_KEY = os.environ.get('GSTR1_ADVANCE_ADJ_JSON_KEY', 'txpd')
+GSTR1_ADVANCES_JSON_ENABLED = os.environ.get('GSTR1_ADVANCES_JSON_ENABLED', 'False').lower() in ('1', 'true', 'yes', 'on')
+GSTR1_NIL_JSON_ENABLED = os.environ.get('GSTR1_NIL_JSON_ENABLED', 'False').lower() in ('1', 'true', 'yes', 'on')

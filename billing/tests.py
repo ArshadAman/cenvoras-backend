@@ -618,7 +618,8 @@ class PaymentStatusTests(TestCase):
             'invoice': '',  # No invoice
             'date': '2024-01-01',
             'amount': 50.00,
-            'mode': 'cash'
+            'mode': 'cash',
+            'supply_kind': 'goods',  # R18: an advance must be classified
         })
         
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -854,10 +855,10 @@ class PaymentEditDesyncTests(TestCase):
         self.assertEqual(self.invoice.payment_status, "paid")
 
         # 5. Verify GeneralLedgerEntry rebuilt for 50,000
-        new_ledger_entries = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}")
-        self.assertEqual(new_ledger_entries.count(), 2)
-        self.assertEqual(sum(e.debit for e in new_ledger_entries), Decimal("50000.00"))
-        self.assertEqual(sum(e.credit for e in new_ledger_entries), Decimal("50000.00"))
+        # R18: originals kept, reversal + re-post added (never overwritten)
+        self.assertEqual(GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id} rev 1").count(), 2)
+        net = _net_receipt(payment, GeneralLedgerEntry)
+        self.assertEqual(sorted(v for v in net.values() if v), [Decimal("-50000.00"), Decimal("50000.00")])
 
     def test_payment_edit_decreases_amount_syncs_balance_and_reverts_status(self):
         """Editing payment from ₹50,000 to ₹20,000 increases customer balance, decreases invoice amount_paid, and reverts status to partial_paid"""
@@ -889,8 +890,8 @@ class PaymentEditDesyncTests(TestCase):
         self.assertEqual(self.invoice.amount_paid, Decimal("20000.00"))
         self.assertEqual(self.invoice.payment_status, "partial_paid")
 
-        ledger_entries = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}")
-        self.assertEqual(sum(e.debit for e in ledger_entries), Decimal("20000.00"))
+        net = _net_receipt(payment, GeneralLedgerEntry)
+        self.assertEqual(sorted(v for v in net.values() if v), [Decimal("-20000.00"), Decimal("20000.00")])
 
     def test_payment_edit_customer_transfer(self):
         """Changing customer on a payment restores old customer balance and debits new customer balance"""
@@ -1008,12 +1009,10 @@ class PaymentEditDesyncTests(TestCase):
         self.assertEqual(self.invoice.amount_paid, Decimal("50000.00"))
         self.assertEqual(self.invoice.payment_status, "paid")
 
-        entries = GeneralLedgerEntry.objects.filter(reference=f"Payment Received {payment.id}")
-        self.assertEqual(entries.count(), 2)
-        self.assertEqual(sum(e.debit for e in entries), Decimal("50000.00"))
-        # UPI mode should route to Bank account
-        bank_entry = entries.filter(debit=Decimal("50000.00")).first()
-        self.assertEqual(bank_entry.account.name, "Bank")
+        net = _net_receipt(payment, GeneralLedgerEntry)
+        # UPI mode should route to Bank account; the cash posting is reversed, not deleted
+        self.assertEqual(net["Bank"], Decimal("50000.00"))
+        self.assertEqual(net.get("Cash", 0), 0)
 
 
 class MultiTenantSequenceAndStaffIsolationTests(TestCase):
@@ -2834,3 +2833,12 @@ class GSTShieldReconciliationTests(APITestCase):
 
 
 
+
+
+def _net_receipt(payment, GeneralLedgerEntry):
+    """R18 audit trail: edits add reversal + re-post lines; return net debit per account name."""
+    from collections import defaultdict
+    out = defaultdict(lambda: 0)
+    for e in GeneralLedgerEntry.objects.filter(reference__startswith=f"Payment Received {payment.id}"):
+        out[e.account.name] += e.debit - e.credit
+    return out

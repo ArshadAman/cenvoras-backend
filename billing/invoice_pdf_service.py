@@ -312,7 +312,8 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
 
     inv_date = str(getattr(invoice_obj, 'invoice_date', None) or getattr(invoice_obj, 'quotation_date', None) or getattr(invoice_obj, 'date', ''))
     due_date = str(getattr(invoice_obj, 'due_date', '') or '')
-    pos = getattr(invoice_obj, 'place_of_supply', '') or ''
+    from billing.gst_utils import pos_display
+    pos = pos_display(getattr(invoice_obj, 'place_of_supply', '') or '')
     vehicle_no = getattr(invoice_obj, 'vehicle_number', '') or ''
     status_text = (getattr(invoice_obj, 'status', '') or '').upper()
 
@@ -451,6 +452,11 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         f"<b>{cust_name}</b><br/>"
         f"{ship_address}<br/>"
     )
+    # Rule 46: delivery address where it differs from the place of supply.
+    _del = (getattr(invoice_obj, 'delivery_address', '') or '').strip()
+    _pos_state = pos.split(' (')[0].strip().lower() if pos else ''
+    if _del and _pos_state and _pos_state not in _del.lower():
+        ship_to_text += f"<i>Delivery address differs from place of supply ({pos})</i><br/>"
 
     client_info_table = Table(
         [[Paragraph(bill_to_text, body_style), Paragraph(ship_to_text, body_style)]],

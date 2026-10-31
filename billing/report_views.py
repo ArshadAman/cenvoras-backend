@@ -173,8 +173,9 @@ def item_wise_pl_report(request):
 
     def build_report():
         queryset = SalesInvoiceItem.objects.filter(
-            sales_invoice__created_by=tenant
-        ).select_related('sales_invoice', 'product', 'batch')
+            sales_invoice__created_by=tenant,
+            sales_invoice__status='final',
+        ).exclude(row_type='note').select_related('sales_invoice', 'product', 'batch')
 
         # Date filters
         date_from = request.query_params.get('from')

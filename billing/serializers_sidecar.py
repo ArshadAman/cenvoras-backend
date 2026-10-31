@@ -274,8 +274,25 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         ret['invoice_numbers'] = linked_invoices
         return ret
 
+    def validate(self, attrs):
+        customer_name = (attrs.get('customer_name') or '').strip()
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        customer_email = attrs.get('customer_email') or ''
+        customer = None
+        if customer_email:
+            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
+        if not customer and customer_name:
+            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+        if customer:
+            return attrs
+        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
+            return attrs
+        raise serializers.ValidationError({
+            'customer_name': 'Save this customer first before creating a sales order.'
+        })
+
     def _resolve_customer(self, validated_data):
-        """Find or create a Customer from the customer_name field."""
+        """Find an existing Customer from typed document fields. Do not create one."""
         from .models import Customer
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None) or ''
@@ -287,28 +304,31 @@ class SalesOrderSerializer(serializers.ModelSerializer):
         if not customer_name:
             return None
 
-        # Try to find existing customer by name for this user
-        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+        customer = None
+        if customer_email:
+            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
         if not customer:
-            customer = Customer.objects.create(
-                name=customer_name,
-                email=customer_email if customer_email else None,
-                phone=customer_phone if customer_phone else None,
-                address=customer_address if customer_address else None,
-                gstin=customer_gstin if customer_gstin else None,
-                created_by=user,
-            )
-            PartyMeta.objects.get_or_create(customer=customer)
-        else:
-            update_fields = []
-            if customer_address and not customer.address:
-                customer.address = customer_address
-                update_fields.append('address')
-            if customer_gstin and not customer.gstin:
-                customer.gstin = customer_gstin
-                update_fields.append('gstin')
-            if update_fields:
-                customer.save(update_fields=update_fields)
+            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+        if not customer:
+            raise serializers.ValidationError({
+                'customer_name': 'Save this customer first before creating a sales order.'
+            })
+
+        update_fields = []
+        if customer_address and not customer.address:
+            customer.address = customer_address
+            update_fields.append('address')
+        if customer_gstin and not customer.gstin:
+            customer.gstin = customer_gstin
+            update_fields.append('gstin')
+        if customer_phone and not customer.phone:
+            customer.phone = customer_phone
+            update_fields.append('phone')
+        if customer_email and not customer.email:
+            customer.email = customer_email
+            update_fields.append('email')
+        if update_fields:
+            customer.save(update_fields=update_fields)
         return customer
 
     def create(self, validated_data):
@@ -351,11 +371,11 @@ class SalesOrderSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         
-        # Handle customer name change
+        # Handle customer name change — link existing only; never auto-create.
         if 'customer_name' in validated_data or 'customer_gstin' in validated_data:
             customer = self._resolve_customer(validated_data)
+            instance.customer = customer
             if customer:
-                instance.customer = customer
                 if not validated_data.get('customer_name'):
                     validated_data['customer_name'] = customer.name
                 if not validated_data.get('customer_gstin') and customer.gstin:
@@ -552,6 +572,23 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
+    def validate(self, attrs):
+        customer = attrs.get('customer')
+        cust_name = (attrs.get('customer_name') or '').strip()
+        if customer:
+            return attrs
+        request = self.context.get('request')
+        user = getattr(request.user, 'active_tenant', request.user) if request else None
+        if cust_name and user:
+            existing = Customer.objects.filter(name__iexact=cust_name, created_by=user).first()
+            if existing:
+                return attrs
+        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
+            return attrs
+        raise serializers.ValidationError({
+            'customer_name': 'Save this customer first before creating a delivery challan.'
+        })
+
     class Meta:
         model = DeliveryChallan
         fields = [
@@ -670,21 +707,16 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             _raise_number_conflict(exc)
 
 
-        # Smart customer resolution
+        # Link an existing customer by name; typed text must not create a master record.
         cust_name = validated_data.get('customer_name')
         if not validated_data.get('customer') and cust_name:
             existing_cust = Customer.objects.filter(name__iexact=cust_name.strip(), created_by=user).first()
             if existing_cust:
                 validated_data['customer'] = existing_cust
             else:
-                new_customer = Customer.objects.create(
-                    name=cust_name.strip(),
-                    address=validated_data.get('customer_address') or '',
-                    gstin=validated_data.get('customer_gstin') or '',
-                    created_by=user,
-                )
-                PartyMeta.objects.get_or_create(customer=new_customer)
-                validated_data['customer'] = new_customer
+                raise serializers.ValidationError({
+                    'customer_name': 'Save this customer first before creating a delivery challan.'
+                })
 
         # Calculate line amounts and total (gross = amount after disc + tax)
         total = Decimal('0.00')
@@ -1058,6 +1090,19 @@ class QuotationSerializer(serializers.ModelSerializer):
             if not attrs.get('quotation_date'):
                 attrs['quotation_date'] = date.today()
 
+        customer = attrs.get('customer')
+        customer_name = (attrs.get('customer_name') or '').strip()
+        if not customer:
+            request = self.context.get('request')
+            user = getattr(request.user, 'active_tenant', request.user) if request else None
+            if customer_name and user:
+                customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+            if not customer:
+                if not (self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data):
+                    raise serializers.ValidationError({
+                        'customer_name': 'Save this customer first before creating a quotation.'
+                    })
+
         return attrs
 
     def _resolve_customer(self, validated_data):
@@ -1073,34 +1118,27 @@ class QuotationSerializer(serializers.ModelSerializer):
             return None
 
         customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if customer:
-            updated = False
-            if customer_email and not customer.email:
-                customer.email = customer_email
-                updated = True
-            if customer_phone and not customer.phone:
-                customer.phone = customer_phone
-                updated = True
-            if validated_data.get('customer_address') and not customer.address:
-                customer.address = validated_data.get('customer_address')
-                updated = True
-            if customer_gstin and not customer.gstin:
-                customer.gstin = customer_gstin
-                updated = True
-            if updated:
-                customer.save()
-            return customer
+        if not customer:
+            raise serializers.ValidationError({
+                'customer_name': 'Save this customer first before creating a quotation.'
+            })
 
-        new_customer = Customer.objects.create(
-            name=customer_name,
-            email=customer_email or None,
-            phone=customer_phone or None,
-            address=validated_data.get('customer_address') or None,
-            gstin=customer_gstin or None,
-            created_by=user,
-        )
-        PartyMeta.objects.get_or_create(customer=new_customer)
-        return new_customer
+        updated = False
+        if customer_email and not customer.email:
+            customer.email = customer_email
+            updated = True
+        if customer_phone and not customer.phone:
+            customer.phone = customer_phone
+            updated = True
+        if validated_data.get('customer_address') and not customer.address:
+            customer.address = validated_data.get('customer_address')
+            updated = True
+        if customer_gstin and not customer.gstin:
+            customer.gstin = customer_gstin
+            updated = True
+        if updated:
+            customer.save()
+        return customer
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -1156,8 +1194,9 @@ class QuotationSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
+        had_customer_name = 'customer_name' in validated_data
         customer = self._resolve_customer(validated_data)
-        if customer:
+        if had_customer_name:
             instance.customer = customer
 
         old_status = instance.status

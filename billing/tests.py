@@ -40,6 +40,12 @@ class SalesInvoiceTests(TestCase):
             parent=self.tenant
         )
         self.client.force_authenticate(user=self.user)
+        self.customer = Customer.objects.create(name="John Doe", created_by=self.tenant)
+        self.product = Product.objects.create(
+            name="Test Product",
+            price=Decimal("100.00"),
+            created_by=self.tenant,
+        )
 
     def _set_plan(self, plan):
         self.tenant.subscription_status = "active"
@@ -63,14 +69,67 @@ class SalesInvoiceTests(TestCase):
                     "product": "Test Product",
                     "quantity": 1,
                     "price": "100.00",
-                    "amount": "100.00"
+                    "amount": "100.00",
+                    "hsn_sac_code": "9983",
                 }
             ]
         }
         res = self.client.post("/api/billing/sales-invoices/", data, format='json')
-        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, getattr(res, 'data', res.content))
         self.assertEqual(SalesInvoice.objects.count(), 1)
         self.assertEqual(SalesInvoice.objects.first().status, "final")
+
+    def test_typed_customer_name_does_not_create_customer(self):
+        data = {
+            "customer_name": "Walk-in Guest",
+            "customer_email": "walkin@example.com",
+            "invoice_number": "INV-NO-CUST-001",
+            "invoice_date": "2024-01-01",
+            "status": "final",
+            "total_amount": "100.00",
+            "items": [
+                {
+                    "product": "Test Product",
+                    "quantity": 1,
+                    "price": "100.00",
+                    "amount": "100.00",
+                    "hsn_sac_code": "9983",
+                }
+            ]
+        }
+        res = self.client.post("/api/billing/sales-invoices/", data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, 'data', res.content))
+        self.assertIn('customer_name', str(res.data))
+        self.assertFalse(SalesInvoice.objects.filter(customer_name="Walk-in Guest").exists())
+        self.assertFalse(Customer.objects.filter(name__iexact="Walk-in Guest").exists())
+        self.assertFalse(Customer.objects.filter(email="walkin@example.com").exists())
+
+    def test_existing_customer_still_linked_by_name(self):
+        existing = Customer.objects.create(name="Acme Traders", created_by=self.tenant)
+        data = {
+            "customer_name": "acme traders",
+            "invoice_number": "INV-LINK-CUST-001",
+            "invoice_date": "2024-01-01",
+            "status": "final",
+            "total_amount": "100.00",
+            "items": [
+                {
+                    "product": "Test Product",
+                    "quantity": 1,
+                    "price": "100.00",
+                    "amount": "100.00",
+                    "hsn_sac_code": "9983",
+                }
+            ]
+        }
+        res = self.client.post("/api/billing/sales-invoices/", data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, getattr(res, 'data', res.content))
+        invoice = SalesInvoice.objects.get(customer_name__iexact="Acme Traders")
+        self.assertEqual(invoice.customer_id, existing.id)
+        self.assertEqual(
+            Customer.objects.filter(name__iexact="Acme Traders", created_by=self.tenant).count(),
+            1,
+        )
 
     def test_invoice_creation_conflict(self):
         # Create first invoice
@@ -252,6 +311,89 @@ class SalesInvoiceTests(TestCase):
         self.assertEqual(invoice.payment_status, "partial_paid")
 
 
+class SavedPartyRequiredOnDocumentsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.tenant = User.objects.create_user(
+            username="party_req_tenant",
+            email="party_req@test.com",
+            password="testpassword",
+        )
+        self.client.force_authenticate(user=self.tenant)
+        self.product = Product.objects.create(
+            name="Party Widget",
+            price=Decimal("10.00"),
+            created_by=self.tenant,
+        )
+        self.item = {
+            "product": str(self.product.id),
+            "quantity": 1,
+            "price": "10.00",
+            "amount": "10.00",
+            "hsn_sac_code": "9983",
+        }
+
+    def test_sales_order_rejects_unsaved_customer(self):
+        res = self.client.post("/api/billing/sales-orders/", {
+            "customer_name": "Unsaved SO Guest",
+            "date": "2024-01-01",
+            "total_amount": "10.00",
+            "items": [self.item],
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, "data", res.content))
+        self.assertIn("customer_name", str(res.data))
+        self.assertFalse(Customer.objects.filter(name__iexact="Unsaved SO Guest").exists())
+
+    def test_delivery_challan_rejects_unsaved_customer(self):
+        res = self.client.post("/api/billing/delivery-challans/", {
+            "customer_name": "Unsaved DC Guest",
+            "date": "2024-01-01",
+            "items": [self.item],
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, "data", res.content))
+        self.assertIn("customer_name", str(res.data))
+        self.assertFalse(Customer.objects.filter(name__iexact="Unsaved DC Guest").exists())
+
+    def test_purchase_order_rejects_unsaved_vendor(self):
+        res = self.client.post("/api/billing/purchase-orders/", {
+            "vendor_name": "Unsaved PO Vendor",
+            "items": [self.item],
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, "data", res.content))
+        self.assertIn("vendor_name", str(res.data))
+        self.assertFalse(Vendor.objects.filter(name__iexact="Unsaved PO Vendor").exists())
+
+    def test_debit_note_rejects_unsaved_vendor(self):
+        bill = PurchaseBill.objects.create(
+            bill_number="BILL-UNSAVED-DN",
+            bill_date=date.today(),
+            vendor_name="Ghost Vendor",
+            total_amount=Decimal("10.00"),
+            created_by=self.tenant,
+        )
+        res = self.client.post("/api/billing/debit-notes/", {
+            "vendor_name": "Ghost Vendor",
+            "original_bill": str(bill.id),
+            "date": str(date.today()),
+            "total_amount": "10.00",
+            "reason": "return",
+            "items": [self.item],
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, "data", res.content))
+        self.assertIn("vendor_name", str(res.data))
+        self.assertFalse(Vendor.objects.filter(name__iexact="Ghost Vendor").exists())
+
+    def test_credit_note_requires_saved_customer(self):
+        res = self.client.post("/api/billing/credit-notes/", {
+            "date": str(date.today()),
+            "reason": "return",
+            "total_amount": "10.00",
+            "items": [self.item],
+        }, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, getattr(res, "data", res.content))
+        self.assertIn("customer", str(res.data).lower())
+
+
 class PurchaseBillValidationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -306,6 +448,7 @@ class QuotationProductAutocreateTests(TestCase):
             parent=self.tenant
         )
         self.client.force_authenticate(user=self.user)
+        self.customer = Customer.objects.create(name="Walk-in Customer", created_by=self.tenant)
 
     def _set_plan(self, plan):
         self.tenant.subscription_status = "active"
@@ -877,7 +1020,7 @@ class MultiTenantSequenceAndStaffIsolationTests(TestCase):
     def setUp(self):
         from decimal import Decimal
         from django.contrib.auth import get_user_model
-        from billing.models import Customer, SalesInvoice, SalesInvoiceItem, PurchaseBill
+        from billing.models import Customer, SalesInvoice, SalesInvoiceItem, PurchaseBill, Vendor
         from inventory.models import Product, Warehouse
         from subscription.models import Plan, TenantSubscription
         from datetime import date, timedelta
@@ -958,6 +1101,24 @@ class MultiTenantSequenceAndStaffIsolationTests(TestCase):
             name="Customer B",
             gstin="29CUSTB0000B1Z5",
             created_by=self.tenant_b
+        )
+        self.vendor_a = Vendor.objects.create(name="Vendor A", created_by=self.tenant_a)
+        self.vendor_b = Vendor.objects.create(name="Vendor B", created_by=self.tenant_b)
+        self.bill_a = PurchaseBill.objects.create(
+            bill_number="BILL-A-001",
+            bill_date=timezone.localdate(),
+            vendor=self.vendor_a,
+            vendor_name=self.vendor_a.name,
+            total_amount=Decimal("500.00"),
+            created_by=self.tenant_a,
+        )
+        self.bill_b = PurchaseBill.objects.create(
+            bill_number="BILL-B-001",
+            bill_date=timezone.localdate(),
+            vendor=self.vendor_b,
+            vendor_name=self.vendor_b.name,
+            total_amount=Decimal("800.00"),
+            created_by=self.tenant_b,
         )
 
         # Sales Invoice for Tenant A
@@ -1047,6 +1208,7 @@ class MultiTenantSequenceAndStaffIsolationTests(TestCase):
         client.force_authenticate(user=self.tenant_a)
         res_a1 = client.post("/api/billing/debit-notes/", {
             "vendor_name": "Vendor A",
+            "original_bill": str(self.bill_a.id),
             "date": str(date.today()),
             "total_amount": "500.00",
             "reason": "return",
@@ -1065,6 +1227,7 @@ class MultiTenantSequenceAndStaffIsolationTests(TestCase):
         client.force_authenticate(user=self.tenant_b)
         res_b1 = client.post("/api/billing/debit-notes/", {
             "vendor_name": "Vendor B",
+            "original_bill": str(self.bill_b.id),
             "date": str(date.today()),
             "total_amount": "800.00",
             "reason": "return",
@@ -2145,6 +2308,7 @@ class DraftSequenceAndQuotationLifecycleTests(TestCase):
             price=Decimal('100.00'),
             created_by=self.tenant
         )
+        self.vendor = Vendor.objects.create(name="Seq Vendor", created_by=self.tenant)
         self.client = APIClient()
         self.client.force_authenticate(user=self.tenant)
 

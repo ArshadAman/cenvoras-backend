@@ -108,6 +108,7 @@ urlpatterns = [
     
     # Returns (Credit Notes / Debit Notes)
     path('credit-notes/', returns_views.credit_note_list_create, name='credit_note_list_create'),
+    path('credit-notes/remaining/', returns_views.credit_note_remaining, name='credit_note_remaining'),
     path('credit-notes/<uuid:pk>/', returns_views.credit_note_detail, name='credit_note_detail'),
     path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),

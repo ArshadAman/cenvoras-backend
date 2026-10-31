@@ -86,6 +86,23 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         """Return vendor name or empty string if vendor is null."""
         return obj.vendor.name if obj.vendor else 'Unspecified Vendor'
 
+    def validate(self, attrs):
+        vendor = attrs.get('vendor')
+        vendor_name = (attrs.get('vendor_name') or '').strip()
+        if vendor:
+            return attrs
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        if vendor_name and tenant:
+            from .models import Vendor
+            if Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).exists():
+                return attrs
+        if self.instance and getattr(self.instance, 'vendor_id', None) and 'vendor_name' not in self.initial_data:
+            return attrs
+        raise serializers.ValidationError({
+            'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+        })
+
     def _resolve_vendor(self, validated_data):
         from .models import Vendor
         request = self.context.get('request')
@@ -100,7 +117,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if vendor_name and tenant:
             vendor = Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).first()
             if not vendor:
-                vendor = Vendor.objects.create(name=vendor_name, created_by=tenant)
+                raise serializers.ValidationError({
+                    'vendor_name': 'Save this vendor first before creating a bill or purchase order.'
+                })
             return vendor
         return None
 

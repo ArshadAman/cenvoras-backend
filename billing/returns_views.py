@@ -1,4 +1,5 @@
 from decimal import Decimal
+from collections import defaultdict
 """
 Views for Sales Returns (Credit Notes) and Purchase Returns (Debit Notes).
 """
@@ -7,11 +8,42 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Sum
 from django.db.models.functions import Greatest
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
-from .models import Customer
+from .models import Customer, SalesInvoice
 from inventory.models import Product, ProductBatch, StockPoint, Warehouse
+
+TWOPLACES = Decimal('0.01')
+
+
+def remaining_qty_for_invoice(invoice):
+    """Per product on the original invoice: remaining = invoiced qty − credited qty."""
+    invoiced = defaultdict(lambda: Decimal('0'))
+    for item in invoice.items.all():
+        if not item.product_id:
+            continue
+        invoiced[str(item.product_id)] += Decimal(str(item.quantity or 0))
+
+    credited_rows = (
+        CreditNoteItem.objects
+        .filter(credit_note__original_invoice=invoice)
+        .values('product_id')
+        .annotate(total=Sum('quantity'))
+    )
+    credited = {
+        str(row['product_id']): Decimal(str(row['total'] or 0))
+        for row in credited_rows
+        if row['product_id']
+    }
+
+    remaining = {}
+    for pid, qty in invoiced.items():
+        rem = qty - credited.get(pid, Decimal('0'))
+        if rem < 0:
+            rem = Decimal('0')
+        remaining[pid] = rem.quantize(TWOPLACES)
+    return remaining
 
 
 # ─── Serializers ──────────────────────────────────────────────
@@ -53,6 +85,40 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             ],
             'totals': {k: m(v) for k, v in brk['totals'].items()},
         }
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        customer = attrs.get('customer')
+        if not customer:
+            raise serializers.ValidationError({
+                'customer': 'Save this customer first before creating a credit note.'
+            })
+        if tenant and getattr(customer, 'created_by_id', None) != getattr(tenant, 'id', None):
+            raise serializers.ValidationError({
+                'customer': 'Customer not found for this business.'
+            })
+
+        original_invoice = attrs.get('original_invoice')
+        if original_invoice:
+            remaining_map = remaining_qty_for_invoice(original_invoice)
+            requested = defaultdict(lambda: Decimal('0'))
+            for item in attrs.get('items') or []:
+                product = item.get('product')
+                if not product:
+                    continue
+                pid = str(getattr(product, 'pk', product))
+                requested[pid] += Decimal(str(item.get('quantity') or 0))
+            for pid, qty in requested.items():
+                rem = remaining_map.get(pid, Decimal('0'))
+                if qty > rem:
+                    raise serializers.ValidationError({
+                        'items': (
+                            f'Quantity {qty} exceeds remaining creditable quantity {rem} '
+                            f'for this invoice.'
+                        )
+                    })
+        return attrs
 
     @transaction.atomic
     def create(self, validated_data):
@@ -175,6 +241,27 @@ class DebitNoteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'original_bill': 'Debit notes must reference an original purchase bill.'
             })
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        from .models import Vendor
+        original_bill = attrs.get('original_bill')
+        vendor_name = (attrs.get('vendor_name') or '').strip()
+        if not vendor_name and original_bill:
+            vendor_name = (
+                (getattr(original_bill, 'vendor_name', None) or '').strip()
+                or (original_bill.vendor.name if getattr(original_bill, 'vendor_id', None) else '')
+            )
+            if vendor_name:
+                attrs['vendor_name'] = vendor_name
+
+        vendor = original_bill.vendor if original_bill and getattr(original_bill, 'vendor_id', None) else None
+        if not vendor and vendor_name and tenant:
+            vendor = Vendor.objects.filter(name__iexact=vendor_name, created_by=tenant).first()
+        if not vendor:
+            raise serializers.ValidationError({
+                'vendor_name': 'Save this vendor first before creating a debit note.'
+            })
+        attrs['vendor_name'] = vendor.name
         return attrs
 
     @transaction.atomic
@@ -270,6 +357,28 @@ class DebitNoteSerializer(serializers.ModelSerializer):
 
 
 # ─── API Views ────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def credit_note_remaining(request):
+    """Remaining creditable qty per product on an original sales invoice."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    invoice_id = request.query_params.get('invoice')
+    if not invoice_id:
+        return Response({'error': 'invoice is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        invoice = (
+            SalesInvoice.objects
+            .prefetch_related('items')
+            .get(pk=invoice_id, created_by=tenant)
+        )
+    except (SalesInvoice.DoesNotExist, ValueError):
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+    remaining = remaining_qty_for_invoice(invoice)
+    return Response({
+        'remaining_qty': {pid: str(qty) for pid, qty in remaining.items()},
+    })
+
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])

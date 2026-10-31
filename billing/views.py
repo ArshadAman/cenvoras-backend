@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db import DatabaseError, ProgrammingError, transaction
 from django.db.models import Sum
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -193,6 +193,11 @@ def purchase_order_list_create(request):
             )
         return Response(
             {'success': False, 'message': 'Validation error.', 'errors': serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except serializers.ValidationError as exc:
+        return Response(
+            {'success': False, 'message': 'Validation error.', 'errors': getattr(exc, 'detail', str(exc))},
             status=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as exc:

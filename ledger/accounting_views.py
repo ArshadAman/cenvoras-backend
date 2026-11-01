@@ -1421,11 +1421,102 @@ def repair_round_off_entries(request):
             except Exception as e:
                 errors.append(f"Bill {bill.bill_number}: {str(e)}")
 
+    repaired_payroll = []
+    repaired_gl_entries = []
+
+    # 5. Check and repair PayrollRun accrual entries
+    from hr.models import PayrollRun
+    from hr.services.hr_accounting_service import HRAccountingService
+
+    payroll_runs = PayrollRun.objects.filter(tenant=tenant)
+    for pr in payroll_runs:
+        ref = f"PAYROLL-ACCRUAL-{pr.year}-{pr.month:02d}"
+        entries = GeneralLedgerEntry.objects.filter(created_by=tenant, reference=ref)
+        if not entries.exists():
+            continue
+        tot_dr = sum((e.debit for e in entries), Decimal('0'))
+        tot_cr = sum((e.credit for e in entries), Decimal('0'))
+        if abs(tot_dr - tot_cr) >= Decimal('0.01'):
+            try:
+                with db_transaction.atomic():
+                    HRAccountingService.post_payroll_accrual(pr, tenant)
+                repaired_payroll.append(ref)
+            except Exception as e:
+                errors.append(f"Payroll {ref}: {str(e)}")
+
+    # 6. Universal scan for any other GL reference groups where abs(Dr - Cr) <= 1.00 and != 0
+    from django.db.models import Sum
+    round_off_acc = Account.objects.filter(created_by=tenant, code='4200').first()
+    if not round_off_acc:
+        round_off_acc = Account.objects.filter(created_by=tenant, name__iexact='Rounding Off').first()
+    if not round_off_acc:
+        round_off_acc = Account.objects.create(
+            code='4200',
+            name='Rounding Off',
+            account_type=AccountType.REVENUE,
+            created_by=tenant,
+            is_active=True,
+            description='Rounding Off account',
+        )
+
+    ref_summaries = (
+        GeneralLedgerEntry.objects.filter(created_by=tenant)
+        .exclude(reference__isnull=True)
+        .exclude(reference='')
+        .values('reference')
+        .annotate(total_dr=Sum('debit'), total_cr=Sum('credit'))
+    )
+
+    for item in ref_summaries:
+        ref_name = item['reference']
+        tot_dr = item['total_dr'] or Decimal('0.00')
+        tot_cr = item['total_cr'] or Decimal('0.00')
+        diff = (tot_dr - tot_cr).quantize(Decimal('0.01'))
+
+        # Only balance small rounding imbalances <= 1.00 and != 0
+        if Decimal('0.00') < abs(diff) <= Decimal('1.00'):
+            try:
+                with db_transaction.atomic():
+                    entry_date = (
+                        GeneralLedgerEntry.objects.filter(created_by=tenant, reference=ref_name)
+                        .values_list('date', flat=True)
+                        .first() or timezone.now().date()
+                    )
+                    if diff > Decimal('0.00'):
+                        # Dr > Cr -> Credit 4200
+                        GeneralLedgerEntry.objects.create(
+                            date=entry_date,
+                            account=round_off_acc,
+                            debit=Decimal('0.00'),
+                            credit=diff,
+                            description=f"Round-off balance adjustment for {ref_name}",
+                            reference=ref_name,
+                            created_by=tenant,
+                        )
+                    else:
+                        # Cr > Dr -> Debit 4200
+                        GeneralLedgerEntry.objects.create(
+                            date=entry_date,
+                            account=round_off_acc,
+                            debit=abs(diff),
+                            credit=Decimal('0.00'),
+                            description=f"Round-off balance adjustment for {ref_name}",
+                            reference=ref_name,
+                            created_by=tenant,
+                        )
+                    repaired_gl_entries.append(ref_name)
+            except Exception as e:
+                errors.append(f"GL Reference {ref_name}: {str(e)}")
+
+    total_payroll_gl = len(repaired_payroll) + len(repaired_gl_entries)
+
     return Response({
         'success': True,
         'repaired_accounts': repaired_accounts,
         'repaired_invoices': repaired_invoices,
         'repaired_bills': repaired_bills,
+        'repaired_payroll': repaired_payroll,
+        'repaired_gl_entries': repaired_gl_entries,
         'errors': errors,
-        'message': f"Repaired {len(repaired_accounts)} account(s), {len(repaired_invoices)} invoice(s), and {len(repaired_bills)} bill(s).",
+        'message': f"Repaired {len(repaired_accounts)} account(s), {len(repaired_invoices)} invoice(s), {len(repaired_bills)} bill(s), and {total_payroll_gl} payroll/GL entry/entries.",
     })

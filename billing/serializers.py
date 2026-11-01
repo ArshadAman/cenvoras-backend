@@ -118,7 +118,7 @@ class ProductField(serializers.Field):
 class CustomerField(serializers.Field):
     def to_internal_value(self, value):
         if not value:
-            raise serializers.ValidationError('Customer is required.')
+            raise serializers.ValidationError('Please select a customer')
         return value
 
     def to_representation(self, value):
@@ -542,6 +542,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     row_type = serializers.CharField(required=False, default='item')
     sort_order = serializers.IntegerField(required=False, default=0, min_value=0)
     product_detail = serializers.SerializerMethodField(read_only=True)
+    remaining_qty = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     quantity = serializers.IntegerField(min_value=0, default=1)
@@ -579,7 +580,7 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesInvoiceItem
-        fields = ['id', 'sort_order', 'row_type', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch', 'source_item_id']
+        fields = ['id', 'sort_order', 'row_type', 'product', 'product_detail', 'remaining_qty', 'description', 'hsn_sac_code', 'unit', 'quantity', 'free_quantity', 'price', 'discount', 'tax', 'amount', 'batch', 'source_item_id']
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -588,12 +589,36 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
         ret['manufacturer'] = getattr(instance.product, 'manufacturer', '') or '' if instance.product else ''
         ret['internal_reference'] = getattr(instance.product, 'internal_reference', '') or '' if instance.product else ''
         ret['storage_condition'] = ''
+        ret['remaining_qty'] = self.get_remaining_qty(instance)
         try:
             if instance.product and hasattr(instance.product, 'meta') and instance.product.meta:
                 ret['storage_condition'] = instance.product.meta.storage_condition or ''
         except Exception:
             pass
         return ret
+
+    def get_remaining_qty(self, obj):
+        if getattr(obj, 'row_type', 'item') == 'note':
+            return 0
+        invoice = getattr(obj, 'sales_invoice', None)
+        if not invoice or not getattr(obj, 'product_id', None):
+            return obj.quantity or 0
+        try:
+            cache_key = f'_rem_returns_{invoice.id}'
+            rem_map = self.context.get(cache_key) if isinstance(self.context, dict) else None
+            if rem_map is None:
+                from billing.gst_rules import remaining_invoice_returns
+                rem_info = remaining_invoice_returns(invoice)
+                rem_map = rem_info.get('remaining_qty', {})
+                if isinstance(self.context, dict):
+                    self.context[cache_key] = rem_map
+            pid = str(obj.product_id)
+            rem = rem_map.get(pid)
+            if rem is not None:
+                return max(0.0, float(rem))
+            return float(obj.quantity or 0)
+        except Exception:
+            return float(obj.quantity or 0)
 
     def get_product_detail(self, obj):
         if not getattr(obj, 'product', None):
@@ -1095,9 +1120,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         print("DEBUG SalesInvoiceSerializer: Customer email:", customer_email)
         
         if not customer_name.strip() and status_value != 'draft':
-            error_msg = 'Customer name is required.'
+            error_msg = 'Please select a customer'
             print("DEBUG SalesInvoiceSerializer: Error -", error_msg)
-            raise serializers.ValidationError({'customer_name': error_msg})
+            raise serializers.ValidationError({'customer_name': [error_msg]})
         
         # Get user from context
         request = self.context.get('request')

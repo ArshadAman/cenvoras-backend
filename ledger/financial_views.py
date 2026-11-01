@@ -6,6 +6,8 @@ Financial Statement Views:
 """
 from datetime import date as date_cls, timedelta
 from decimal import Decimal
+import datetime
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -130,10 +132,12 @@ def balance_sheet(request):
     # Draft invoices must not appear in balance sheet totals
     AccountingService.purge_non_final_sales_invoice_entries(tenant)
 
-    def get_balance(account):
+    def get_balance(account, cutoff_date=as_of):
+        if not account:
+            return Decimal('0')
         entries = GeneralLedgerEntry.objects.filter(account=account, created_by=tenant)
-        if as_of:
-            entries = entries.filter(date__lte=as_of)
+        if cutoff_date:
+            entries = entries.filter(date__lte=cutoff_date)
         totals = entries.aggregate(
             total_debit=Sum('debit'),
             total_credit=Sum('credit')
@@ -195,17 +199,12 @@ def balance_sheet(request):
 
     equity_items = []
     total_equity = Decimal('0')
-    prior_folded = False
     for acc in equity_accounts:
         code = (acc.code or '').strip().upper()
         name_l = (acc.name or '').lower()
         if code in RETAINED_EARNINGS_CODES or 'retained earning' in name_l:
             continue
         bal = get_balance(acc)
-        is_owner_equity = code == '3001' or ('owner' in name_l and 'equity' in name_l)
-        if is_owner_equity and not prior_folded:
-            bal += prior_year_pl
-            prior_folded = True
         if bal != 0:
             equity_items.append({
                 'id': str(acc.id),
@@ -215,17 +214,15 @@ def balance_sheet(request):
             })
             total_equity += bal
 
-    if not prior_folded and prior_year_pl != 0:
-        equity_items.append({
-            'id': 'opening-equity',
-            'code': '3001',
-            'name': 'Opening equity',
-            'amount': float(prior_year_pl),
-        })
-        total_equity += prior_year_pl
+    # Opening Reserves = prior year P&L + balance of Account 3100 before current FY
+    re_account = Account.objects.filter(created_by=tenant, code='3100').first() or \
+                 Account.objects.filter(created_by=tenant, name__iexact='Retained Earnings').first()
+    re_acc_balance = get_balance(re_account, cutoff_date=prior_as_of) if re_account else Decimal('0.00')
+    opening_reserves = prior_year_pl + re_acc_balance
 
-    # Retained Earnings — current-year P&L only (matches default P&L, incl. inventory change)
-    retained_earnings = current_year_pl
+    # Current Year Net Profit
+    current_year_net_profit = current_year_pl
+    retained_earnings = opening_reserves + current_year_net_profit
     total_equity += retained_earnings
     if PNL_PRESENTATION == 'schedule_iii':
         # Periodic inventory: stock is not in the GL, so show closing stock as an asset and the
@@ -257,6 +254,8 @@ def balance_sheet(request):
         },
         'equity': {
             'items': equity_items,
+            'opening_reserves': float(opening_reserves),
+            'current_year_net_profit': float(current_year_net_profit),
             'retained_earnings': float(retained_earnings),
             'total': float(total_equity),
         },

@@ -1092,7 +1092,7 @@ class HRDocumentSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        url = instance.absolute_file_url or instance.file_url or ''
+        url = instance.absolute_file_url or instance.file_url or (instance.file.url if instance.file else '')
         data['file_url'] = url
         data['file'] = url
         return data

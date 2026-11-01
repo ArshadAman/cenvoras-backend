@@ -23,6 +23,7 @@ class HRAccountingService:
         ('2254', 'Professional Tax Payable', AccountType.LIABILITY),
         ('2255', 'Other Payroll Deductions Payable', AccountType.LIABILITY),
         ('1250', 'Employee Advances & Loans', AccountType.ASSET),
+        ('4200', 'Rounding Off', AccountType.REVENUE),
     ]
 
     @classmethod
@@ -202,7 +203,25 @@ class HRAccountingService:
             )
 
         # 9. Cr. Other Payroll Deductions (Custom structure deductions / LOP balancing)
-        total_other_deductions = (total_gross - (total_net + total_emp_pf + total_emp_esi + total_tds + total_pt + total_advances)).quantize(Decimal('0.01'))
+        custom_deductions_sum = Decimal('0.00')
+        for p in payslips:
+            if isinstance(p.deductions, dict):
+                for k, v in p.deductions.items():
+                    if k not in ('PF', 'ESI', 'TDS', 'PT', 'advance_recovery', 'loan_recovery'):
+                        try:
+                            custom_deductions_sum += Decimal(str(v))
+                        except Exception:
+                            pass
+        custom_deductions_sum = custom_deductions_sum.quantize(Decimal('0.01'))
+
+        raw_other = (total_gross - (total_net + total_emp_pf + total_emp_esi + total_tds + total_pt + total_advances)).quantize(Decimal('0.01'))
+        if custom_deductions_sum > 0:
+            total_other_deductions = custom_deductions_sum
+        elif raw_other > Decimal('1.00'):
+            total_other_deductions = raw_other
+        else:
+            total_other_deductions = Decimal('0.00')
+
         if total_other_deductions > 0:
             GeneralLedgerEntry.objects.create(
                 date=entry_date,
@@ -210,6 +229,49 @@ class HRAccountingService:
                 debit=Decimal('0.00'),
                 credit=total_other_deductions,
                 description=f"Other Payroll Deductions for {period_label}",
+                reference=ref,
+                created_by=tenant,
+            )
+
+        # 10. Balancing / Rounding Off (Account 4200)
+        round_off_acc = accounts.get('4200')
+        if not round_off_acc:
+            round_off_acc = Account.objects.filter(created_by=tenant, code='4200').first() or \
+                            Account.objects.filter(created_by=tenant, name__iexact='Rounding Off').first()
+            if not round_off_acc:
+                round_off_acc = Account.objects.create(
+                    code='4200',
+                    name='Rounding Off',
+                    account_type=AccountType.REVENUE,
+                    created_by=tenant,
+                    is_active=True,
+                    description="Payroll and Ledger Rounding Off"
+                )
+            accounts['4200'] = round_off_acc
+
+        dr_total = total_gross + total_empr_contributions
+        cr_total = total_net + combined_pf + combined_esi + total_tds + total_pt + total_advances + total_other_deductions
+        round_diff = (dr_total - cr_total).quantize(Decimal('0.01'))
+
+        if round_diff > Decimal('0.00'):
+            # Dr > Cr (e.g. net pay rounded down) -> post Credit to 4200
+            GeneralLedgerEntry.objects.create(
+                date=entry_date,
+                account=round_off_acc,
+                debit=Decimal('0.00'),
+                credit=round_diff,
+                description=f"Payroll Rounding Off adjustment for {period_label}",
+                reference=ref,
+                created_by=tenant,
+            )
+        elif round_diff < Decimal('0.00'):
+            # Cr > Dr (e.g. net pay rounded up like October's ₹0.09) -> post Debit to 4200
+            GeneralLedgerEntry.objects.create(
+                date=entry_date,
+                account=round_off_acc,
+                debit=abs(round_diff),
+                credit=Decimal('0.00'),
+                description=f"Payroll Rounding Off adjustment for {period_label}",
                 reference=ref,
                 created_by=tenant,
             )

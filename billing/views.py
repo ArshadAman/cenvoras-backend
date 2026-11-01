@@ -318,6 +318,18 @@ def sales_invoice_list_create(request):
             if status_filter and status_filter != 'all':
                 invoices = invoices.filter(status=status_filter)
 
+            search_query = request.GET.get('search', '').strip()
+            if search_query:
+                invoices = invoices.filter(
+                    Q(invoice_number__icontains=search_query) |
+                    Q(customer_name__icontains=search_query) |
+                    Q(customer__name__icontains=search_query) |
+                    Q(po_number__icontains=search_query) |
+                    Q(challan_number__icontains=search_query) |
+                    Q(items__product__name__icontains=search_query) |
+                    Q(items__description__icontains=search_query)
+                ).distinct()
+
             serializer = SalesInvoiceSerializer(invoices, many=True)
             return Response(serializer.data)
         except (ProgrammingError, DatabaseError) as exc:

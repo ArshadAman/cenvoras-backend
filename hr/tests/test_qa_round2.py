@@ -392,3 +392,88 @@ class ProfileCompletionPlaceholderTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         pct = res.data['setup_progress']['completion_percentage']
         self.assertLess(pct, 100)
+
+
+class SalariesPayableCreditVerificationTests(TestCase):
+    def setUp(self):
+        self.tenant = User.objects.create_user(
+            username='sal_tenant', email='sal@ex.com', password='x',
+            business_name='Sal Co', role='admin', state='Karnataka',
+        )
+        self.dept = Department.objects.create(tenant=self.tenant, name='Tech')
+        self.desig = Designation.objects.create(tenant=self.tenant, name='Dev')
+        self.emp = Employee.objects.create(
+            tenant=self.tenant, full_name='John Doe',
+            date_of_birth=datetime.date(1990, 5, 15),
+            date_of_joining=datetime.date(2024, 1, 1),
+            gender='M', employment_type='full_time',
+            department=self.dept, designation=self.desig,
+            work_state='Karnataka', status='active',
+            employee_code='EMP001',
+        )
+
+    def test_salaries_payable_accrual_credit_and_disbursement_clearing(self):
+        from django.utils import timezone
+        from hr.services.hr_accounting_service import HRAccountingService
+        from ledger.models import Account, GeneralLedgerEntry, AccountType
+        from ledger.services import AccountingService
+
+        # 1. Create a payroll run for November 2026 (unpaid)
+        payroll_run = PayrollRun.objects.create(
+            tenant=self.tenant, month=11, year=2026, status='approved',
+        )
+        # Net salary with paise that rounds
+        payslip = Payslip.objects.create(
+            tenant=self.tenant, payroll_run=payroll_run, employee=self.emp,
+            present_days=Decimal('26'), total_working_days=26,
+            lop_days=Decimal('0'), gross_salary=Decimal('50000.00'),
+            earnings={}, deductions={},
+            employee_pf=Decimal('1800.00'),
+            employer_pf=Decimal('1800.00'),
+            employer_total_contribution=Decimal('1800.00'),
+            professional_tax=Decimal('200.00'),
+            net_salary=Decimal('48000.00'),
+        )
+
+        # 2. Post Accrual
+        HRAccountingService.post_payroll_accrual(payroll_run, self.tenant)
+
+        # 3. Verify Account 2250 (Salaries Payable) has credit balance of ₹48,000.00
+        accounts = HRAccountingService.get_or_create_hr_accounts(self.tenant)
+        sal_payable_acc = accounts['2250']
+        self.assertEqual(sal_payable_acc.code, '2250')
+        self.assertEqual(sal_payable_acc.account_type, AccountType.LIABILITY)
+
+        accrual_entries = GeneralLedgerEntry.objects.filter(
+            created_by=self.tenant,
+            reference=f"PAYROLL-ACCRUAL-{payroll_run.year}-{payroll_run.month:02d}",
+        )
+        tot_dr = sum((e.debit for e in accrual_entries), Decimal('0.00'))
+        tot_cr = sum((e.credit for e in accrual_entries), Decimal('0.00'))
+        self.assertEqual(tot_dr, tot_cr, "Accrual entries must be perfectly balanced")
+
+        # Salaries payable entry is credited
+        sal_entry = accrual_entries.filter(account=sal_payable_acc).first()
+        self.assertIsNotNone(sal_entry)
+        self.assertEqual(sal_entry.credit, Decimal('48000.00'))
+        self.assertEqual(sal_entry.debit, Decimal('0.00'))
+
+        # Check total net balance of Account 2250 across GL: Credit - Debit = 48000.00
+        all_sal_entries = GeneralLedgerEntry.objects.filter(account=sal_payable_acc, created_by=self.tenant)
+        sal_balance = sum((e.credit - e.debit for e in all_sal_entries), Decimal('0.00'))
+        self.assertEqual(sal_balance, Decimal('48000.00'))
+
+        # 4. Post Disbursement
+        default_accs = AccountingService.get_or_create_default_accounts(self.tenant)
+        bank_acc = default_accs['1002']
+        payroll_run.status = 'paid'
+        payroll_run.paid_at = timezone.now()
+        payroll_run.save()
+
+        HRAccountingService.post_payroll_disbursement(payroll_run, bank_acc, self.tenant)
+
+        # 5. Verify Account 2250 now clears to exactly 0.00
+        all_sal_entries_after = GeneralLedgerEntry.objects.filter(account=sal_payable_acc, created_by=self.tenant)
+        sal_balance_after = sum((e.credit - e.debit for e in all_sal_entries_after), Decimal('0.00'))
+        self.assertEqual(sal_balance_after, Decimal('0.00'), "Salaries payable must clear to 0 upon disbursement")
+

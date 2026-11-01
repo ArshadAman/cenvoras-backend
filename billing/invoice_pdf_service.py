@@ -439,8 +439,9 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     if getattr(invoice_obj, 'customer', None) and getattr(invoice_obj.customer, 'gstin', None):
         cust_gst = invoice_obj.customer.gstin
 
+    addr_label = "CUSTOMER ADDRESS:" if is_challan else "BILL TO:"
     bill_to_text = (
-        f"<b><font color='{secondary_color.hexval()}'>BILL TO:</font></b><br/>"
+        f"<b><font color='{secondary_color.hexval()}'>{addr_label}</font></b><br/>"
         f"<b>{cust_name}</b><br/>"
         f"{bill_address}<br/>"
     )

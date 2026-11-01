@@ -700,7 +700,8 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
         is_draft = validated_data.get('status') == 'draft'
         ch_num = validated_data.get('challan_number')
         from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
-        raw_prefix = self.context['request'].data.get('prefix', 'DC-') if 'request' in self.context else 'DC-'
+        raw_prefix = self.context['request'].data.get('prefix') if 'request' in self.context else None
+        raw_prefix = raw_prefix or None
         try:
             validated_data['challan_number'] = assign_document_number(
                 user,

@@ -11,7 +11,7 @@ from .models import SalesInvoice, SalesInvoiceItem, Customer
 from inventory.models import Product
 from cenvoras.pagination import StandardResultsSetPagination
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1417,6 +1417,67 @@ def quotation_list_create(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _quotation_has_sales_order(quotation):
+    return quotation.status in ('converted', 'partially_converted') or quotation.sales_orders.exists()
+
+
+def _parse_quotation_item_id(value):
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_quotation_qty(value, default):
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(str(default or 0))
+
+
+def _validate_converted_quotation_items(quotation, request_data):
+    """Block qty decreases and removals of existing product lines once a sales order exists."""
+    if not _quotation_has_sales_order(quotation):
+        return None
+    if 'items' not in request_data:
+        return None
+
+    items_data = request_data.get('items') or []
+    existing_products = {
+        item.id: item
+        for item in quotation.items.all()
+        if getattr(item, 'row_type', 'item') != 'note'
+    }
+    incoming_ids = set()
+    for raw in items_data:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get('row_type') == 'note':
+            continue
+        item_id = _parse_quotation_item_id(raw.get('id'))
+        if item_id is None:
+            continue
+        incoming_ids.add(item_id)
+        existing = existing_products.get(item_id)
+        if existing is None:
+            continue
+        new_qty = _parse_quotation_qty(raw.get('quantity', existing.quantity), existing.quantity)
+        if new_qty < Decimal(str(existing.quantity or 0)):
+            return Response(
+                {'message': 'Cannot decrease quantity of existing quotation items after a sales order has been created.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if existing_products.keys() - incoming_ids:
+        return Response(
+            {'message': 'Cannot remove existing quotation items after a sales order has been created.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def quotation_detail(request, pk):
@@ -1430,11 +1491,9 @@ def quotation_detail(request, pk):
         return Response(QuotationSerializer(quotation).data)
 
     if request.method in ['PUT', 'PATCH']:
-        if quotation.status in ('converted', 'partially_converted'):
-            return Response(
-                {'message': 'Converted quotations are locked and cannot be edited.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        item_error = _validate_converted_quotation_items(quotation, request.data)
+        if item_error is not None:
+            return item_error
         serializer = QuotationSerializer(
             quotation,
             data=request.data,

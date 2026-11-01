@@ -252,13 +252,13 @@ class BidirectionalSyncTests(TestCase):
         res_so = self.client.post(f'/api/billing/quotations/{quotation.id}/convert-to-sales-order/')
         so = SalesOrder.objects.get(id=res_so.data['sales_order_id'])
 
-        # Now edit Quotation: change price from 150 to 180 and quantity from 10 to 8
+        # Now edit Quotation: change price from 150 to 180 and increase quantity from 10 to 12
         patch_payload = {
             'items': [
                 {
                     'id': q_item.id,
                     'product': self.product1.id,
-                    'quantity': 8,
+                    'quantity': 12,
                     'price': '180.00',
                     'unit': 'pcs',
                 }
@@ -267,14 +267,14 @@ class BidirectionalSyncTests(TestCase):
         res_q_edit = self.client.patch(f'/api/billing/quotations/{quotation.id}/', patch_payload, format='json')
         self.assertEqual(res_q_edit.status_code, status.HTTP_200_OK, res_q_edit.data)
         quotation.refresh_from_db()
-        self.assertEqual(quotation.total_amount, Decimal('1440.00'))
+        self.assertEqual(quotation.total_amount, Decimal('2160.00'))
 
         # Check Sales Order was updated forward:
         so.refresh_from_db()
         so_item = so.items.first()
-        self.assertEqual(so_item.quantity, 8)
+        self.assertEqual(so_item.quantity, 12)
         self.assertEqual(so_item.price, Decimal('180.00'))
-        self.assertEqual(so.total_amount, Decimal('1440.00'))
+        self.assertEqual(so.total_amount, Decimal('2160.00'))
 
     def test_sales_order_to_purchase_order_conversion(self):
         """

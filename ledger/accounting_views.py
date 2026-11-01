@@ -1508,6 +1508,26 @@ def repair_round_off_entries(request):
             except Exception as e:
                 errors.append(f"GL Reference {ref_name}: {str(e)}")
 
+    # 7. Residual tenant-level balance check (handles any orphan entries or cross-voucher penny diffs)
+    tot_tenant_dr = GeneralLedgerEntry.objects.filter(created_by=tenant).aggregate(Sum('debit'))['debit__sum'] or Decimal('0.00')
+    tot_tenant_cr = GeneralLedgerEntry.objects.filter(created_by=tenant).aggregate(Sum('credit'))['credit__sum'] or Decimal('0.00')
+    global_diff = (tot_tenant_dr - tot_tenant_cr).quantize(Decimal('0.01'))
+    if Decimal('0.00') < abs(global_diff) <= Decimal('1.00'):
+        try:
+            with db_transaction.atomic():
+                GeneralLedgerEntry.objects.create(
+                    date=timezone.now().date(),
+                    account=round_off_acc,
+                    debit=Decimal('0.00') if global_diff > 0 else abs(global_diff),
+                    credit=global_diff if global_diff > 0 else Decimal('0.00'),
+                    description="Double-entry rounding reconciliation",
+                    reference="GLOBAL-ROUNDING-FIX",
+                    created_by=tenant,
+                )
+                repaired_gl_entries.append("GLOBAL-ROUNDING-FIX")
+        except Exception as e:
+            errors.append(f"Global rounding: {str(e)}")
+
     total_payroll_gl = len(repaired_payroll) + len(repaired_gl_entries)
 
     return Response({

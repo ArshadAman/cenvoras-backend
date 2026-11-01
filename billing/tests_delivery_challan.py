@@ -689,4 +689,63 @@ class DeliveryChallanFlowTests(TestCase):
         so.refresh_from_db()
         self.assertEqual(so.stage, "new")
 
+    def test_custom_prefix_used_instead_of_existing_dc_sequence(self):
+        """User-set prefix wins over leftover DC- numbers on create and SO convert."""
+        self.tenant.delivery_challan_prefix = "KE-C26/"
+        self.tenant.save(update_fields=["delivery_challan_prefix"])
+
+        DeliveryChallan.objects.create(
+            challan_number="DC-017",
+            date=date.today(),
+            customer=self.customer,
+            customer_name=self.customer.name,
+            total_amount=Decimal("0.00"),
+            status="open",
+            created_by=self.tenant,
+        )
+
+        create_res = self.client.post("/api/billing/delivery-challans/", {
+            "date": str(date.today()),
+            "customer": str(self.customer.id),
+            "customer_name": self.customer.name,
+            "warehouse": str(self.warehouse.id),
+            "items": [
+                {
+                    "product": str(self.product.id),
+                    "quantity": 1,
+                    "price": 400.00,
+                    "tax": 18.00,
+                    "discount": 0,
+                    "unit": "bag",
+                }
+            ],
+        }, format="json")
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED, create_res.data)
+        created = DeliveryChallan.objects.get(id=create_res.data["id"])
+        self.assertTrue(created.challan_number.startswith("KE-C26/"))
+        self.assertFalse(created.challan_number.startswith("DC-"))
+
+        order = SalesOrder.objects.create(
+            order_number="SO-PREFIX-001",
+            date=date.today(),
+            customer=self.customer,
+            total_amount=Decimal("400.00"),
+            created_by=self.tenant,
+        )
+        SalesOrderItem.objects.create(
+            order=order,
+            product=self.product,
+            quantity=1,
+            price=Decimal("400.00"),
+            amount=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            discount=Decimal("0.00"),
+            unit="bag",
+        )
+        convert_res = self.client.post(f"/api/billing/sales-orders/{order.id}/convert_to_challan/")
+        self.assertEqual(convert_res.status_code, status.HTTP_201_CREATED, convert_res.data)
+        converted = DeliveryChallan.objects.get(id=convert_res.data["challan_id"])
+        self.assertTrue(converted.challan_number.startswith("KE-C26/"))
+        self.assertFalse(converted.challan_number.startswith("DC-"))
+
 

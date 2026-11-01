@@ -778,7 +778,7 @@ def convert_order_to_challan(request, pk):
         order.refresh_from_db()
 
         from billing.sequence_service import allocate_next_number
-        next_challan_number = allocate_next_number(tenant, document_type='delivery_challan', prefix='DC-')
+        next_challan_number = allocate_next_number(tenant, document_type='delivery_challan')
 
         vehicle_number = (request.data.get('vehicle_number') or '').strip()
         transport_mode = (request.data.get('transport_mode') or '').strip()

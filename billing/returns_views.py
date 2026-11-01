@@ -138,6 +138,17 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError('Invoice not found for this business.')
         return value
 
+    def validate_reason(self, value):
+        mapping = {
+            'overcharge': 'rate_diff',
+            'post_sale_discount': 'discount',
+        }
+        val = mapping.get(value, value)
+        allowed = dict(CreditNote.REASON_CHOICES)
+        if val not in allowed:
+            return 'other'
+        return val
+
     def validate(self, attrs):
         from billing.gst_rules import remaining_invoice_returns, section34_warning
         request = self.context.get('request')

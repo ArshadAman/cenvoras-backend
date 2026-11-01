@@ -359,3 +359,50 @@ class PreLaunchBackendFixesTests(TestCase):
         numbers3 = [inv['invoice_number'] for inv in res3.data]
         self.assertIn('INV-2026-001', numbers3)
         self.assertNotIn('INV-2026-002', numbers3)
+
+    def test_credit_note_reason_other_accepted(self):
+        """Credit note serializer accepts reason='other' and legacy aliases."""
+        from billing.returns_views import CreditNoteSerializer
+        cust = Customer.objects.create(name='Test Customer', created_by=self.tenant)
+        inv = SalesInvoice.objects.create(
+            created_by=self.tenant,
+            customer=cust,
+            customer_name='Test Customer',
+            invoice_number='INV-TEST-CN-REASON',
+            invoice_date=datetime.date(2026, 9, 1),
+            total_amount=Decimal('100.00'),
+            status='final',
+        )
+        prod = Product.objects.create(
+            name='Test Widget', unit='pcs', price=100.00, hsn_sac_code='84713010', created_by=self.tenant,
+        )
+        SalesInvoiceItem.objects.create(
+            sales_invoice=inv, product=prod, quantity=1, price=Decimal('100.00'), amount=Decimal('100.00'),
+        )
+
+        data = {
+            'customer': str(cust.id),
+            'original_invoice': str(inv.id),
+            'reason': 'other',
+            'notes': 'Commercial concession',
+            'items': [{
+                'product': str(prod.id),
+                'quantity': 1,
+                'price': '100.00',
+                'amount': '100.00',
+            }],
+            'total_amount': '100.00',
+        }
+        factory = APIRequestFactory()
+        request = factory.post('/api/billing/credit-notes/')
+        request.user = self.tenant
+        ser = CreditNoteSerializer(data=data, context={'request': request})
+        self.assertTrue(ser.is_valid(), ser.errors)
+        self.assertEqual(ser.validated_data['reason'], 'other')
+
+    def test_balance_sheet_is_loss_payload(self):
+        """Balance sheet payload includes is_loss flag and current_year_net_loss."""
+        res = self.client.get('/api/ledger/balance-sheet/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('is_loss', res.data['equity'])
+        self.assertIn('current_year_net_loss', res.data['equity'])

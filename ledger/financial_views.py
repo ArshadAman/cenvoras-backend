@@ -256,6 +256,8 @@ def balance_sheet(request):
             'items': equity_items,
             'opening_reserves': float(opening_reserves),
             'current_year_net_profit': float(current_year_net_profit),
+            'is_loss': current_year_net_profit < 0,
+            'current_year_net_loss': float(abs(current_year_net_profit)) if current_year_net_profit < 0 else 0.0,
             'retained_earnings': float(retained_earnings),
             'total': float(total_equity),
         },

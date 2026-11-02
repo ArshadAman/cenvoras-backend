@@ -93,7 +93,7 @@ def customer_list_create(request):
         ordering = request.query_params.get('ordering', '-created_at')
         
         # Filter customers for the authenticated user
-        customers = Customer.objects.filter(created_by=tenant)
+        customers = Customer.objects.filter(created_by=tenant).select_related('linked_vendor')
         
         # Apply search filter
         if search:
@@ -254,3 +254,23 @@ def customer_update_delete(request, pk):
                 "success": False,
                 "message": "Failed to delete customer. Please try again later."
             }, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customer_ensure_vendor(request, pk):
+    """Create or reuse the vendor counterpart so a customer can be billed as a vendor."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
+    except Customer.DoesNotExist:
+        return Response({"success": False, "message": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    from billing.party_link import ensure_vendor_for_customer
+    from .serializers import VendorSerializer
+    vendor = ensure_vendor_for_customer(customer, tenant)
+    return Response({
+        "success": True,
+        "vendor": VendorSerializer(vendor).data,
+        "customer_id": str(customer.id),
+    })

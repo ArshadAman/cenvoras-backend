@@ -32,6 +32,14 @@ class Customer(models.Model):
         null=True,
         help_text="Customer's State/Region (Determines Tax Treatment)"
     )
+    linked_vendor = models.OneToOneField(
+        'Vendor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='linked_customer',
+        help_text="Same party when this customer is also a vendor.",
+    )
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -76,6 +84,10 @@ class Payment(models.Model):
                                        help_text="Service advance POS state; 'UNKNOWN' = treated as inter-state (IGST).")
     receipt_voucher_number = models.CharField(max_length=50, blank=True, default='',
                                               help_text="Rule 50 receipt voucher number (service advances).")
+    bank_account_id = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text="Profile bank account id used for bank/UPI/cheque receipts.",
+    )
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

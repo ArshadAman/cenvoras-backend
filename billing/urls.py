@@ -46,6 +46,7 @@ urlpatterns = [
     path('customers/', customer_views.customer_list_create, name='customer_list_create'),
     path('customers/<uuid:pk>/', customer_views.customer_detail, name='customer_detail'),
     path('customers/<uuid:pk>/edit/', customer_views.customer_update_delete, name='customer_update_delete'),
+    path('customers/<uuid:pk>/ensure-vendor/', customer_views.customer_ensure_vendor, name='customer_ensure_vendor'),
     
     path('vendors/', vendor_views.vendor_list_create, name='vendor_list_create'),
     path('vendors/<uuid:pk>/', vendor_views.vendor_detail, name='vendor_detail'),

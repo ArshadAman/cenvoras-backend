@@ -227,6 +227,7 @@ def general_ledger(request, account_id):
     date_from = request.query_params.get('date_from')
     date_to = request.query_params.get('date_to')
     
+    AccountingService.refresh_sales_invoice_ledger_descriptions(tenant, account=account)
     entries = AccountingService.get_general_ledger_entries(account, tenant, date_from, date_to)
     
     from .serializers import GeneralLedgerEntrySerializer

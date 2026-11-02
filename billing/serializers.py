@@ -1521,14 +1521,19 @@ class VendorSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     # Accepted for FE compatibility but ignored — PartyMeta is customer-only
     meta = serializers.JSONField(required=False, write_only=True)
+    linked_customer = serializers.SerializerMethodField()
+
+    def get_linked_customer(self, obj):
+        from billing.party_link import counterpart_payload
+        return counterpart_payload(vendor=obj).get('linked_customer')
     
     class Meta:
         model = Vendor
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state',
-            'created_by', 'created_at', 'meta'
+            'created_by', 'created_at', 'meta', 'linked_customer',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'linked_customer']
 
     def validate_email(self, value):
         if value:
@@ -1587,6 +1592,8 @@ class VendorSerializer(serializers.ModelSerializer):
             vendor = Vendor.objects.create(**validated_data)
         except Exception as exc:
             raise serializers.ValidationError({'detail': f'Could not create vendor: {exc}'}) from exc
+        from billing.party_link import autolink_vendor
+        autolink_vendor(vendor, validated_data['created_by'])
         return vendor
 
     def update(self, instance, validated_data):
@@ -1603,21 +1610,29 @@ class VendorSerializer(serializers.ModelSerializer):
             instance.save()
         except Exception as exc:
             raise serializers.ValidationError({'detail': f'Could not update vendor: {exc}'}) from exc
+        from billing.party_link import autolink_vendor
+        tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        autolink_vendor(instance, tenant)
         return instance
     
 
 class CustomerSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     meta = PartyMetaSerializer(required=False)
+    linked_vendor = serializers.SerializerMethodField()
+
+    def get_linked_vendor(self, obj):
+        from billing.party_link import counterpart_payload
+        return counterpart_payload(customer=obj).get('linked_vendor')
     
     class Meta:
         model = Customer
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
             'credit_limit', 'current_balance', 'allow_credit',
-            'created_by', 'created_at', 'meta'
+            'created_by', 'created_at', 'meta', 'linked_vendor',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance']
+        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance', 'linked_vendor']
 
     def validate_email(self, value):
         if value:
@@ -1647,7 +1662,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             PartyMeta.objects.create(customer=customer, **meta_data)
         else:
             PartyMeta.objects.create(customer=customer)
-            
+        from billing.party_link import autolink_customer
+        autolink_customer(customer, validated_data['created_by'])
         return customer
 
     def update(self, instance, validated_data):
@@ -1664,7 +1680,9 @@ class CustomerSerializer(serializers.ModelSerializer):
             for attr, value in meta_data.items():
                 setattr(meta, attr, value)
             meta.save()
-            
+        from billing.party_link import autolink_customer
+        tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        autolink_customer(instance, tenant)
         return instance
 
     def to_representation(self, instance):
@@ -1694,10 +1712,12 @@ class PaymentSerializer(serializers.ModelSerializer):
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
             'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at',
             'unapplied_amount', 'adjustments', 'gst_rate', 'place_of_supply', 'receipt_voucher_number',
+            'bank_account_id',
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number', 'receipt_voucher_number']
         extra_kwargs = {'gst_rate': {'required': False, 'allow_null': True},
-                        'place_of_supply': {'required': False, 'allow_blank': True}}
+                        'place_of_supply': {'required': False, 'allow_blank': True},
+                        'bank_account_id': {'required': False, 'allow_blank': True}}
 
     def to_internal_value(self, data):
         # 'unknown' rate -> 18% (Rule 50 proviso); 'unknown' POS kept as UNKNOWN -> inter-state (IGST).

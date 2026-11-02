@@ -145,6 +145,56 @@ class AccountingService:
         taxable_amount, tax_amount, _cgst, _sgst, _igst, _rt = calculate_item_tax_breakup(item, is_interstate=False)
         return taxable_amount, tax_amount
 
+    @staticmethod
+    def _normalize_address(text):
+        return ' '.join((text or '').split()).strip().lower()
+
+    @classmethod
+    def sales_invoice_ledger_description(cls, sales_invoice, item_details=None):
+        name = sales_invoice.customer_name or 'Customer'
+        parts = [f"Sales to {name}"]
+        if sales_invoice.po_number:
+            po_bit = f"PO: {sales_invoice.po_number}"
+            if sales_invoice.po_date:
+                po_bit += f" dated {sales_invoice.po_date:%d/%m/%Y}"
+            parts.append(po_bit)
+        ship = (getattr(sales_invoice, 'delivery_address', None) or '').strip()
+        bill = (
+            getattr(sales_invoice, 'customer_address', None)
+            or getattr(getattr(sales_invoice, 'customer', None), 'address', None)
+            or ''
+        )
+        if ship and cls._normalize_address(ship) != cls._normalize_address(bill):
+            parts.append(f"Ship to: {ship}")
+        if item_details:
+            parts.append("Items: " + "; ".join(item_details))
+        return " — ".join(parts)
+
+    @classmethod
+    def refresh_sales_invoice_ledger_descriptions(cls, user, account=None):
+        """Rewrite legacy 'Sales to … Items:' AR descriptions to include PO / ship-to."""
+        user = getattr(user, 'active_tenant', user)
+        rows = GeneralLedgerEntry.objects.filter(
+            Q(created_by=user) | Q(created_by__parent=user),
+            sales_invoice__isnull=False,
+            debit__gt=0,
+        ).select_related('sales_invoice', 'sales_invoice__customer')
+        if account:
+            rows = rows.filter(account=account)
+        for entry in rows:
+            inv = entry.sales_invoice
+            if not inv:
+                continue
+            desc = entry.description or ''
+            if 'PO:' in desc or 'Ship to:' in desc:
+                continue
+            if not desc.startswith('Sales to'):
+                continue
+            updated = cls.sales_invoice_ledger_description(inv)
+            if updated != desc:
+                entry.description = updated
+                entry.save(update_fields=['description'])
+
     @classmethod
     @transaction.atomic
     def create_sales_invoice_entries(
@@ -181,7 +231,7 @@ class AccountingService:
             if getattr(item, 'row_type', 'item') != 'note' and item.product is not None
         ]
 
-        # Build detailed description with line items
+        # Build detailed description with line items, PO, and ship-to when it differs.
         if line_items:
             item_details = []
             for item in line_items:
@@ -191,9 +241,9 @@ class AccountingService:
                     item_desc += f" {item.unit}"
                 item_desc += f" @ ₹{item.price} = ₹{item.amount})"
                 item_details.append(item_desc)
-            detailed_description = f"Sales to {sales_invoice.customer_name or 'Customer'} - Items: " + "; ".join(item_details)
         else:
-            detailed_description = f"Sales to {sales_invoice.customer_name or 'Customer'}"
+            item_details = []
+        detailed_description = cls.sales_invoice_ledger_description(sales_invoice, item_details)
 
         # Debit: Accounts Receivable (increase what customer owes)
         GeneralLedgerEntry.objects.create(
@@ -887,7 +937,8 @@ class AccountingService:
         user = getattr(user, 'active_tenant', user)
         entries = GeneralLedgerEntry.objects.filter(
             account=account,
-            created_by=user
+        ).filter(
+            Q(created_by=user) | Q(created_by__parent=user)
         ).order_by('-date', '-created_at')
         
         if date_from:

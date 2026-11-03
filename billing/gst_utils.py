@@ -473,13 +473,44 @@ GSTIN_FORMAT_REGEX = re.compile(
     r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
 )
 GSTIN_INVALID_MSG = 'Invalid GSTIN format'
+GSTIN_CHECKSUM_MSG = "This GSTIN's check digit is wrong. Please re-check the GSTIN."
+GSTIN_STATE_MSG = 'Invalid GSTIN state code (must be 01-38 or 97).'
+GSTIN_PAN_MSG = "This GSTIN doesn't match the PAN (characters 3-12 of a GSTIN are the PAN)."
+_GSTIN_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 
-def validate_gstin_format(value, required=False):
+def gstin_check_char(first14):
     """
-    Validate Indian GSTIN format. Returns normalized uppercase GSTIN or None/''.
-    Raises ValueError with GSTIN_INVALID_MSG when format is wrong.
-    Empty is allowed when required=False.
+    UAT P1 item 14 (Rudra CA): GSTIN check character over the first 14 characters.
+    For i in 0..13: v = idx(c) * (1 if i is even else 2); sum += v // 36 + v % 36;
+    check = (36 - sum % 36) % 36 -> alphabet[check].
+    """
+    total = 0
+    for i, ch in enumerate(first14[:14]):
+        v = _GSTIN_ALPHABET.index(ch) * (1 if i % 2 == 0 else 2)
+        total += v // 36 + v % 36
+    return _GSTIN_ALPHABET[(36 - total % 36) % 36]
+
+
+def gstin_state_code_ok(gstin):
+    try:
+        code = int(gstin[:2])
+    except (TypeError, ValueError):
+        return False
+    return 1 <= code <= 38 or code == 97
+
+
+def validate_gstin_format(value, required=False, pan=None, legacy=None):
+    """
+    Validate an Indian GSTIN. Returns normalized uppercase GSTIN or ''.
+    Raises ValueError when wrong. Empty is allowed when required=False.
+
+    Checks (UAT P1 item 14): format regex, state code 01-38 or 97, check character, and
+    (when `pan` is given) that characters 3-12 equal the PAN.
+
+    `legacy`: GSTIN(s) already saved on this record. An unchanged legacy value is accepted
+    on format alone so existing records (saved before the checksum check) can still be
+    edited; any new or changed GSTIN gets the full check.
     """
     gstin = (value or '').strip().upper()
     if not gstin:
@@ -488,7 +519,24 @@ def validate_gstin_format(value, required=False):
         return gstin
     if not GSTIN_FORMAT_REGEX.fullmatch(gstin):
         raise ValueError(GSTIN_INVALID_MSG)
+    legacy_values = legacy if isinstance(legacy, (list, tuple, set)) else [legacy]
+    if any(gstin == (l or '').strip().upper() for l in legacy_values if l):
+        return gstin
+    if not gstin_state_code_ok(gstin):
+        raise ValueError(GSTIN_STATE_MSG)
+    if gstin_check_char(gstin[:14]) != gstin[14]:
+        raise ValueError(GSTIN_CHECKSUM_MSG)
+    pan_norm = (pan or '').strip().upper()
+    if pan_norm and gstin[2:12] != pan_norm:
+        raise ValueError(GSTIN_PAN_MSG)
     return gstin
+
+
+def is_valid_gstin(value):
+    try:
+        return bool(validate_gstin_format(value, required=True))
+    except ValueError:
+        return False
 
 
 

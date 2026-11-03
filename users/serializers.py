@@ -368,7 +368,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         if gstin:
             from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG, validate_gstin_state_match
             try:
-                gstin = validate_gstin_format(gstin)
+                gstin = validate_gstin_format(gstin, pan=attrs.get('pan') if 'pan' in attrs else None,
+                                              legacy=getattr(user, 'gstin', None))
                 attrs['gstin'] = gstin
             except ValueError as exc:
                 raise serializers.ValidationError({

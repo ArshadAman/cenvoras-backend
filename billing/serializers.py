@@ -299,8 +299,12 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
 
     def validate_vendor_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        legacy = [getattr(self.instance, 'vendor_gstin', None)]
+        vendor_id = (self.initial_data or {}).get('vendor') if hasattr(self, 'initial_data') else None
+        if vendor_id:
+            legacy += list(Vendor.objects.filter(pk=vendor_id).values_list('gstin', flat=True)[:1])
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=legacy) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
@@ -1112,7 +1116,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if customer_gstin:
             from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
             try:
-                customer_gstin = validate_gstin_format(customer_gstin)
+                _legacy = [getattr(self.instance, 'customer_gstin', None),
+                           getattr(data.get('customer'), 'gstin', None)]
+                customer_gstin = validate_gstin_format(customer_gstin, legacy=_legacy)
                 data['customer_gstin'] = customer_gstin
             except ValueError as exc:
                 raise serializers.ValidationError({
@@ -1572,8 +1578,9 @@ class VendorSerializer(serializers.ModelSerializer):
 
     def validate_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        _pan = (self.initial_data or {}).get('pan') if hasattr(self, 'initial_data') else None
         try:
-            gstin = validate_gstin_format(value)
+            gstin = validate_gstin_format(value, pan=_pan, legacy=getattr(self.instance, 'gstin', None))
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
         if not gstin:
@@ -1663,7 +1670,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     def validate_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=getattr(self.instance, 'gstin', None)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 

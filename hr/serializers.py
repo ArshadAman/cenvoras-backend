@@ -921,15 +921,33 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("Employee does not belong to the active tenant.")
         return value
 
+    def _same_date_warning(self, assignment):
+        """Warn (not block) when another assignment already has this effective date: the newest one wins."""
+        dup = EmployeeSalaryAssignment.objects.filter(
+            employee=assignment.employee, effective_from=assignment.effective_from).exclude(pk=assignment.pk)
+        if dup.exists():
+            self._warnings = [f'This replaces the assignment effective {assignment.effective_from:%d-%m-%Y}. '
+                              'Payroll uses the most recently saved assignment for that date.']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if getattr(self, '_warnings', None):
+            data['warnings'] = self._warnings
+        return data
+
     def create(self, validated_data):
         assignment = super().create(validated_data)
         self._compute_components(assignment)
         self._log_salary_history(assignment, previous_salary=Decimal('0.00'), reason="Initial salary structure assignment")
+        self._same_date_warning(assignment)
         return assignment
 
     def update(self, instance, validated_data):
         old_ctc = instance.monthly_ctc
+        old_date = instance.effective_from
         assignment = super().update(instance, validated_data)
+        if assignment.effective_from != old_date:
+            self._same_date_warning(assignment)
         self._compute_components(assignment)
         if old_ctc != assignment.monthly_ctc:
             self._log_salary_history(assignment, previous_salary=old_ctc, reason="Salary revision / increment")

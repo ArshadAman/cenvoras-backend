@@ -261,8 +261,34 @@ def compute_pf(basic_salary, hrms_settings=None, on_date=None):
         'employee_pf': emp_pf,
         'employer_pf': employer_pf,
         'employer_epf': employer_epf,
-        'employer_eps': employer_eps
+        'employer_eps': employer_eps,
+        # Contribution base: the PF wage after the ceiling (what the 12% is applied to).
+        'pf_contribution_base': pf_wage.quantize(Decimal('0.01')),
     }
+
+
+PF_WAGES_META_KEY = '_pf_wages'
+
+
+def custom_pf_wage_names(assignment):
+    """Employee-level custom allowances flagged 'Counts as PF wages' (stored on the assignment)."""
+    names = (getattr(assignment, 'computed_components', None) or {}).get(PF_WAGES_META_KEY) or []
+    return {str(n) for n in names} if isinstance(names, (list, tuple)) else set()
+
+
+def pf_wage_component_names(assignment):
+    """Names counted in PF wages besides Basic: structure components flagged counts_as_pf_wages, plus
+    custom allowances (names that are NOT structure components) flagged on the assignment. A key that IS a
+    structure component name is that component's amount, so only the structure flag applies to it."""
+    structure = {c.name: c for c in assignment.salary_structure.components.all()}
+    names = {n for n, c in structure.items() if c.counts_as_pf_wages and not c.is_basic}
+    names |= {n for n in custom_pf_wage_names(assignment) if n not in structure}
+    return names
+
+
+def _inr(v):
+    v = Decimal(str(v)).quantize(Decimal('0.01'))
+    return f"{v:,.0f}" if v == v.to_integral_value() else f"{v:,.2f}"
 
 
 def compute_esi(gross_salary, hrms_settings=None):
@@ -669,9 +695,9 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # EPF Act s.6: PF wages = Basic + DA / retaining allowance (components flagged counts_as_pf_wages), as paid.
     da_salary = Decimal('0.00')
-    for comp in assignment.salary_structure.components.filter(counts_as_pf_wages=True, is_basic=False):
-        if comp.name in earnings_map:
-            da_salary += Decimal(str(earnings_map[comp.name]))
+    for name in pf_wage_component_names(assignment):
+        if name in earnings_map:
+            da_salary += Decimal(str(earnings_map[name]))
     da_salary = da_salary.quantize(Decimal('0.01'))
     pf_wage_paid = (basic_salary + da_salary).quantize(Decimal('0.01'))
 
@@ -794,12 +820,16 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # 2. Provident Fund (PF)
     if pf_details['employee_pf'] > 0:
+        _pf_base = Decimal(str(pf_details.get('pf_contribution_base') or pf_wage_paid)).quantize(Decimal('0.01'))
         deductions['PF'] = str(pf_details['employee_pf'])
         deduction_reasons['PF'] = {
             'amount': str(pf_details['employee_pf']),
-            'reason': (f"Employee statutory 12% contribution on PF wage ₹{pf_wage_paid} (Basic ₹{basic_salary}"
-                       + (f" + DA/RA ₹{da_salary}" if da_salary else '') + ")"),
-            'pf_wage': str(pf_wage_paid), 'basic': str(basic_salary), 'da': str(da_salary),
+            'reason': (f"Employee statutory 12% contribution on PF wage ₹{_inr(pf_wage_paid)}"
+                       + (f" (capped at ₹{_inr(_pf_base)})" if _pf_base < pf_wage_paid else '')
+                       + f" (Basic ₹{_inr(basic_salary)}" + (f" + DA/RA ₹{_inr(da_salary)}" if da_salary else '') + ")"),
+            # pf_wage = statutory PF wage (Basic + DA/RA, uncapped); pf_contribution_base = after the ceiling.
+            'pf_wage': str(pf_wage_paid), 'pf_contribution_base': str(_pf_base),
+            'basic': str(basic_salary), 'da': str(da_salary),
         }
 
     # 3. Employee State Insurance (ESI)
@@ -943,10 +973,11 @@ ESI_GROSS_LIMIT = Decimal('21000')
 
 
 def _payslip_pf_wage(ps):
-    """PF wage of a payslip: stored in deduction_reasons['PF'] (new) or employee PF / 12% (older payslips)."""
+    """PF contribution base (after the ceiling) of a payslip. Older payslips stored only the uncapped
+    statutory 'pf_wage' or nothing, so fall back to employee PF / 12% (which is the capped base)."""
     pf = (ps.deduction_reasons or {}).get('PF') or {}
-    if pf.get('pf_wage') is not None:
-        return Decimal(str(pf['pf_wage']))
+    if pf.get('pf_contribution_base') is not None:
+        return Decimal(str(pf['pf_contribution_base']))
     if (ps.employee_pf or 0) > 0:
         return (Decimal(str(ps.employee_pf)) / Decimal('0.12')).quantize(Decimal('0.01'))
     return Decimal('0.00')
@@ -989,7 +1020,9 @@ def preview_recalculation(run):
                     'pt_changed': o is not None and o_pt != n_pt,
                     'old_pf_wage': str(o_pfw) if o_pfw is not None else None,
                     'new_pf_wage': str(n_pfw) if n_pfw is not None else None,
-                    'pf_wage_changed': o is not None and o_pfw != n_pfw,
+                    # Only the contribution base or the PF amount, not an internal representation.
+                    'pf_wage_changed': o is not None and (o_pfw != n_pfw
+                                                          or (o.employee_pf or 0) != (ps.employee_pf or 0)),
                     'verify_salary_structure': bool(verify),
                     'verify_detail': verify,
                 })
@@ -1067,4 +1100,25 @@ def unflagged_pf_wage_candidates(tenant):
                                             is_basic=False).select_related('salary_structure'):
         if c.type != 'deduction' and PF_WAGE_NAME_RE.search(c.name or ''):
             out.append(c)
+    return out
+
+
+def unflagged_custom_pf_wage_candidates(tenant):
+    """Employee-level custom allowances (on each employee's latest assignment, not structure components)
+    whose name matches DA / dearness / retaining and that aren't flagged as PF wages."""
+    from hr.models import EmployeeSalaryAssignment, LATEST_ASSIGNMENT_ORDER
+    out, seen = [], set()
+    qs = EmployeeSalaryAssignment.objects.filter(employee__tenant=tenant).select_related(
+        'employee', 'salary_structure').order_by('employee_id', *LATEST_ASSIGNMENT_ORDER)
+    for a in qs:
+        if a.employee_id in seen:
+            continue
+        seen.add(a.employee_id)
+        structure = {c.name for c in a.salary_structure.components.all()}
+        flagged = custom_pf_wage_names(a)
+        for name, val in (a.computed_components or {}).items():
+            if str(name).startswith('_') or name in structure or name in flagged:
+                continue
+            if PF_WAGE_NAME_RE.search(str(name)):
+                out.append((a, name, val))
     return out

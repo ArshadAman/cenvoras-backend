@@ -118,6 +118,11 @@ def monthly_full_gross(employee, year, month):
             total += Decimal(str(val))
         except Exception:
             continue
+    # Same balancing as the payroll engine (calculate_prorated_gross): if the earning components
+    # are below the monthly CTC and there is no Special Allowance, the engine pays up to monthly CTC.
+    ctc = Decimal(str(a.monthly_ctc or 0))
+    if total < ctc and 'Special Allowance' not in (a.computed_components or {}):
+        total = ctc
     return total.quantize(CENT)
 
 
@@ -270,6 +275,7 @@ def compute_correction(employee, new_doj, old_doj=None, target=None):
                       'pf_wage_delta': str(pf_delta), 'paid_pf_wage': str(paid_pf_wage),
                       'paid_gross': str(slip.gross_salary if slip is not None else Decimal('0.00')),
                       'had_payslip': slip is not None, 'had_run': run is not None,
+                      'computed_delta': str(delta), 'label': f'{mname}',
                       'warnings': warns})
         total += delta
     return total.quantize(CENT), lines
@@ -291,15 +297,18 @@ def apply_doj_correction(employee, new_doj, reason, user, recompute=False):
         superseded = recomputable_correction(employee) if recompute else None
         if superseded is None:
             raise DOJCorrectionError('The new date of joining is the same as the current one.')
+        if not correction_is_editable(superseded):
+            raise DOJCorrectionError(NOT_EDITABLE_MSG)
         old_doj = superseded.old_doj
     ty, tm = next_open_month(employee.tenant)
     amount, lines = compute_correction(employee, new_doj, old_doj=old_doj, target=(ty, tm))
     if superseded is not None:
-        # A ₹0 correction saved before the fix: replace its figures (it never reached a payslip).
+        # A ₹0 correction saved before the fix: log the old values, then replace its figures.
+        _log_history(superseded, 'recompute', user, reason)
         superseded.amount, superseded.breakdown = amount, lines
         superseded.target_month, superseded.target_year = tm, ty
         superseded.reason = f'{superseded.reason} | Recomputed: {reason}'
-        superseded.save(update_fields=['amount', 'breakdown', 'target_month', 'target_year', 'reason'])
+        superseded.save(update_fields=['amount', 'breakdown', 'target_month', 'target_year', 'reason', 'history'])
         corr = superseded
     else:
         corr = DOJCorrection.objects.create(
@@ -320,6 +329,73 @@ def apply_doj_correction(employee, new_doj, reason, user, recompute=False):
         )
     except Exception:
         pass
+    return corr
+
+
+def _closed_run(tenant, year, month):
+    from hr.models import PayrollRun
+    return PayrollRun.objects.filter(tenant=tenant, year=year, month=month,
+                                     status__in=CLOSED_RUN_STATUSES).first()
+
+
+def correction_is_editable(corr):
+    """Editable until the run it lands in is approved / paid (or otherwise closed)."""
+    if corr.applied_payslip_id and corr.applied_payslip.payroll_run.status in CLOSED_RUN_STATUSES:
+        return False
+    return _closed_run(corr.tenant, corr.target_year, corr.target_month) is None
+
+
+NOT_EDITABLE_MSG = ('This correction is already part of an approved or paid payroll run, so it can no longer '
+                    'be changed. Create a new DOJ correction instead.')
+
+
+def _log_history(corr, action, user, reason):
+    """Rule 3(1): keep the old values, who, when and why before any change; also write an audit entry."""
+    from django.utils import timezone
+    entry = {'action': action, 'at': timezone.now().isoformat(), 'by': str(getattr(user, 'pk', '') or ''),
+             'by_email': getattr(user, 'email', '') or '', 'reason': reason,
+             'old': {'amount': str(corr.amount), 'breakdown': corr.breakdown,
+                     'target_month': corr.target_month, 'target_year': corr.target_year}}
+    corr.history = list(corr.history or []) + [entry]
+    try:
+        from audit_log.models import AuditLog
+        AuditLog.objects.create(
+            tenant=corr.tenant, user=user, user_email=getattr(user, 'email', '') or '',
+            action='UPDATE', model_name='DOJCorrection', object_id=str(corr.pk),
+            object_repr=str(corr)[:255], changes={'event': f'doj_correction_{action}', **entry})
+    except Exception:
+        pass
+
+
+@transaction.atomic
+def adjust_correction_lines(corr, overrides, reason, user):
+    """Admin edit of per-month arrears amounts. overrides: [{year, month, amount}]."""
+    if getattr(user, 'role', None) != 'admin':
+        raise DOJCorrectionError('Only an admin can edit a DOJ correction.')
+    reason = (reason or '').strip()
+    if not reason:
+        raise DOJCorrectionError('A reason is required to edit a DOJ correction.')
+    if not correction_is_editable(corr):
+        raise DOJCorrectionError(NOT_EDITABLE_MSG)
+    lines = [dict(l) for l in (corr.breakdown or [])]
+    index = {(int(l['year']), int(l['month'])): l for l in lines}
+    for o in overrides or []:
+        try:
+            key = (int(o['year']), int(o['month']))
+            amt = Decimal(str(o['amount'])).quantize(CENT)
+        except Exception:
+            raise DOJCorrectionError('Each edit needs year, month and amount.')
+        ln = index.get(key)
+        if ln is None:
+            raise DOJCorrectionError(f'{key[1]:02d}/{key[0]} is not a month of this correction.')
+        ln.setdefault('computed_delta', ln.get('delta'))
+        ln['delta'] = str(amt)
+        ln['edited'] = True
+        ln['edit_reason'] = reason
+    _log_history(corr, 'edit', user, reason)
+    corr.breakdown = lines
+    corr.amount = sum((Decimal(str(l['delta'])) for l in lines), Decimal('0.00')).quantize(CENT)
+    corr.save(update_fields=['breakdown', 'amount', 'history'])
     return corr
 
 
@@ -370,7 +446,7 @@ def pending_for_payslip(employee, month, year, settings=None):
     from hr.services.payroll_engine import compute_pt_arrears
     run_fy = fy_start(year, month)
     res = {'earning_lines': [], 'deduction_lines': [], 'pt_arrears': Decimal('0.00'),
-           'pf': arrears_pf([], settings), 'warnings': [], 'corrections': []}
+           'pf': arrears_pf([], settings), 'warnings': [], 'corrections': [], 'breakdown': []}
     pf_lines = []
     for c in DOJCorrection.objects.filter(employee=employee, target_month=month, target_year=year).exclude(amount=0):
         res['corrections'].append(c)
@@ -380,28 +456,43 @@ def pending_for_payslip(employee, month, year, settings=None):
         same_fy = prior_fy = arrears = Decimal('0.00')
         for ln in c.breakdown or []:
             d = Decimal(str(ln['delta']))
+            ly, lm = int(ln['year']), int(ln['month'])
+            mname = f'{calendar.month_abbr[lm]} {ly}'
+            detail = ''
+            if not ln.get('carry') and ln.get('working_days'):
+                detail = (f": {ln.get('old_payable_days')}→{ln.get('new_payable_days')} of {ln.get('working_days')} days"
+                          f" × gross ₹{ln.get('monthly_gross')}")
+            res['breakdown'].append({'month': lm, 'year': ly, 'label': mname,
+                                     'old_payable_days': ln.get('old_payable_days'),
+                                     'new_payable_days': ln.get('new_payable_days'),
+                                     'working_days': ln.get('working_days'),
+                                     'gross_used': ln.get('monthly_gross'), 'amount': str(d),
+                                     'edited': bool(ln.get('edited')), 'carry': bool(ln.get('carry'))})
             if d >= 0:
                 arrears += d
                 pf_lines.append(ln)
                 if not ln.get('carry'):
                     paid = Decimal(str(ln.get('paid_gross', '0')))
-                    res['pt_arrears'] += compute_pt_arrears(employee, ln['month'], ln['year'], paid, paid + d,
+                    res['pt_arrears'] += compute_pt_arrears(employee, lm, ly, paid, paid + d,
                                                             tenant=employee.tenant)
-            elif fy_start(int(ln['year']), int(ln['month'])) == run_fy:
+                if d:
+                    res['earning_lines'].append((f'DOJ correction arrears for {mname}{detail} {tag} [{ESIC_FLAG}]',
+                                                 d.quantize(CENT)))
+            elif fy_start(ly, lm) == run_fy:
                 same_fy += d
+                res['earning_lines'].append((f'DOJ correction recovery for {mname}{detail} {tag}', d.quantize(CENT)))
             else:
                 prior_fy += d
-                res.setdefault('prior_fy_month', (int(ln['month']), int(ln['year'])))
-        if arrears:
-            res['earning_lines'].append((f'DOJ correction arrears {tag} [{ESIC_FLAG}]', arrears.quantize(CENT)))
-        if same_fy:
-            res['earning_lines'].append((f'DOJ correction recovery {tag}', same_fy.quantize(CENT)))
+                res.setdefault('prior_fy_month', (lm, ly))
+                res['deduction_lines'].append((f'DOJ correction recovery, earlier FY, for {mname}{detail} {tag}',
+                                               (-d).quantize(CENT)))
         if prior_fy:
-            res['deduction_lines'].append((f'DOJ correction recovery, earlier FY {tag}', (-prior_fy).quantize(CENT)))
             res['warnings'].append(PRIOR_FY_FLAG)
         if same_fy or prior_fy:
             res['warnings'].append(RECOVERY_PF_WARNING)
+            res['warnings'].append(f'Recovery: {ESIC_FLAG}')
         if arrears:
+            res['warnings'].append(ARREARS_PF_WARNING)
             res['warnings'].append(f'Arrears: {ESIC_FLAG}')
     res['pf'] = arrears_pf(pf_lines, settings)
     res['warnings'] = list(dict.fromkeys(res['warnings']))

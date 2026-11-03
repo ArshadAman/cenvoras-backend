@@ -93,3 +93,114 @@ class R12Tests(TestCase):
         self.assertEqual(corr.amount, D('26000.00'))
         self.assertEqual((corr.target_month, corr.target_year), (11, 2026))
         self.assertEqual(DOJCorrection.objects.count(), 1)
+
+
+class R12RudraFollowUpTests(TestCase):
+    """Rudra #224 follow-up: R12 numbers, per-month lines, history, edit window."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.t = User.objects.create_user(username='r12b', email='r12b@x.in', password='pw', role='admin')
+        dept = Department.objects.create(tenant=self.t, name='Ops')
+        des = Designation.objects.create(tenant=self.t, name='Exec')
+        st = SalaryStructure.objects.create(tenant=self.t, name='S')
+        SalaryComponent.objects.create(salary_structure=st, name='Basic', component_type='fixed',
+                                       value='0', is_basic=True)
+        self.emp = Employee.objects.create(
+            tenant=self.t, employee_code='R12', full_name='R12 MidYear', date_of_birth='1990-01-01',
+            date_of_joining=datetime.date(2026, 10, 1), gender='M', employment_type='full_time',
+            designation=des, department=dept, status='active', work_state='Odisha')
+        # ₹20,00,000 annual CTC → monthly_ctc 166666.67; Basic 50% + HRA, balance in Special Allowance.
+        EmployeeSalaryAssignment.objects.create(
+            tenant=self.t, employee=self.emp, salary_structure=st, effective_from='2026-10-01',
+            monthly_ctc=D('166666.67'),
+            computed_components={'Basic': '83333.34', 'HRA': '41666.67', 'Special Allowance': '41666.66'})
+        PayrollRun.objects.create(tenant=self.t, month=9, year=2026, status='approved')
+        octr = PayrollRun.objects.create(tenant=self.t, month=10, year=2026, status='approved')
+        Payslip.objects.create(tenant=self.t, payroll_run=octr, employee=self.emp, total_working_days=27,
+                               present_days=27, gross_salary=D('166666.67'), net_salary=D('150000'))
+        self.nov = PayrollRun.objects.create(tenant=self.t, month=11, year=2026, status='calculated')
+        self.api = APIClient()
+        self.api.force_authenticate(self.t)
+
+    def test_r12_line_is_september_only(self):
+        amount, lines = compute_correction(self.emp, datetime.date(2026, 9, 1))
+        self.assertEqual([(l['year'], l['month']) for l in lines], [(2026, 9)])  # October gives 0
+        ln = lines[0]
+        self.assertEqual(ln['label'], 'Sep 2026')
+        self.assertEqual(ln['monthly_gross'], '166666.67')
+        self.assertEqual((ln['old_payable_days'], ln['new_payable_days']), (0, ln['working_days']))
+        self.assertEqual(amount, D('166666.67'))
+
+    def test_payslip_lines_per_month(self):
+        from hr.services.doj_correction import pending_for_payslip
+        apply_doj_correction(self.emp, datetime.date(2026, 9, 1), 'Offer letter', self.t)
+        res = pending_for_payslip(self.emp, 11, 2026)
+        labels = [l for l, _a in res['earning_lines']]
+        self.assertEqual(len(labels), 1)
+        self.assertIn('for Sep 2026', labels[0])
+        self.assertIn('gross ₹166666.67', labels[0])
+        self.assertEqual(res['breakdown'][0]['label'], 'Sep 2026')
+        self.assertEqual(res['breakdown'][0]['amount'], '166666.67')
+
+    def test_month_without_run_uses_structure_in_force(self):
+        EmployeeSalaryAssignment.objects.create(
+            tenant=self.t, employee=self.emp, salary_structure=SalaryStructure.objects.get(tenant=self.t),
+            effective_from='2026-08-01', monthly_ctc=D('100000.00'),
+            computed_components={'Basic': '50000.00', 'HRA': '25000.00', 'Special Allowance': '25000.00'})
+        amount, lines = compute_correction(self.emp, datetime.date(2026, 8, 1))
+        aug = [l for l in lines if l['month'] == 8][0]
+        sep = [l for l in lines if l['month'] == 9][0]
+        self.assertEqual(aug['monthly_gross'], '100000.00')  # in force in August, not the October one
+        self.assertTrue(any('VERIFY' in w for w in aug['warnings']))
+        self.assertEqual(sep['monthly_gross'], '100000.00')
+
+    def _zero_record(self):
+        c = DOJCorrection.objects.create(
+            tenant=self.t, employee=self.emp, old_doj=datetime.date(2026, 10, 1),
+            new_doj=datetime.date(2026, 9, 1), reason='UAT test', corrected_by=self.t, amount=0,
+            breakdown=[], target_month=12, target_year=2026)
+        Employee.objects.filter(pk=self.emp.pk).update(date_of_joining=datetime.date(2026, 9, 1))
+        self.emp.refresh_from_db()
+        return c
+
+    def test_recompute_keeps_history(self):
+        c = self._zero_record()
+        corr = apply_doj_correction(self.emp, datetime.date(2026, 9, 1), 'fix', self.t, recompute=True)
+        self.assertEqual(corr.pk, c.pk)
+        h = corr.history[-1]
+        self.assertEqual(h['action'], 'recompute')
+        self.assertEqual(h['old']['amount'], '0.00')
+        self.assertEqual((h['old']['target_month'], h['old']['target_year']), (12, 2026))
+        self.assertEqual(h['reason'], 'fix')
+        self.assertEqual(h['by_email'], 'r12b@x.in')
+
+    def test_recompute_blocked_once_target_run_approved(self):
+        c = self._zero_record()
+        c.target_month = 11
+        c.save()
+        self.nov.status = 'approved'
+        self.nov.save()
+        r = self.api.post(f'/api/hr/employees/{self.emp.pk}/doj-correction/',
+                          {'new_doj': '2026-09-01', 'reason': 'fix', 'recompute': True}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('Create a new DOJ correction', r.data['error'])
+
+    def test_admin_edit_amount_and_window(self):
+        corr = apply_doj_correction(self.emp, datetime.date(2026, 9, 1), 'Offer letter', self.t)
+        url = f'/api/hr/employees/{self.emp.pk}/doj-corrections/{corr.pk}/adjust/'
+        r = self.api.post(url, {'lines': [{'year': 2026, 'month': 9, 'amount': '160000'}]}, format='json')
+        self.assertEqual(r.status_code, 400, getattr(r, "data", r.content[:300]))  # reason required
+        r = self.api.post(url, {'lines': [{'year': 2026, 'month': 9, 'amount': '160000'}],
+                                'reason': 'Agreed with employee'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        corr.refresh_from_db()
+        self.assertEqual(corr.amount, D('160000.00'))
+        self.assertEqual(corr.breakdown[0]['computed_delta'], '166666.67')
+        self.assertEqual(corr.history[-1]['action'], 'edit')
+        lst = self.api.get(f'/api/hr/employees/{self.emp.pk}/doj-corrections/')
+        self.assertTrue(lst.data[0]['editable'])
+        self.nov.status = 'approved'
+        self.nov.save()
+        r = self.api.post(url, {'lines': [{'year': 2026, 'month': 9, 'amount': '1'}], 'reason': 'x'}, format='json')
+        self.assertEqual(r.status_code, 400)

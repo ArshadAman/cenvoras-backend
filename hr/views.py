@@ -242,6 +242,42 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                          'warnings': correction_warnings(amount, corr.breakdown, employee.tenant, (ty, tm))},
                         status=201)
 
+    @action(detail=True, methods=['get'], url_path='doj-corrections')
+    def doj_corrections(self, request, pk=None):
+        """List this employee's DOJ corrections with breakdown, history and whether they can still be edited."""
+        from hr.models import DOJCorrection
+        from hr.services.doj_correction import correction_is_editable
+        employee = self.get_object()
+        out = []
+        for c in DOJCorrection.objects.filter(employee=employee).select_related('applied_payslip__payroll_run'):
+            out.append({'id': str(c.id), 'old_doj': str(c.old_doj), 'new_doj': str(c.new_doj),
+                        'amount': str(c.amount), 'kind': c.kind, 'reason': c.reason,
+                        'target_month': c.target_month, 'target_year': c.target_year,
+                        'lines': c.breakdown, 'history': c.history, 'carried': bool(c.carried_from_id),
+                        'editable': correction_is_editable(c)})
+        return Response(out)
+
+    @action(detail=True, methods=['post'], url_path=r'doj-corrections/(?P<corr_id>[^/.]+)/adjust')
+    def doj_correction_adjust(self, request, pk=None, corr_id=None):
+        """Admin edit of per-month arrears amounts until the target run is approved. Body: {lines:[{year,month,amount}], reason}."""
+        from hr.models import DOJCorrection
+        from hr.services.doj_correction import DOJCorrectionError, adjust_correction_lines, correction_warnings
+        if getattr(request.user, 'role', None) != 'admin':
+            return Response({'error': 'Only an admin can edit a DOJ correction.'}, status=403)
+        employee = self.get_object()
+        corr = DOJCorrection.objects.filter(employee=employee, pk=corr_id).first()
+        if corr is None:
+            return Response({'error': 'DOJ correction not found.'}, status=404)
+        try:
+            corr = adjust_correction_lines(corr, request.data.get('lines'), request.data.get('reason'), request.user)
+        except DOJCorrectionError as exc:
+            return Response({'error': str(exc)}, status=400)
+        return Response({'id': str(corr.id), 'amount': str(corr.amount), 'kind': corr.kind,
+                         'target_month': corr.target_month, 'target_year': corr.target_year,
+                         'lines': corr.breakdown, 'history': corr.history,
+                         'warnings': correction_warnings(corr.amount, corr.breakdown, employee.tenant,
+                                                         (corr.target_year, corr.target_month))})
+
     def perform_create(self, serializer):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)
         

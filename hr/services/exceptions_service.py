@@ -185,6 +185,19 @@ def scan_payroll_exceptions(payroll_run_id):
             )
         )
 
+    # 9. Rudra CA: salary components exceed monthly CTC and scaling not confirmed → blocks approval.
+    from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE
+    for ps in Payslip.objects.filter(payroll_run=run).select_related('employee'):
+        flag = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)
+        if flag:
+            exceptions_to_create.append(PayrollException(
+                tenant=tenant, payroll_run=run, employee=ps.employee, severity='critical',
+                code='SALARY_EXCEEDS_CTC',
+                message=(f"{VERIFY_SALARY_STRUCTURE}: salary components exceed the monthly CTC "
+                         f"(₹{flag.get('monthly_ctc')}). Fix the salary structure and recalculate, or confirm "
+                         f"the scaled amounts (admin, with a reason)."),
+            ))
+
     if exceptions_to_create:
         PayrollException.objects.bulk_create(exceptions_to_create)
 

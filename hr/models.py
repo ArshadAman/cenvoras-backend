@@ -541,6 +541,9 @@ class EmployeeSalaryAssignment(models.Model):
         decimal_places=2,
         help_text='Monthly Cost to Company (INR) used as the basis for percentage components.',
     )
+    # Rudra CA: admin confirmation that components exceeding monthly CTC may be scaled down to CTC.
+    # {at, by, by_email, reason, monthly_ctc, components} — valid only while CTC/components are unchanged.
+    ctc_scaling_confirmation = models.JSONField(null=True, blank=True, default=None)
     # JSON snapshot: {component_name: computed_inr_amount, ...}
     # Stored at assignment time so historical payroll runs remain accurate.
     computed_components = models.JSONField(

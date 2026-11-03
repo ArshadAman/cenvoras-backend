@@ -166,6 +166,19 @@ def _block_recalc_of_closed_run(run):
             f"Cannot recalculate a payroll run that is {run.status}. Reopen it first (admin only).")
 
 
+def _block_unconfirmed_ctc_scaling(run):
+    """Rudra CA: no approval while any payslip still carries 'VERIFY salary structure'."""
+    from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE
+    flagged = [f"{ps.employee.full_name} ({ps.employee.employee_code})"
+               for ps in run.payslips.select_related('employee')
+               if (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)]
+    if flagged:
+        raise ValidationError(
+            f"Cannot approve payroll: {VERIFY_SALARY_STRUCTURE} for {', '.join(flagged)}. Their salary "
+            "components exceed the monthly CTC. Fix the salary structure and recalculate, or confirm the "
+            "scaled amounts.")
+
+
 class EmployeeViewSet(viewsets.ModelViewSet):
     """
     CRUD ViewSet for Employee.
@@ -1481,6 +1494,61 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(instance)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post', 'get'], url_path='recalculate-preview')
+    def recalculate_preview(self, request, pk=None):
+        """Dry run of (re)calculation: per-employee old vs new gross, ESI and PT. Saves nothing."""
+        from hr.services.payroll_engine import preview_recalculation
+        instance = self.get_object()
+        if instance.status == 'locked':
+            raise ValidationError("Cannot recalculate a locked payroll run. Please reopen first.")
+        _block_recalc_of_closed_run(instance)
+        return Response(preview_recalculation(instance), status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='confirm-ctc-scaling')
+    def confirm_ctc_scaling(self, request, pk=None):
+        """
+        Admin-only: confirm that an employee's salary components (which exceed monthly CTC) are
+        scaled down to CTC. Logged (who, when, why) on the assignment and in the audit log; the
+        run is then recalculated so the payslip uses the scaled amounts.
+        """
+        from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE, _component_snapshot
+        if getattr(request.user, 'role', None) != 'admin':
+            return Response({'error': 'Only an admin can confirm scaled salary amounts.'}, status=403)
+        instance = self.get_object()
+        _block_recalc_of_closed_run(instance)
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'reason': 'A reason is required.'}, status=400)
+        ps = instance.payslips.filter(employee_id=request.data.get('employee_id')).first()
+        flag = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE) if ps else None
+        if not flag:
+            return Response({'error': 'This employee has no "VERIFY salary structure" flag in this run.'}, status=400)
+        assignment = EmployeeSalaryAssignment.objects.filter(pk=flag.get('assignment_id'), tenant=instance.tenant).first()
+        if assignment is None:
+            return Response({'error': 'Salary assignment not found.'}, status=400)
+        entry = {'at': timezone.now().isoformat(), 'by': str(request.user.pk),
+                 'by_email': getattr(request.user, 'email', '') or '', 'reason': reason,
+                 'monthly_ctc': str(assignment.monthly_ctc),
+                 'components': _component_snapshot(assignment.computed_components),
+                 'scaled_components': flag.get('scaled_components'),
+                 'payroll_run': str(instance.id)}
+        before = assignment.ctc_scaling_confirmation
+        assignment.ctc_scaling_confirmation = entry
+        assignment.save(update_fields=['ctc_scaling_confirmation'])
+        try:
+            from audit_log.models import AuditLog
+            AuditLog.objects.create(
+                tenant=instance.tenant, user=request.user, user_email=entry['by_email'], action='UPDATE',
+                model_name='EmployeeSalaryAssignment', object_id=str(assignment.pk),
+                object_repr=str(assignment)[:255],
+                changes={'event': 'confirm_ctc_scaling', 'before': before, 'after': entry})
+        except Exception:
+            logger.exception('Audit log failed for CTC scaling confirmation')
+        run_payroll(str(instance.id))
+        instance.refresh_from_db()
+        return Response({'status': 'confirmed', 'confirmation': entry,
+                         'run_status': instance.status}, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['get'])
     def exceptions(self, request, pk=None):
         instance = self.get_object()
@@ -1518,6 +1586,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         if instance.status not in ['completed', 'calculated']:
             raise ValidationError("Only completed or calculated payroll runs can be finalised.")
+        _block_unconfirmed_ctc_scaling(instance)
 
         before_status = instance.status
         before_finalised_at = instance.finalised_at
@@ -1546,6 +1615,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         if instance.status in ['approved', 'paid', 'locked']:
             raise ValidationError(f"Payroll run is already {instance.status}.")
+        _block_unconfirmed_ctc_scaling(instance)
 
         critical_exceptions = instance.exceptions.filter(severity='critical', is_resolved=False)
         if critical_exceptions.exists():
@@ -2466,6 +2536,9 @@ class PayrollExceptionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'], url_path='resolve')
     def resolve(self, request, pk=None):
         exc = self.get_object()
+        if exc.code == 'SALARY_EXCEEDS_CTC':
+            return Response({'error': 'Fix the salary structure and recalculate, or use "Confirm scaled amounts" '
+                                      '(admin, with a reason).'}, status=400)
         exc.is_resolved = True
         exc.resolved_by = request.user
         exc.save()

@@ -368,6 +368,79 @@ def compute_pt_arrears(employee, related_month, related_year, paid_gross, revise
     return (after - before).quantize(Decimal('0.01'))
 
 
+SPECIAL_ALLOWANCE = 'Special Allowance'
+
+
+VERIFY_SALARY_STRUCTURE = 'VERIFY salary structure'
+
+
+def _component_snapshot(computed_components):
+    return {k: str(v) for k, v in (computed_components or {}).items() if not str(k).startswith('_')}
+
+
+def scaling_confirmed(assignment):
+    """True if an admin confirmed scaling for exactly this CTC and these components."""
+    c = getattr(assignment, 'ctc_scaling_confirmation', None)
+    if not c:
+        return False
+    return (str(Decimal(str(c.get('monthly_ctc', '0')))) == str(Decimal(str(assignment.monthly_ctc or 0)))
+            and c.get('components') == _component_snapshot(assignment.computed_components))
+
+
+def scale_to_ctc(earnings, ctc):
+    """Pro-rata scale of earnings to CTC (paise drift goes to the largest component)."""
+    D = Decimal
+    others = sum(earnings.values(), D('0'))
+    if others <= 0:
+        return dict(earnings)
+    factor = ctc / others
+    out = {k: (v * factor).quantize(D('0.01')) for k, v in earnings.items()}
+    drift = ctc - sum(out.values(), D('0'))
+    if drift and out:
+        k = max(out, key=lambda n: out[n])
+        out[k] += drift
+    return out
+
+
+def balance_earnings_to_ctc(full_earnings, monthly_ctc, allow_scaling=False):
+    """
+    Un-prorated monthly earnings balanced so gross == monthly CTC (Rudra CA):
+      - below CTC: the shortfall goes to Special Allowance;
+      - above CTC: Special Allowance is reduced, floored at 0;
+      - if the other components alone still exceed CTC there is NO silent scaling: unless an admin
+        has confirmed scaling (allow_scaling), the stored components are used as they are (gross > CTC)
+        and a 'VERIFY salary structure' note is returned, which blocks approval of the run.
+        With allow_scaling, all earnings are scaled pro rata to CTC.
+    Cenvora's CTC excludes employer PF/ESI (they sit on top as total employer cost), so nothing is
+    subtracted for them. A CTC of 0 (not set) leaves the components as they are.
+    Returns (earnings_dict, gross, notes).
+    """
+    D = Decimal
+    earnings = {k: D(str(v)) for k, v in (full_earnings or {}).items()}
+    ctc = D(str(monthly_ctc or 0))
+    notes = []
+    total = sum(earnings.values(), D('0'))
+    if ctc <= 0:
+        return earnings, total, notes
+    if total < ctc:
+        earnings[SPECIAL_ALLOWANCE] = earnings.get(SPECIAL_ALLOWANCE, D('0')) + (ctc - total)
+    elif total > ctc:
+        excess = total - ctc
+        sa = earnings.get(SPECIAL_ALLOWANCE)
+        if sa is not None:
+            cut = min(sa, excess)
+            earnings[SPECIAL_ALLOWANCE] = sa - cut
+            excess -= cut
+        if excess > 0:
+            if allow_scaling:
+                earnings = scale_to_ctc(earnings, ctc)
+                notes.append('Salary components exceed monthly CTC; scaled to CTC as confirmed by admin')
+            else:
+                notes.append(f'{VERIFY_SALARY_STRUCTURE}: components exceed monthly CTC by ₹{excess:.2f}')
+    gross = sum(earnings.values(), D('0'))
+    return earnings, gross, notes
+
+
 def compute_gross(employee, month, year):
     """
     Computes prorated gross salary, differentiating earning components from deduction components.
@@ -403,8 +476,7 @@ def compute_gross(employee, month, year):
     # Separate earnings from deductions based on SalaryStructure component types
     structure_components = {c.name: c for c in assignment.salary_structure.components.all()}
     
-    total_monthly_gross = Decimal('0.0')
-    earnings_map = {}
+    full_earnings = {}
     custom_deductions_map = {}
 
     for comp_name, value_str in assignment.computed_components.items():
@@ -422,17 +494,20 @@ def compute_gross(employee, month, year):
             prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
             custom_deductions_map[comp_name] = prorated_val
         else:
-            total_monthly_gross += val
-            prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
-            earnings_map[comp_name] = prorated_val
+            full_earnings[comp_name] = val
 
-    # Balancing Component: If total earnings < monthly_ctc and no component covers it,
-    # allocate remainder to Special Allowance so employee receives full assigned compensation.
-    monthly_ctc = Decimal(str(assignment.monthly_ctc))
-    if total_monthly_gross < monthly_ctc and 'Special Allowance' not in earnings_map:
-        remainder = monthly_ctc - total_monthly_gross
-        total_monthly_gross = monthly_ctc
-        earnings_map['Special Allowance'] = (remainder * proration_factor).quantize(Decimal('0.01'))
+    # Rudra CA: monthly gross = monthly CTC (employer PF/ESI are not part of Cenvora's CTC) and
+    # never above it. Special Allowance balances in both directions, floored at 0.
+    confirmed = scaling_confirmed(assignment)
+    full_earnings, total_monthly_gross, _gross_notes = balance_earnings_to_ctc(
+        full_earnings, assignment.monthly_ctc, allow_scaling=confirmed)
+    # Passed to compute_payslip_for_employee (flag + scaled preview for the admin to confirm).
+    assignment._ctc_notes = _gross_notes
+    assignment._ctc_scaled_preview = None
+    if any(n.startswith(VERIFY_SALARY_STRUCTURE) for n in _gross_notes):
+        assignment._ctc_scaled_preview = {k: str(v) for k, v in scale_to_ctc(
+            full_earnings, Decimal(str(assignment.monthly_ctc))).items()}
+    earnings_map = {k: (v * proration_factor).quantize(Decimal('0.01')) for k, v in full_earnings.items()}
 
     prorated_gross = (total_monthly_gross * proration_factor).quantize(Decimal('0.01'))
 
@@ -551,8 +626,14 @@ def compute_payslip_for_employee(employee, payroll_run):
         carry_excess_recovery(doj['corrections'], excess, int(month), int(year))
 
     # Basic component lookup for PF — same fallback as salary card (50% CTC / computed Basic)
+    # PF wage = Basic actually paid this month (the scaled Basic after a confirmed CTC scaling),
+    # prorated; compute_pf applies the ₹15,000 ceiling. (DA is not part of the engine's PF wage today.)
+    # VERIFY (Rudra review item, not built): Code on Wages s.2(y) 50% add-back — if excluded allowances
+    # exceed 50% of total remuneration, the excess is added back to wages for PF/ESI.
     basic_comp = assignment.salary_structure.components.filter(is_basic=True).first()
-    if basic_comp:
+    if basic_comp and basic_comp.name in earnings_map:
+        basic_salary = Decimal(str(earnings_map[basic_comp.name])).quantize(Decimal('0.01'))
+    elif basic_comp:
         base_basic_str = assignment.computed_components.get(basic_comp.name, '0.0')
         basic_salary = (Decimal(str(base_basic_str)) * proration_factor).quantize(Decimal('0.01'))
     else:
@@ -650,6 +731,14 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     deductions = {}
     deduction_reasons = {}
+    ctc_notes = getattr(assignment, '_ctc_notes', None) or []
+    if any(n.startswith(VERIFY_SALARY_STRUCTURE) for n in ctc_notes):
+        deduction_reasons[VERIFY_SALARY_STRUCTURE] = {
+            'amount': '0', 'reason': ' '.join(ctc_notes), 'warnings': ctc_notes,
+            'monthly_ctc': str(assignment.monthly_ctc), 'assignment_id': str(assignment.pk),
+            'stored_components': _component_snapshot(assignment.computed_components),
+            'scaled_components': getattr(assignment, '_ctc_scaled_preview', None),
+        }
 
     # 1. Loss of Pay (LOP) Reason
     if breakdown['lop_days'] > 0:
@@ -800,6 +889,70 @@ def compute_payslip_for_employee(employee, payroll_run):
     return payslip
 
 
+def eligible_employees(run):
+    """Joined on or before month-end; active/probation/notice, or logged attendance in the month."""
+    days_in_month = calendar.monthrange(run.year, run.month)[1]
+    start_date = datetime.date(run.year, run.month, 1)
+    end_date = datetime.date(run.year, run.month, days_in_month)
+    return Employee.objects.filter(
+        tenant=run.tenant, date_of_joining__lte=end_date,
+    ).exclude(employment_type='contract').filter(
+        Q(status__in=['active', 'probation', 'notice_period']) |
+        Q(attendance_records__date__range=(start_date, end_date))
+    ).distinct()
+
+
+class _Rollback(Exception):
+    pass
+
+
+ESI_GROSS_LIMIT = Decimal('21000')
+
+
+def preview_recalculation(run):
+    """
+    Dry run: compute every payslip the run would get, compare with the stored payslips, and roll
+    everything back (nothing is saved). Returns per-employee old vs new gross, ESI and PT.
+    """
+    old = {ps.employee_id: ps for ps in Payslip.objects.filter(payroll_run=run).select_related('employee')}
+    rows = []
+    try:
+        with transaction.atomic():
+            for emp in eligible_employees(run):
+                ps = compute_payslip_for_employee(emp, run)
+                if ps is None:
+                    continue
+                o = old.get(emp.pk)
+                og = o.gross_salary if o else None
+                ng = ps.gross_salary
+                o_esi = (o.employee_esi or 0) > 0 if o else None
+                n_esi = (ps.employee_esi or 0) > 0
+                o_pt = o.professional_tax if o else None
+                n_pt = ps.professional_tax
+                esi_change = None
+                if o is not None and o_esi != n_esi:
+                    esi_change = 'now ESI-covered' if n_esi else 'no longer ESI-covered'
+                verify = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)
+                rows.append({
+                    'employee_id': str(emp.pk), 'employee_code': emp.employee_code, 'name': emp.full_name,
+                    'old_gross': str(og) if og is not None else None, 'new_gross': str(ng),
+                    'gross_changed': og is None or og != ng,
+                    'new_gross_within_esi_limit': ng <= ESI_GROSS_LIMIT,
+                    'old_employee_esi': str(o.employee_esi) if o else None, 'new_employee_esi': str(ps.employee_esi),
+                    'esi_change': esi_change,
+                    'old_pt': str(o_pt) if o_pt is not None else None, 'new_pt': str(n_pt),
+                    'pt_changed': o is not None and o_pt != n_pt,
+                    'verify_salary_structure': bool(verify),
+                    'verify_detail': verify,
+                })
+            raise _Rollback()
+    except _Rollback:
+        pass
+    changed = [r for r in rows if r['gross_changed'] or r['esi_change'] or r['pt_changed'] or r['verify_salary_structure']]
+    return {'run_id': str(run.id), 'month': run.month, 'year': run.year,
+            'has_existing_payslips': bool(old), 'employees': len(rows), 'changes': changed}
+
+
 def run_payroll(payroll_run_id):
     """
     Executes the monthly payroll computation for all eligible employees.
@@ -819,15 +972,7 @@ def run_payroll(payroll_run_id):
         start_date = datetime.date(run.year, run.month, 1)
         end_date = datetime.date(run.year, run.month, days_in_month)
 
-        employees = Employee.objects.filter(
-            tenant=run.tenant,
-            date_of_joining__lte=end_date,
-        ).exclude(
-            employment_type='contract'
-        ).filter(
-            Q(status__in=['active', 'probation', 'notice_period']) |
-            Q(attendance_records__date__range=(start_date, end_date))
-        ).distinct()
+        employees = eligible_employees(run)
 
         payslips_to_create = []
         total_gross = Decimal('0.00')

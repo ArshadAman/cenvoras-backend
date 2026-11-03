@@ -63,6 +63,9 @@ class CreditNoteItemSerializer(serializers.ModelSerializer):
 STOCK_RETURN_REASONS = ('return', 'defective')
 
 
+DRAFT_INVOICE_CN_MSG = 'Finalise the invoice before issuing a credit note against it.'
+
+
 class CreditNoteSerializer(serializers.ModelSerializer):
     items = CreditNoteItemSerializer(many=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
@@ -133,7 +136,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError('Credit notes must reference the original posted invoice.')
         if getattr(value, 'status', None) != 'final':
-            raise serializers.ValidationError('A credit note needs a posted, issued invoice — drafts are not allowed.')
+            raise serializers.ValidationError(DRAFT_INVOICE_CN_MSG)
         request = self.context.get('request')
         if request:
             tenant = getattr(request.user, 'active_tenant', request.user)
@@ -156,6 +159,10 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         from billing.gst_rules import remaining_invoice_returns, section34_warning
         request = self.context.get('request')
         tenant = getattr(request.user, 'active_tenant', request.user) if request else None
+        # Rudra CA (#222 follow-up): s.34 applies only to an issued invoice, never a draft (create and update).
+        _linked = attrs['original_invoice'] if 'original_invoice' in attrs else getattr(self.instance, 'original_invoice', None)
+        if _linked is not None and getattr(_linked, 'status', 'final') != 'final':
+            raise serializers.ValidationError({'original_invoice': DRAFT_INVOICE_CN_MSG})
         customer = attrs.get('customer')
         if not customer:
             raise serializers.ValidationError({

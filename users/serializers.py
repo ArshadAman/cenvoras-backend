@@ -68,6 +68,28 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         )
         return user
 
+def _require_company_identity(attrs, instance=None, require_all=False):
+    """
+    UAT P1 item 13 (Rudra CA): a company can't be saved with a blank legal (business) name or
+    address. Values are trimmed; on a partial update only the fields sent are checked unless
+    require_all is set.
+    """
+    errors = {}
+    for field, label in (('business_name', 'Business (legal) name'), ('business_address', 'Business address')):
+        if field in attrs:
+            value = (attrs.get(field) or '').strip()
+            if not value:
+                errors[field] = f'{label} is required.'
+            else:
+                attrs[field] = value
+        elif require_all and not (getattr(instance, field, '') or '').strip():
+            errors[field] = f'{label} is required.'
+    if errors:
+        raise serializers.ValidationError(errors)
+    return attrs
+
+
+
 class ProfileSetupSerializer(serializers.ModelSerializer):
     """Complete profile setup - done inside the app"""
     
@@ -98,6 +120,10 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        return _require_company_identity(attrs, self.instance, require_all=True)
+
     def update(self, instance, validated_data):
         instance = super().update(instance, validated_data)
         # Check if profile should be marked as completed
@@ -276,6 +302,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     
     def validate(self, attrs):
         user = self.instance
+        _require_company_identity(attrs, user)
         
         # Password change validation
         new_password = attrs.get('new_password')

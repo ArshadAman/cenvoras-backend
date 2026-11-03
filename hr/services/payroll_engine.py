@@ -1,3 +1,4 @@
+from hr.models import LATEST_ASSIGNMENT_ORDER  # same tie-break as the Employees list
 import datetime
 import calendar
 from decimal import Decimal
@@ -453,7 +454,7 @@ def compute_gross(employee, month, year):
     assignment = EmployeeSalaryAssignment.objects.filter(
         employee=employee,
         effective_from__lte=end_date
-    ).order_by('-effective_from').first()
+    ).order_by(*LATEST_ASSIGNMENT_ORDER).first()
 
     if not assignment:
         return Decimal('0.0'), None, Decimal('0.0'), {}, {}

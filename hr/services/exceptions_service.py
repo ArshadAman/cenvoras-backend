@@ -1,6 +1,7 @@
 """
 Payroll Exceptions Engine — Identifies pre-approval anomalies and integrity issues.
 """
+from hr.models import LATEST_ASSIGNMENT_ORDER  # same tie-break as the Employees list
 import datetime
 import calendar
 from decimal import Decimal
@@ -88,7 +89,7 @@ def scan_payroll_exceptions(payroll_run_id):
         assignment = EmployeeSalaryAssignment.objects.filter(
             employee=emp,
             effective_from__lte=end_date,
-        ).order_by('-effective_from').first()
+        ).order_by(*LATEST_ASSIGNMENT_ORDER).first()
 
         if not assignment:
             exceptions_to_create.append(

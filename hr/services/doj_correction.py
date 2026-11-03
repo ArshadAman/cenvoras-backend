@@ -93,9 +93,10 @@ def _assignment(employee, year, month):
     case where the employee was already working before the assignment's start date."""
     from hr.models import EmployeeSalaryAssignment
     end = datetime.date(year, month, calendar.monthrange(year, month)[1])
+    from hr.models import LATEST_ASSIGNMENT_ORDER
     qs = EmployeeSalaryAssignment.objects.filter(employee=employee).select_related('salary_structure')
-    return qs.filter(effective_from__lte=end).order_by('-effective_from').first() \
-        or qs.order_by('effective_from').first()
+    return qs.filter(effective_from__lte=end).order_by(*LATEST_ASSIGNMENT_ORDER).first() \
+        or qs.order_by('effective_from', '-created_at', '-id').first()
 
 
 def _assignment_is_fallback(employee, year, month):

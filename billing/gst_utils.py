@@ -532,6 +532,17 @@ def validate_gstin_format(value, required=False, pan=None, legacy=None):
     return gstin
 
 
+GSTIN_INVALID_WARNING = 'Invalid GSTIN, please correct'
+
+
+def gstin_warning(value):
+    """Rudra (#212): a saved GSTIN that fails the full check stays accepted but is flagged.
+    Returns the warning text, or None when the GSTIN is blank or valid."""
+    if not (value or '').strip():
+        return None
+    return None if is_valid_gstin(value) else GSTIN_INVALID_WARNING
+
+
 def is_valid_gstin(value):
     try:
         return bool(validate_gstin_format(value, required=True))

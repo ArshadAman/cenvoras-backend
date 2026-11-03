@@ -132,9 +132,15 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """Full user profile for display"""
+    def get_gstin_warning(self, obj):
+        # Rudra (#212): flag a saved company GSTIN that fails the check (still accepted).
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
     is_trial_active = serializers.SerializerMethodField()
     profile_completed = serializers.SerializerMethodField()
     can_generate_gst_invoice = serializers.SerializerMethodField()
+    gstin_warning = serializers.SerializerMethodField()
     parent_business_name = serializers.CharField(source='parent.business_name', read_only=True)
     plan_name = serializers.SerializerMethodField()
     plan_code = serializers.SerializerMethodField()
@@ -179,7 +185,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'sales_order_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
-            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
+            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 'gstin_warning',
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',

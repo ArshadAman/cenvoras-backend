@@ -1540,6 +1540,13 @@ from .models_sidecar import PartyMeta
 
 class VendorSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Rudra (#212): saved GSTIN that fails the checksum/state check -> 'Invalid GSTIN, please correct'
+    gstin_warning = serializers.SerializerMethodField()
+
+    def get_gstin_warning(self, obj):
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
     # Accepted for FE compatibility but ignored — PartyMeta is customer-only
     meta = serializers.JSONField(required=False, write_only=True)
     linked_customer = serializers.SerializerMethodField()
@@ -1552,9 +1559,9 @@ class VendorSerializer(serializers.ModelSerializer):
         model = Vendor
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state',
-            'created_by', 'created_at', 'meta', 'linked_customer',
+            'created_by', 'created_at', 'meta', 'linked_customer', 'gstin_warning',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'linked_customer']
+        read_only_fields = ['id', 'created_by', 'created_at', 'linked_customer', 'gstin_warning']
 
     def validate_email(self, value):
         if value:
@@ -1640,6 +1647,13 @@ class VendorSerializer(serializers.ModelSerializer):
 
 class CustomerSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Rudra (#212): saved GSTIN that fails the checksum/state check -> 'Invalid GSTIN, please correct'
+    gstin_warning = serializers.SerializerMethodField()
+
+    def get_gstin_warning(self, obj):
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
     meta = PartyMetaSerializer(required=False)
     linked_vendor = serializers.SerializerMethodField()
 
@@ -1652,9 +1666,9 @@ class CustomerSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
             'credit_limit', 'current_balance', 'allow_credit',
-            'created_by', 'created_at', 'meta', 'linked_vendor',
+            'created_by', 'created_at', 'meta', 'linked_vendor', 'gstin_warning',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance', 'linked_vendor']
+        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance', 'linked_vendor', 'gstin_warning']
 
     def validate_email(self, value):
         if value:

@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('hr', '0019_merge_hr_cloudinary_and_cash_salary'),
+        ('hr', '0020_pt_slab_versioned_odisha'),
     ]
 
     operations = [

@@ -167,6 +167,21 @@ def _block_recalc_of_closed_run(run):
             f"Cannot recalculate a payroll run that is {run.status}. Reopen it first (admin only).")
 
 
+def _block_critical_exceptions(run, verb='approve'):
+    """Unresolved critical exceptions (e.g. PAN_REQUIRED_FOR_TDS) block approve AND finalise."""
+    critical_exceptions = run.exceptions.filter(severity='critical', is_resolved=False).select_related('employee')
+    if critical_exceptions.exists():
+        count = critical_exceptions.count()
+        details = []
+        for exc in critical_exceptions:
+            emp_label = f"{exc.employee.full_name} ({exc.employee.employee_code})" if exc.employee else "System"
+            details.append(f"{emp_label}: {exc.message}")
+        issues_text = "; ".join(details)
+        raise ValidationError(
+            f"Cannot {verb} payroll ({count} unresolved critical issue{'s' if count > 1 else ''}): {issues_text}. "
+            f"Please review and resolve in the Exceptions panel before {'approving' if verb == 'approve' else 'finalising'}.")
+
+
 def _block_unconfirmed_ctc_scaling(run):
     """Rudra CA: no approval while any payslip still carries 'VERIFY salary structure'."""
     from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE
@@ -1588,6 +1603,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         if instance.status not in ['completed', 'calculated']:
             raise ValidationError("Only completed or calculated payroll runs can be finalised.")
         _block_unconfirmed_ctc_scaling(instance)
+        _block_critical_exceptions(instance, 'finalise')
 
         before_status = instance.status
         before_finalised_at = instance.finalised_at
@@ -1618,16 +1634,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             raise ValidationError(f"Payroll run is already {instance.status}.")
         _block_unconfirmed_ctc_scaling(instance)
 
-        critical_exceptions = instance.exceptions.filter(severity='critical', is_resolved=False)
-        if critical_exceptions.exists():
-            count = critical_exceptions.count()
-            details = []
-            for exc in critical_exceptions:
-                emp_label = f"{exc.employee.full_name} ({exc.employee.employee_code})" if exc.employee else "System"
-                details.append(f"{emp_label}: {exc.message}")
-            issues_text = "; ".join(details)
-            err_msg = f"Cannot approve payroll ({count} unresolved critical issue{'s' if count > 1 else ''}): {issues_text}. Please review and resolve in the Exceptions panel before approving."
-            raise ValidationError(err_msg)
+        _block_critical_exceptions(instance, 'approve')
 
         before = {'status': instance.status}
         instance.status = 'approved'

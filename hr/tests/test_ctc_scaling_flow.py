@@ -110,3 +110,41 @@ class CtcScalingFlowTests(TestCase):
         r.status = 'approved'
         r.save()
         self.assertEqual(self.api.post(f'/api/hr/payroll-runs/{r.id}/recalculate-preview/').status_code, 400)
+
+
+class FinaliseGuardTests(CtcScalingFlowTests):
+    """Rudra CA: finalise is guarded exactly like approve."""
+
+    def _pan_run(self):
+        e, _a = self.emp('P1', '20000', {'Basic': '10000', 'HRA': '5000'})
+        r = self.run_month()
+        PayrollException.objects.filter(payroll_run=r).delete()
+        PayrollException.objects.create(tenant=self.t, payroll_run=r, employee=e, severity='critical',
+                                        code='PAN_REQUIRED_FOR_TDS', message='PAN is required: TDS is deducted.')
+        return r
+
+    def test_finalise_blocked_by_verify_flag(self):
+        self.emp('X1', '20000', {'Basic': '15000', 'HRA': '15000'})
+        r = self.run_month()
+        resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/finalise/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Emp X1 (X1)', str(resp.data))
+        r.refresh_from_db()
+        self.assertEqual(r.status, 'calculated')
+
+    def test_finalise_blocked_by_pan_tds_exception(self):
+        r = self._pan_run()
+        resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/finalise/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Emp P1 (P1)', str(resp.data))
+        self.assertIn('Cannot finalise payroll', str(resp.data))
+        r.refresh_from_db()
+        self.assertEqual(r.status, 'calculated')
+
+    def test_approve_blocked_by_pan_tds_exception(self):
+        r = self._pan_run()
+        resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/approve/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Emp P1 (P1)', str(resp.data))
+        r.refresh_from_db()
+        self.assertEqual(r.status, 'calculated')

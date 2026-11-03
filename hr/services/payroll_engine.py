@@ -667,9 +667,9 @@ def compute_payslip_for_employee(employee, payroll_run):
             base_basic = (Decimal(str(assignment.monthly_ctc or 0)) * Decimal('0.50')).quantize(Decimal('0.01'))
         basic_salary = (base_basic * proration_factor).quantize(Decimal('0.01'))
 
-    # EPF Act s.6: PF wages = Basic + DA (components flagged is_dearness_allowance), as paid this month.
+    # EPF Act s.6: PF wages = Basic + DA / retaining allowance (components flagged counts_as_pf_wages), as paid.
     da_salary = Decimal('0.00')
-    for comp in assignment.salary_structure.components.filter(is_dearness_allowance=True, is_basic=False):
+    for comp in assignment.salary_structure.components.filter(counts_as_pf_wages=True, is_basic=False):
         if comp.name in earnings_map:
             da_salary += Decimal(str(earnings_map[comp.name]))
     da_salary = da_salary.quantize(Decimal('0.01'))
@@ -798,7 +798,7 @@ def compute_payslip_for_employee(employee, payroll_run):
         deduction_reasons['PF'] = {
             'amount': str(pf_details['employee_pf']),
             'reason': (f"Employee statutory 12% contribution on PF wage ₹{pf_wage_paid} (Basic ₹{basic_salary}"
-                       + (f" + DA ₹{da_salary}" if da_salary else '') + ")"),
+                       + (f" + DA/RA ₹{da_salary}" if da_salary else '') + ")"),
             'pf_wage': str(pf_wage_paid), 'basic': str(basic_salary), 'da': str(da_salary),
         }
 
@@ -1053,3 +1053,18 @@ def run_payroll(payroll_run_id):
 
         # Scan for exceptions (missing bank details, PAN, unapproved overtime/leave, negative net pay)
         scan_payroll_exceptions(run.id)
+
+
+import re as _re
+PF_WAGE_NAME_RE = _re.compile(r'(\bda\b|dearness|retaining)', _re.IGNORECASE)
+
+
+def unflagged_pf_wage_candidates(tenant):
+    """Components whose name has 'DA' (whole word), 'dearness' or 'retaining' and aren't flagged as PF wages."""
+    from hr.models import SalaryComponent
+    out = []
+    for c in SalaryComponent.objects.filter(salary_structure__tenant=tenant, counts_as_pf_wages=False,
+                                            is_basic=False).select_related('salary_structure'):
+        if c.type != 'deduction' and PF_WAGE_NAME_RE.search(c.name or ''):
+            out.append(c)
+    return out

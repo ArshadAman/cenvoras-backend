@@ -20,7 +20,7 @@ class PfWageDaTests(TestCase):
         SalaryComponent.objects.create(salary_structure=self.st, name='Basic', component_type='fixed', value='0',
                                        is_basic=True)
         self.da = SalaryComponent.objects.create(salary_structure=self.st, name='DA', component_type='fixed',
-                                                 value='0', is_dearness_allowance=True)
+                                                 value='0', counts_as_pf_wages=True)
         self.api = APIClient()
         self.api.force_authenticate(self.t)
 
@@ -56,7 +56,7 @@ class PfWageDaTests(TestCase):
         self.assertEqual(ps.employee_pf, D('1200.00'))
 
     def test_da_not_counted_unless_flagged(self):
-        self.da.is_dearness_allowance = False
+        self.da.counts_as_pf_wages = False
         self.da.save()
         e = self.emp('U2', '20000', {'Basic': '8000', 'DA': '2000', 'Special Allowance': '10000'})
         self.assertEqual(self.slip(self.run_month(), e).employee_pf, D('960.00'))
@@ -76,11 +76,11 @@ class PfWageDaTests(TestCase):
         self.assertEqual(ps.employee_pf, D('1200.00'))
 
     def test_preview_flags_pf_wage_change(self):
-        self.da.is_dearness_allowance = False
+        self.da.counts_as_pf_wages = False
         self.da.save()
         e = self.emp('P1', '20000', {'Basic': '8000', 'DA': '2000', 'Special Allowance': '10000'})
         r = self.run_month()
-        self.da.is_dearness_allowance = True
+        self.da.counts_as_pf_wages = True
         self.da.save()
         resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/recalculate-preview/')
         row = [c for c in resp.data['changes'] if c['employee_code'] == 'P1'][0]
@@ -88,3 +88,53 @@ class PfWageDaTests(TestCase):
         self.assertEqual((row['old_pf_wage'], row['new_pf_wage']), ('8000.00', '10000.00'))
         self.assertFalse(row['gross_changed'])
         self.assertEqual(self.slip(r, e).employee_pf, D('960.00'))  # preview saved nothing
+
+
+class PFWageBannerTests(TestCase):
+    def setUp(self):
+        self.t = User.objects.create_user(username='bn', email='bn@x.in', password='pw', role='admin')
+        st = SalaryStructure.objects.create(tenant=self.t, name='Std')
+        self.st = st
+        mk = lambda n, **kw: SalaryComponent.objects.create(salary_structure=st, name=n, component_type='fixed',
+                                                            value='0', **kw)
+        self.da = mk('DA')
+        self.dear = mk('Dearness Allowance')
+        self.ret = mk('Retaining Allowance')
+        mk('Holiday Allowance')
+        mk('Special DA Pay', counts_as_pf_wages=True)
+        mk('Basic', is_basic=True)
+        other = User.objects.create_user(username='bo', email='bo@x.in', password='pw', role='admin')
+        SalaryComponent.objects.create(salary_structure=SalaryStructure.objects.create(tenant=other, name='O'),
+                                       name='DA', component_type='fixed', value='0')
+        self.api = APIClient()
+        self.api.force_authenticate(self.t)
+        self.url = '/api/hr/pf-wage-components/'
+
+    def test_lists_only_unflagged_whole_word_matches(self):
+        r = self.api.get(self.url)
+        self.assertTrue(r.data['show_banner'])
+        self.assertEqual(sorted(m['name'] for m in r.data['matches']),
+                         ['DA', 'Dearness Allowance', 'Retaining Allowance'])
+
+    def test_flag_sets_counts_as_pf_wages(self):
+        r = self.api.post(self.url, {'action': 'flag', 'component_id': str(self.da.id)}, format='json')
+        self.assertEqual(r.status_code, 200)
+        self.da.refresh_from_db()
+        self.assertTrue(self.da.counts_as_pf_wages)
+        self.assertNotIn('DA', [m['name'] for m in self.api.get(self.url).data['matches']])
+
+    def test_dismiss_is_stored_and_new_match_shows_again(self):
+        self.api.post(self.url, {'action': 'dismiss'}, format='json')
+        self.assertFalse(self.api.get(self.url).data['show_banner'])
+        SalaryComponent.objects.create(salary_structure=self.st, name='Retaining allowance 2', component_type='fixed',
+                                       value='0')
+        self.assertTrue(self.api.get(self.url).data['show_banner'])
+
+    def test_admin_only(self):
+        u = User.objects.create_user(username='hm', email='hm@x.in', password='pw', role='manager')
+        api = APIClient()
+        api.force_authenticate(u)
+        self.assertEqual(api.post(self.url, {'action': 'flag', 'component_id': str(self.da.id)},
+                                  format='json').status_code, 403)
+        self.da.refresh_from_db()
+        self.assertFalse(self.da.counts_as_pf_wages)

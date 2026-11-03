@@ -11,7 +11,7 @@ from .views import (
     PayslipPDFView, HRDashboardView, SetupDefaultsView,
     EmployeeTaskViewSet, EmployeeQueryViewSet, EmployeeNotificationViewSet,
     EmployeeSalaryHistoryViewSet, OvertimeRecordViewSet, EmployeeAdvanceLoanViewSet,
-    PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView,
+    PayrollExceptionViewSet, HRDocumentViewSet, HRMSSettingsView, HRReportsView, PFWageComponentsView,
     EmployeeAllowanceBonusViewSet, EmployeeTaxDeclarationViewSet
 )
 
@@ -45,6 +45,7 @@ urlpatterns = [
     path('payslips/<uuid:pk>/pdf/', PayslipPDFView.as_view(), name='payslip-pdf'),
     path('dashboard/', HRDashboardView.as_view(), name='hr-dashboard'),
     path('settings/', HRMSSettingsView.as_view(), name='hrms-settings'),
+    path('pf-wage-components/', PFWageComponentsView.as_view(), name='pf-wage-components'),
     path('reports/', HRReportsView.as_view(), name='hr-reports'),
     path('setup-defaults/', SetupDefaultsView.as_view(), name='setup-defaults'),
     path('', include(router.urls)),

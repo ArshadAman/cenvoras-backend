@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('billing', '0063_purchasebillitem_rcm_itc_blocked'),
+        ('billing', '0064_stock_qty_decimal_3dp'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

@@ -332,7 +332,8 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
 
     qs = ProfessionalTaxSlab.objects.filter(
         state_name__iexact=state,
-        lower_bound__lte=gross,
+    ).filter(
+        Q(lower_exclusive=False, lower_bound__lte=gross) | Q(lower_exclusive=True, lower_bound__lt=gross)
     ).filter(
         Q(upper_bound__isnull=True) | Q(upper_bound__gte=gross)
     ).filter(
@@ -346,9 +347,25 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
         return Decimal('0.00')
 
     amount = Decimal(str(slab.pt_amount))
-    if month == 2 and slab.february_amount is not None and amount > 0:
+    special_month = getattr(slab, 'special_month', None) or 2
+    if month == special_month and slab.february_amount is not None and amount > 0:
         return Decimal(str(slab.february_amount)).quantize(Decimal('0.01'))
     return amount.quantize(Decimal('0.01'))
+
+
+def compute_pt_arrears(employee, related_month, related_year, paid_gross, revised_gross, tenant=None):
+    """
+    UAT P1 #1 (Rudra CA): PT on arrears is slabbed against the month the arrears RELATE to,
+    not the month they are paid. Returns the extra PT due for that month:
+        PT(revised gross, slab of related month) − PT(gross already paid, same slab).
+    """
+    import calendar as _cal
+    day = min(28, _cal.monthrange(int(related_year), int(related_month))[1])
+    on = datetime.date(int(related_year), int(related_month), day)
+    kw = dict(month=int(related_month), on_date=on, employee=employee, tenant=tenant)
+    before = compute_pt(paid_gross, '', **kw)
+    after = compute_pt(revised_gross, '', **kw)
+    return (after - before).quantize(Decimal('0.01'))
 
 
 def compute_gross(employee, month, year):

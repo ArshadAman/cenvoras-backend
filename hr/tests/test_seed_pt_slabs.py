@@ -33,7 +33,7 @@ class SeedPTSlabsCommandTests(TestCase):
             "Andhra Pradesh", "Telangana", "Gujarat", "Madhya Pradesh", "Odisha",
         }
         self.assertEqual(set(states), expected_states)
-        odisha = ProfessionalTaxSlab.objects.get(state_name='Odisha', lower_bound=0)
+        odisha = ProfessionalTaxSlab.objects.get(state_name='Odisha', lower_bound=0, effective_to__isnull=True)
         self.assertEqual(odisha.pt_amount, Decimal('0.00'))
         
         # Check specific edge cases

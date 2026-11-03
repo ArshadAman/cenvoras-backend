@@ -1262,6 +1262,22 @@ class ProfessionalTaxSlab(models.Model):
         blank=True,
         help_text='Optional February override (e.g. Karnataka ₹300 in Feb). Null = use pt_amount.',
     )
+    special_month = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text='Month (1-12) in which february_amount applies; null = February. '
+                  'E.g. Odisha legacy ₹300 in March (last month of the FY).',
+    )
+    lower_exclusive = models.BooleanField(
+        default=False,
+        help_text='True = slab applies when gross > lower_bound (strict); False = gross >= lower_bound.',
+    )
+    source_note = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Legal source / verification status of this slab.',
+    )
     # Date-versioned slabs (null = open-ended). Additive — do not delete historical rows.
     effective_from = models.DateField(
         null=True,

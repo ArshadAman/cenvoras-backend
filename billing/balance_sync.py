@@ -81,6 +81,25 @@ def customer_balance_breakdown(tenant, customer_ids=None):
     return out
 
 
+def invoice_outstanding_map(invoices):
+    """
+    {invoice_id: Decimal} outstanding per invoice, net of receipts/advance adjustments
+    (amount_paid) and of credit notes linked to that invoice, floored at 0. Same terms as
+    the customer formula above, allocated to the invoice they are linked to.
+    """
+    from .models_returns import CreditNote
+    invoices = list(invoices)
+    ids = [i.id for i in invoices]
+    cns = _sum_by_customer(CreditNote.objects.filter(original_invoice_id__in=ids), 'total_amount',
+                           key='original_invoice_id') if ids else {}
+    out = {}
+    for inv in invoices:
+        val = (Decimal(str(inv.total_amount or 0)) - Decimal(str(inv.amount_paid or 0))
+               - cns.get(inv.id, _ZERO))
+        out[inv.id] = max(val, _ZERO).quantize(Decimal('0.01'))
+    return out
+
+
 def customer_outstanding(customer):
     """Outstanding for one customer (Decimal)."""
     row = customer_balance_breakdown(customer.created_by, [customer.id]).get(customer.id)

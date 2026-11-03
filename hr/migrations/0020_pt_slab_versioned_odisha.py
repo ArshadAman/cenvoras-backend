@@ -32,5 +32,10 @@ class Migration(migrations.Migration):
             name='source_note',
             field=models.CharField(blank=True, default='', max_length=500, help_text='Legal source / verification status of this slab.'),
         ),
+        migrations.AddField(
+            model_name='professionaltaxslab',
+            name='lower_exclusive',
+            field=models.BooleanField(default=False, help_text='True = slab applies when gross > lower_bound (strict); False = gross >= lower_bound.'),
+        ),
         migrations.RunPython(version_odisha, migrations.RunPython.noop),
     ]

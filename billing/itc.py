@@ -30,13 +30,15 @@ def bill_vendor_gstin(bill):
 
 
 def vendor_registered(bill):
-    """True when the bill carries a valid supplier GSTIN."""
+    """True when the bill carries a supplier GSTIN in valid format. A saved GSTIN that fails the
+    check character stays accepted (#212: flagged 'Invalid GSTIN, please correct', not rejected);
+    new or changed GSTINs are fully checked by the party/bill serializers."""
     from billing.gst_utils import validate_gstin_format
     gstin = bill_vendor_gstin(bill)
     if not gstin:
         return False
     try:
-        return bool(validate_gstin_format(gstin, required=True))
+        return bool(validate_gstin_format(gstin, required=True, legacy=gstin))
     except ValueError:
         return False
 
@@ -52,7 +54,7 @@ def lock_unregistered_line_tax(vendor_gstin, is_reverse_charge, items):
     """
     from billing.gst_utils import validate_gstin_format
     try:
-        registered = bool(validate_gstin_format(vendor_gstin or '', required=True))
+        registered = bool(validate_gstin_format(vendor_gstin or '', required=True, legacy=vendor_gstin))
     except ValueError:
         registered = False
     if registered:

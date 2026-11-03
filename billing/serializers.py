@@ -576,6 +576,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         ret['tax_amount'] = str(tax_total.quantize(Decimal('0.01')))
         ret['is_interstate'] = is_interstate
         ret['subtotal'] = ret['taxable_amount']
+        ret['vendor_country'] = getattr(getattr(instance, 'vendor', None), 'country', '') or ''
         # Same split as the books / 3B (#214/#219): RCM tax is payable by us, not part of the vendor payable.
         try:
             from billing.itc import bill_tax_classification, import_of_services_warning

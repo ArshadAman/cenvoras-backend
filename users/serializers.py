@@ -119,6 +119,18 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'bank_upi_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
+
+    def validate_gstin(self, value):
+        """UAT P1 item 13 (Rudra CA): an Indian company can't finish setup without its GSTIN."""
+        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        country = (getattr(self, 'initial_data', {}) or {}).get('country') or getattr(self.instance, 'country', 'IN')
+        try:
+            gstin = validate_gstin_format(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+        if not gstin and str(country or 'IN').upper() == 'IN':
+            raise serializers.ValidationError('GSTIN is required to set up the company.')
+        return gstin
     
     def validate(self, attrs):
         attrs = super().validate(attrs)

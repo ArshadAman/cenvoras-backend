@@ -372,6 +372,8 @@ class SalesInvoice(models.Model):
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)
     journal = models.CharField(max_length=50, default="Sales")
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # UAT P1 item 13 (Rule 46(p)): whether tax is payable on reverse charge.
+    is_reverse_charge = models.BooleanField(default=False, help_text='Tax payable on reverse charge (Rule 46).')
 
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where items are sold")
     source_sales_order = models.ForeignKey(

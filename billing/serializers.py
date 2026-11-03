@@ -928,7 +928,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_challans', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'is_reverse_charge', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -1071,6 +1071,29 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
+        # UAT P1 item 13 (Rudra CA): Rule 46 essentials on a final invoice.
+        _status = data.get('status', getattr(self.instance, 'status', 'final'))
+        if _status == 'final' and (items is not None or not self.instance):
+            from billing.rule46 import rule46_errors
+            from billing.sync_service import DocumentSyncService
+            _init = getattr(self, 'initial_data', {}) or {}
+            _cust = customer or getattr(self.instance, 'customer', None)
+            _rows = items if items is not None else []
+            _taxable = sum((DocumentSyncService.calculate_line_amount(
+                it.get('quantity', 0), it.get('price', 0), it.get('discount', 0), it.get('tax', 0))
+                for it in _rows if (it.get('row_type') or 'item') != 'note'), Decimal('0.00'))
+            r46 = rule46_errors(
+                invoice_number=data.get('invoice_number', getattr(self.instance, 'invoice_number', None)),
+                invoice_date=data.get('invoice_date', getattr(self.instance, 'invoice_date', None)),
+                customer_name=(data.get('customer_name') or getattr(self.instance, 'customer_name', None)
+                               or getattr(_cust, 'name', None)),
+                customer_address=(_init.get('customer_address') or getattr(self.instance, 'customer_address', None)
+                                  or getattr(_cust, 'address', None)),
+                customer_gstin=_init.get('customer_gstin') or getattr(_cust, 'gstin', None),
+                items=_rows, taxable_total=_taxable)
+            if r46:
+                raise serializers.ValidationError(r46)
+
         # Rudra CA POS rules (s.10/s.12 IGST Act): block mismatched POS for services / bill-to-ship-to.
         if 'place_of_supply' in data or not self.instance:
             from billing.gst_rules import invoice_pos_decision

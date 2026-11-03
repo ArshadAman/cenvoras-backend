@@ -8,7 +8,7 @@ from rest_framework.response import Response
 
 from billing.models import PurchaseBill
 from billing.models_rcm import RcmPaymentVoucher, RcmSelfInvoice
-from billing.rcm_documents import (RcmDocumentError, create_payment_voucher, create_self_invoice,
+from billing.rcm_documents import (RcmDocumentError, create_self_invoice,
                                    self_invoices_due)
 
 
@@ -22,7 +22,8 @@ class RcmSelfInvoiceSerializer(serializers.ModelSerializer):
 class RcmPaymentVoucherSerializer(serializers.ModelSerializer):
     class Meta:
         model = RcmPaymentVoucher
-        fields = ['id', 'purchase_bill', 'number', 'date', 'supplier_name', 'amount_paid', 'taxable_value',
+        fields = ['id', 'purchase_bill', 'number', 'date', 'supplier_name', 'amount_paid', 'payment_mode',
+                  'payment_reference', 'taxable_value',
                   'cgst', 'sgst', 'igst', 'created_at']
 
 
@@ -51,26 +52,10 @@ def rcm_self_invoice_create(request, pk):
     if bill is None:
         return Response({'error': 'Purchase bill not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
-        doc = create_self_invoice(tenant, bill, _date(request.data.get('date'), _date_today()),
-                                  _date(request.data.get('receipt_date'), None))
+        doc = create_self_invoice(tenant, bill, _date(request.data.get('date'), _date_today()))
     except RcmDocumentError as exc:
         return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(RcmSelfInvoiceSerializer(doc).data, status=status.HTTP_201_CREATED)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def rcm_payment_voucher_create(request, pk):
-    tenant = _tenant(request)
-    bill = _bill(tenant, pk)
-    if bill is None:
-        return Response({'error': 'Purchase bill not found.'}, status=status.HTTP_404_NOT_FOUND)
-    try:
-        doc = create_payment_voucher(tenant, bill, _date(request.data.get('date'), _date_today()),
-                                     request.data.get('amount_paid'))
-    except RcmDocumentError as exc:
-        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    return Response(RcmPaymentVoucherSerializer(doc).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])

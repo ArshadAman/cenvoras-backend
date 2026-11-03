@@ -92,7 +92,9 @@ class ItcRcmTests(FourFixesBase):
         self.assertEqual(self._gl(bill, '2001'), Decimal('-10000.00'))
         self.assertEqual(self._gl(bill, '1301'), Decimal('0'))
         self._balanced(bill)
-        d = str(date.today())
+        # #219: unpaid RCM services -> time of supply = bill date + 61 days (s.13(3)).
+        from datetime import timedelta
+        d = str(date.today() + timedelta(days=61))
         res = self.client.get(f'/api/billing/gst/gstr3b/?from={d}&to={d}')
         self.assertEqual(res.status_code, 200, res.data)
         t31d = res.data['table_3_1']['inward_reverse_charge']

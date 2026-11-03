@@ -5,7 +5,8 @@ RCM documents (Rudra CA follow-up to UAT P1 #7), for supplies taxed under revers
   supply from an UNREGISTERED supplier issues an invoice to itself within 30 days of receiving
   the supply. Own series (RCM-YYYY-NNNN, <=16 chars per Rule 46).
 * RcmPaymentVoucher - s.31(3)(g): a payment voucher issued when paying the supplier of an RCM
-  supply. Own series (RPV-YYYY-NNNN).
+  supply, created and dated from each payment entry (two instalments = two vouchers).
+  Own series (RPV-YYYY-NNNN).
 Both are additive tables; nothing existing changes.
 """
 import uuid
@@ -51,6 +52,8 @@ class RcmPaymentVoucher(models.Model):
     date = models.DateField()
     supplier_name = models.CharField(max_length=255)
     amount_paid = models.DecimalField(max_digits=14, decimal_places=2)
+    payment_mode = models.CharField(max_length=30, blank=True, default='')
+    payment_reference = models.CharField(max_length=100, blank=True, default='')
     taxable_value = models.DecimalField(max_digits=14, decimal_places=2)
     cgst = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     sgst = models.DecimalField(max_digits=14, decimal_places=2, default=0)

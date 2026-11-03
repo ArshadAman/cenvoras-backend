@@ -229,6 +229,10 @@ class PurchaseBill(models.Model):
         default=False,
         help_text='True when this purchase is under GST reverse charge (RCM).',
     )
+    # Rudra (#219): 'Date of receipt of goods/services' on RCM bills. Null = the bill date.
+    # Drives the Rule 47A self-invoice window and the RCM time of supply (s.12(3)/s.13(3)).
+    rcm_receipt_date = models.DateField(null=True, blank=True,
+                                        help_text='Date of receipt of goods/services (RCM). Blank = bill date.')
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

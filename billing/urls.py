@@ -25,9 +25,9 @@ urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
     path('purchase-bills/<uuid:pk>/', purchase_bill_detail, name='purchase_bill_detail'),
     path('purchase-bills/<uuid:pk>/edit/', purchase_bill_update_delete, name='purchase_bill_update_delete'),
-    # RCM documents (Rudra follow-up to UAT P1 #7): self-invoice s.31(3)(f)/Rule 47A, payment voucher s.31(3)(g)
+    # RCM documents (Rudra follow-up to UAT P1 #7): self-invoice s.31(3)(f)/Rule 47A; payment vouchers
+    # s.31(3)(g) are created by vendor-payments/ (one per payment entry) and listed here
     path('purchase-bills/<uuid:pk>/rcm-self-invoice/', views_rcm.rcm_self_invoice_create, name='rcm_self_invoice_create'),
-    path('purchase-bills/<uuid:pk>/rcm-payment-voucher/', views_rcm.rcm_payment_voucher_create, name='rcm_payment_voucher_create'),
     path('rcm/self-invoices/', views_rcm.rcm_self_invoice_list, name='rcm_self_invoice_list'),
     path('rcm/payment-vouchers/', views_rcm.rcm_payment_voucher_list, name='rcm_payment_voucher_list'),
     path('vendor-products/', vendor_products, name='vendor_products'),

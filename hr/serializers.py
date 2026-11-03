@@ -112,6 +112,83 @@ class EmployeeSerializer(serializers.ModelSerializer):
         exclude = ['tenant']
         read_only_fields = ['id', 'employee_code', 'created_at', 'updated_at']
 
+    # ---- UAT P1 items 8/9 (Rudra CA): statutory identifiers ---------------------------
+    # The employee form posts uan_number / esi_number / pf_number; the model fields are
+    # uan / esi_ip_number / pf_member_id. Accept both so the values are actually saved.
+    _ID_ALIASES = {'uan_number': 'uan', 'esi_number': 'esi_ip_number', 'pf_number': 'pf_member_id'}
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        for alias, field in self._ID_ALIASES.items():
+            if alias in data and field not in data:
+                data[field] = data.get(alias)
+        return super().to_internal_value(data)
+
+    @staticmethod
+    def _id_or_none(value, error_fn):
+        from hr.validators import clean
+        v = clean(value)
+        if not v:
+            return None
+        err = error_fn(v)
+        if err:
+            raise serializers.ValidationError(err)
+        return v
+
+    def validate_pan_number(self, value):
+        from hr.validators import pan_error
+        return self._id_or_none(value, lambda v: pan_error(v, individual=True))
+
+    def validate_bank_ifsc(self, value):
+        from hr.validators import ifsc_error
+        v = self._id_or_none(value, ifsc_error)
+        if not v:
+            raise serializers.ValidationError('Bank IFSC code is mandatory.')
+        return v
+
+    def validate_uan(self, value):
+        from hr.validators import uan_error
+        return self._id_or_none(value, uan_error)
+
+    def validate_esi_ip_number(self, value):
+        from hr.validators import esi_ip_error
+        return self._id_or_none(value, esi_ip_error)
+
+    def validate_pf_member_id(self, value):
+        from hr.validators import pf_member_error
+        return self._id_or_none(value, pf_member_error)
+
+    def _hrms_settings(self):
+        from hr.models import HRMSSettings
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        if tenant is None and self.instance is not None:
+            tenant = self.instance.tenant
+        return HRMSSettings.objects.filter(tenant=tenant).first() if tenant is not None else None
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        def cur(name, default=None):
+            return attrs.get(name, getattr(self.instance, name, default) if self.instance else default)
+        settings_obj = self._hrms_settings()
+        pf_on = getattr(settings_obj, 'pf_enabled', True)
+        esi_on = getattr(settings_obj, 'esi_enabled', True)
+        errors = {}
+        is_contract = cur('employment_type') == 'contract'
+        if pf_on and not is_contract and cur('pf_member') is True and not cur('uan'):
+            errors['uan'] = 'UAN is mandatory for PF members (12 digits).'
+        if esi_on and not is_contract and cur('esi_covered', False) and not cur('esi_ip_number'):
+            errors['esi_ip_number'] = 'ESI IP number is mandatory for ESI-covered employees (10 digits).'
+        doj = attrs.get('date_of_joining')
+        start = getattr(settings_obj, 'company_start_date', None)
+        if doj and start and doj < start:
+            errors['date_of_joining'] = (
+                f"Date of joining can't be before the company start date ({start:%d/%m/%Y}).")
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
     def validate_date_of_birth(self, value):
         if value:
             from django.utils import timezone
@@ -349,6 +426,14 @@ class EmployeeSerializer(serializers.ModelSerializer):
             for key in SALARY_FIELDS:
                 data.pop(key, None)
             data['salary_hidden'] = True
+        # UAT P1 items 8/9: alias keys for the form, and 'Upcoming' for a future joining date.
+        for alias, field in self._ID_ALIASES.items():
+            data[alias] = data.get(field)
+        from billing.advances import today_ist
+        doj = getattr(instance, 'date_of_joining', None)
+        data['is_upcoming'] = bool(doj and doj > today_ist())
+        data['status_display'] = 'Upcoming' if data['is_upcoming'] and instance.status == 'active' else (
+            instance.get_status_display() if hasattr(instance, 'get_status_display') else instance.status)
         return data
 
     def validate_contract_fee(self, value):

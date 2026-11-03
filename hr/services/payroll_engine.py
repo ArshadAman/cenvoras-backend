@@ -572,6 +572,11 @@ def compute_payslip_for_employee(employee, payroll_run):
         for k in ('employee_pf', 'employer_pf', 'employer_epf', 'employer_eps'):
             pf_details[k] = (Decimal(str(pf_details[k])) + arrear_pf[k]).quantize(Decimal('0.01'))
     esi_details = compute_esi(gross_with_earnings, settings)
+    # UAT P1 item 9: company-level PF / ESI coverage (both default on) and per-employee PF membership.
+    if (settings is not None and not getattr(settings, 'pf_enabled', True)) or getattr(employee, 'pf_member', None) is False:
+        pf_details = {k: (Decimal('0.00') if isinstance(v, Decimal) else v) for k, v in pf_details.items()}
+    if settings is not None and not getattr(settings, 'esi_enabled', True):
+        esi_details = {k: (Decimal('0.00') if isinstance(v, Decimal) else v) for k, v in esi_details.items()}
     tds_data = compute_dynamic_tds(employee, gross_with_earnings, month, year)
     tds_val = tds_data['monthly_tds']
     import datetime as _dt

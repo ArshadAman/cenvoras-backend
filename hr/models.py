@@ -146,6 +146,13 @@ class Employee(models.Model):
     upi_id = models.CharField(max_length=100, blank=True, null=True)
     uan = models.CharField(max_length=12, blank=True, null=True)
     esi_ip_number = models.CharField(max_length=20, blank=True, null=True)
+    # UAT P1 item 9: PF member ID (22 chars) and per-employee PF / ESI coverage.
+    pf_member_id = models.CharField(max_length=22, blank=True, null=True)
+    # None = not stated (legacy rows; PF still computed as before). True = PF member, UAN required.
+    # False = not a PF member, no PF deducted.
+    pf_member = models.BooleanField(null=True, blank=True, default=None,
+                                    help_text='Employee is a PF member (UAN required).')
+    esi_covered = models.BooleanField(default=False, help_text='Employee is covered under ESI (IP number required).')
     contract_fee = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -1221,6 +1228,11 @@ class HRMSSettings(models.Model):
     esi_employee_rate = models.DecimalField(max_digits=5, decimal_places=3, default=0.75)
     esi_employer_rate = models.DecimalField(max_digits=5, decimal_places=3, default=3.25)
     esi_wage_ceiling = models.DecimalField(max_digits=10, decimal_places=2, default=21000.0)
+    # UAT P1 items 8/9 (Rudra CA): company-level PF / ESI coverage and the company start date
+    pf_enabled = models.BooleanField(default=True, help_text='Company is covered under EPF.')
+    esi_enabled = models.BooleanField(default=True, help_text='Company is covered under ESI.')
+    company_start_date = models.DateField(null=True, blank=True,
+                                          help_text='No employee can have a joining date before this.')
 
     allow_cash_salary_disbursement = models.BooleanField(
         default=False,

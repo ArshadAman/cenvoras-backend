@@ -54,8 +54,25 @@ def scan_payroll_exceptions(payroll_run_id):
                 )
             )
 
-        # 2. Missing PAN (Warning: subject to 20% higher TDS deduction under Sec 206AA)
-        if not emp.pan_number:
+        # 2. PAN. UAT P1 item 8 (Rudra CA): a payroll with TDS > 0 needs a valid PAN, otherwise
+        #    s.206AA's higher 20% rate applies -> critical (blocks approval) until the PAN is added.
+        from hr.validators import is_valid_pan
+        from hr.models import Payslip
+        _tds = (Payslip.objects.filter(payroll_run=run, employee=emp).values_list('tds', flat=True).first()
+                or Decimal('0'))
+        if Decimal(str(_tds)) > 0 and not is_valid_pan(emp.pan_number, individual=True):
+            exceptions_to_create.append(
+                PayrollException(
+                    tenant=tenant,
+                    payroll_run=run,
+                    employee=emp,
+                    severity='critical',
+                    code='PAN_REQUIRED_FOR_TDS',
+                    message=(f"TDS of ₹{Decimal(str(_tds)):,.2f} is due but the employee has no valid PAN. "
+                             "Add the PAN before approving (without it s.206AA's 20% rate applies)."),
+                )
+            )
+        elif not emp.pan_number:
             exceptions_to_create.append(
                 PayrollException(
                     tenant=tenant,

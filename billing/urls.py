@@ -1,4 +1,5 @@
 from django.urls import path
+from billing import views_rcm
 from .views import (
     purchase_bill_detail, purchase_bill_update_delete,
     sales_invoice_detail, sales_invoice_list_create, sales_invoice_update_delete, purchase_bill_list_create,
@@ -24,6 +25,11 @@ urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
     path('purchase-bills/<uuid:pk>/', purchase_bill_detail, name='purchase_bill_detail'),
     path('purchase-bills/<uuid:pk>/edit/', purchase_bill_update_delete, name='purchase_bill_update_delete'),
+    # RCM documents (Rudra follow-up to UAT P1 #7): self-invoice s.31(3)(f)/Rule 47A, payment voucher s.31(3)(g)
+    path('purchase-bills/<uuid:pk>/rcm-self-invoice/', views_rcm.rcm_self_invoice_create, name='rcm_self_invoice_create'),
+    path('purchase-bills/<uuid:pk>/rcm-payment-voucher/', views_rcm.rcm_payment_voucher_create, name='rcm_payment_voucher_create'),
+    path('rcm/self-invoices/', views_rcm.rcm_self_invoice_list, name='rcm_self_invoice_list'),
+    path('rcm/payment-vouchers/', views_rcm.rcm_payment_voucher_list, name='rcm_payment_voucher_list'),
     path('vendor-products/', vendor_products, name='vendor_products'),
     path('vendor-payments/unpaid-bills/', vendor_payment_views.unpaid_purchase_bills, name='unpaid_purchase_bills'),
     path('vendor-payments/', vendor_payment_views.vendor_payment_create, name='vendor_payment_create'),

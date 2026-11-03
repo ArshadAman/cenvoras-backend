@@ -47,6 +47,16 @@ class User(AbstractUser):
     is_vat_registered = models.BooleanField(default=False, help_text="Is the business VAT registered? (for UAE)")
     # UAT P1 item 4 (Rudra CA): round sales invoice totals to the rupee (half up) by default.
     auto_round_off = models.BooleanField(default=True, help_text="Round invoice totals to the nearest rupee (half up)")
+    # UAT P1 item 13 (Rudra CA): Regular / Composition / Not registered. Null = not set yet
+    # (filled from data by migration 0024; see billing/gst_status.py).
+    gst_status = models.CharField(
+        max_length=20, null=True, blank=True, default=None,
+        choices=[('regular', 'Regular'), ('composition', 'Composition'), ('unregistered', 'Not registered')],
+        help_text="Company GST status: drives document title, tax lock and GST returns",
+    )
+    # Rudra (#216): False for rows the migration filled from data (a composition dealer also has a
+    # GSTIN, so 'regular' is only a guess). True once an admin saves the status or setup completes.
+    gst_status_confirmed = models.BooleanField(default=False)
     
     # Optional fields (can be added later)
     gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")

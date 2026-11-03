@@ -47,14 +47,14 @@ class R21TypedProductTests(FourFixesBase):
         if confirm:
             item["confirm_create_product"] = True
         return self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": self.customer.name, "invoice_date": str(date.today()), "status": "final",
+            "customer_name": self.customer.name, "customer_address": "1 Test Road, Bhubaneswar", "invoice_date": str(date.today()), "status": "final",
             "total_amount": "118.00", "items": [item]}, format="json")
 
     def test_typed_product_needs_confirm_and_says_so(self):
         res = self._inv(confirm=False)
         self.assertEqual(res.status_code, 400)
         self.assertIn("confirm_create_product", str(res.data))   # message the UI now shows / pre-empts
-        self.assertEqual(self._inv(confirm=True).status_code, 201)
+        r = self._inv(confirm=True); self.assertEqual(r.status_code, 201, r.data)
 
     def test_save_as_new_product_requires_hsn_with_message(self):
         body = {"name": "Typed Thing", "sale_price": 100, "cost_price": 100, "unit": "pcs", "tax": 18, "stock": 0}

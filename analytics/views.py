@@ -506,6 +506,11 @@ def gstr1_report(request):
     Returns data for GSTR-1 filing (B2B, B2C Large, B2C Small).
     Aggregates data by Invoice and Tax Rate.
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=403)
     date_from = request.query_params.get('date_from')
     date_to = request.query_params.get('date_to')
     export = request.query_params.get('export', 'json')

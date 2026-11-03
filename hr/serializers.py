@@ -276,6 +276,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         components = dict(latest.computed_components or {})
         meta_basic_pct = components.pop('_basic_pct', None)
         meta_hra_pct = components.pop('_hra_pct', None)
+        from hr.services.payroll_engine import custom_allowances as _custom_allowances
         pf_wage_flags = components.pop('_pf_wages', None) or []
         components = {k: v for k, v in components.items() if not str(k).startswith('_')}
 
@@ -420,6 +421,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'components': components_dict,
             'earnings': earnings_dict,
             'pf_wage_components': list(pf_wage_flags),
+            # Same source as the PF banner (payroll_engine.custom_allowances on the current assignment).
+            'custom_allowances': {k: str(v) for k, v in _custom_allowances(latest).items()},
             # Same-name rule (Rudra): a custom row named like a structure component takes that component's PF flag.
             'structure_components': [{'name': c.name, 'counts_as_pf_wages': bool(c.counts_as_pf_wages or c.is_basic)}
                                      for c in latest.salary_structure.components.all()],

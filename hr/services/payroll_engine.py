@@ -1122,6 +1122,38 @@ def unflagged_pf_wage_candidates(tenant):
     return out
 
 
+FIXED_ALLOWANCE_NAMES = {'basic', 'hra', 'special allowance', 'conveyance allowance', 'medical allowance'}
+
+
+def current_assignment(employee):
+    """The employee's current assignment by the #230 tie-break (same one the employee form shows)."""
+    from hr.models import LATEST_ASSIGNMENT_ORDER
+    return employee.salary_assignments.select_related('salary_structure').order_by(*LATEST_ASSIGNMENT_ORDER).first()
+
+
+def custom_allowances(assignment):
+    """Single source for the employee form, the PF banner and PF flags: custom allowances on an assignment.
+    = computed_components keys that are not metadata ('_'), not structure components, not the fixed
+    Basic/HRA/Special/Conveyance/Medical rows, with an amount > 0 (a stored 'DA': '0.00' is not an allowance)."""
+    if assignment is None:
+        return {}
+    structure = {c.name for c in assignment.salary_structure.components.all()}
+    out, seen = {}, set()
+    for name, val in (assignment.computed_components or {}).items():
+        n = str(name).strip()
+        norm = n.lower().replace('_', ' ')
+        if n.startswith('_') or n in structure or norm in FIXED_ALLOWANCE_NAMES or norm in seen:
+            continue
+        try:
+            amt = Decimal(str(val)).quantize(Decimal('0.01'))
+        except Exception:
+            continue
+        if amt > 0:
+            seen.add(norm)  # same allowance under two key spellings counts once (the form shows one row)
+            out[name] = amt
+    return out
+
+
 def unflagged_custom_pf_wage_candidates(tenant):
     """Employee-level custom allowances (on each employee's latest assignment, not structure components)
     whose name matches DA / dearness / retaining and that aren't flagged as PF wages."""
@@ -1132,12 +1164,9 @@ def unflagged_custom_pf_wage_candidates(tenant):
     for a in qs:
         if a.employee_id in seen:
             continue
-        seen.add(a.employee_id)
-        structure = {c.name for c in a.salary_structure.components.all()}
+        seen.add(a.employee_id)  # first row per employee = current assignment by the #230 tie-break
         flagged = custom_pf_wage_names(a)
-        for name, val in (a.computed_components or {}).items():
-            if str(name).startswith('_') or name in structure or name in flagged:
-                continue
-            if PF_WAGE_NAME_RE.search(str(name)):
+        for name, val in custom_allowances(a).items():
+            if name not in flagged and PF_WAGE_NAME_RE.search(str(name)):
                 out.append((a, name, val))
     return out

@@ -84,8 +84,51 @@ class MonthSalesMatchesRegisterTests(FourFixesBase):
             resp = c.get(reverse('tax_register'), {'from': '2026-10-01', 'to': '2026-10-31', 'type': 'sales'})
         self.assertEqual(resp.status_code, 200)
         reg = resp.json()
-        self.assertEqual(Decimal(str(reg['totals']['taxable'])).quantize(Decimal('0.01')), r['sales'])
-        self.assertEqual(r['sales'], Decimal('850.00'))
+        self.assertEqual(Decimal(str(reg['totals']['taxable'])).quantize(Decimal('0.01')), r['gst_taxable_turnover'])
+        self.assertEqual(r['gst_taxable_turnover'], Decimal('850.00'))
+        # Books: every CN dated in Oct (100 + 50 + 200 unlinked + 20 on draft invoice)
+        self.assertEqual(r['net_sales_books'], Decimal('630.00'))
         cn_rows = [x for x in reg['results'] if x.get('doc_type') == 'credit_note']
-        self.assertEqual(len(cn_rows), r['credit_note_count'])
-        self.assertEqual(r['credit_note_count'], 2)
+        self.assertEqual(len(cn_rows), r['gst_credit_note_count'])
+        self.assertEqual(r['gst_credit_note_count'], 2)
+        self.assertEqual(r['credit_note_count'], 4)
+
+
+class NetSalesBooksVsGstTests(FourFixesBase):
+    """Rudra ruling post-#221: books subtract ALL CNs; GST tables only linked, non-time-barred."""
+    _inv = MonthSalesTests._inv
+
+    def _cn2(self, num, total, inv, taxable, tax, barred=False):
+        cn = CreditNote.objects.create(credit_note_number=num, date=date(2026, 10, 20), customer=self.customer,
+                                       original_invoice=inv, reason='discount', gst_time_barred=barred,
+                                       total_amount=Decimal(total), created_by=self.tenant)
+        CreditNoteItem.objects.create(credit_note=cn, product=self.product, quantity=1, price=Decimal(taxable),
+                                      tax=Decimal(tax), amount=Decimal(total), hsn_sac_code='847130')
+        return cn
+
+    def test_two_figures_and_gst_tables(self):
+        from rest_framework.test import APIClient
+        from billing.gstr1_compute import compute_gstr1
+        inv = self._inv('I-1', '1180.00', d=date(2026, 10, 5), taxable='1000')
+        self._inv('I-DR', '590.00', d=date(2026, 10, 6), status='draft', taxable='500')
+        self._cn2('CN-LINK', '118.00', inv, '100', '18')            # linked, adjusts GST
+        self._cn2('CN-NOGST', '50.00', None, '50', '0', barred=True)  # unlinked without GST
+        self._cn2('CN-TB', '30.00', inv, '30', '0', barred=True)      # linked but time-barred
+        r = sales_for_month(self.tenant, 2026, 10)
+        self.assertEqual(r['invoice_taxable'], Decimal('1000.00'))
+        self.assertEqual(r['net_sales_books'], Decimal('820.00'))
+        self.assertEqual(r['gst_taxable_turnover'], Decimal('900.00'))
+        g1 = compute_gstr1(self.tenant, '2026-10-01', '2026-10-31')
+        nums = [n.get('nt_num') for row in g1.get('cdnr', []) for n in row.get('nt', [])]
+        nums += [n.get('nt_num') for n in g1.get('cdnur', [])]
+        self.assertNotIn('CN-TB', nums)
+        self.assertNotIn('CN-NOGST', nums)
+        self.assertEqual(Decimal(str(g1['table_3_1_a']['txval'])).quantize(Decimal('0.01')), Decimal('900.00'))
+        c = APIClient(); c.force_authenticate(self.tenant)
+        from django.urls import reverse
+        reg = c.get(reverse('tax_register'), {'from': '2026-10-01', 'to': '2026-10-31', 'type': 'sales'}).json()
+        self.assertEqual(Decimal(str(reg['totals']['taxable'])).quantize(Decimal('0.01')), Decimal('900.00'))
+        ans = answer_month_sales_question('October sales', self.tenant, date(2026, 11, 3))
+        self.assertIn('Net sales (books)', ans)
+        self.assertIn('820.00', ans)
+        self.assertIn('GST taxable turnover: ₹900.00', ans)

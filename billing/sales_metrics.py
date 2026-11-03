@@ -124,8 +124,9 @@ def sales_register_credit_notes(tenant, date_from=None, date_to=None):
     are not in any GST table and are not subtracted from taxable sales.
     """
     from billing.models_returns import CreditNote
+    # Time-barred (s.34) CNs are commercial credits only: never in any GST table (#191, Rudra).
     qs = CreditNote.objects.filter(created_by=tenant, original_invoice__isnull=False,
-                                   original_invoice__status='final')
+                                   original_invoice__status='final', gst_time_barred=False)
     if date_from:
         qs = qs.filter(date__gte=date_from)
     if date_to:
@@ -189,30 +190,69 @@ def resolve_month_reference(text: str, today: date | None = None):
     return None
 
 
-def sales_for_month(tenant, year: int, month: int):
-    """Sales(M) per Rudra's rule, as Decimal plus its components."""
-    from billing.models import SalesInvoice
+def books_credit_notes(tenant, date_from=None, date_to=None):
+    """ALL credit notes dated in the window (linked, unlinked without GST, time-barred) - books basis."""
     from billing.models_returns import CreditNote
+    qs = CreditNote.objects.filter(created_by=tenant)
+    if date_from:
+        qs = qs.filter(date__gte=date_from)
+    if date_to:
+        qs = qs.filter(date__lte=date_to)
+    return qs
+
+
+def _books_cn_value(cn_qs, tenant):
+    """Sales-return value as posted to the GL (ledger.services credit-note posting): taxable value
+    of the lines; a CN without GST reduces sales by its whole amount; a CN with no lines by its total."""
+    from billing.gst_utils import credit_note_tax_breakup, get_seller_state_code
+    seller = get_seller_state_code(tenant)
+    total = Decimal('0.00')
+    for cn in cn_qs.select_related('customer', 'original_invoice').prefetch_related('items'):
+        if cn.items.exists():
+            total += Decimal(str(credit_note_tax_breakup(cn, seller)['totals']['taxable']))
+        else:
+            total += Decimal(str(cn.total_amount or 0))
+    return total.quantize(Decimal('0.01'))
+
+
+def sales_for_month(tenant, year: int, month: int):
+    """
+    Rudra CA ruling (post-#221), two figures for month M (IST calendar dates, drafts excluded):
+      net_sales_books      = taxable value of final invoices dated in M
+                             - ALL credit notes dated in M (linked, unlinked without GST, time-barred)
+                             + debit notes dated in M  (no customer-side DN model yet: 0)
+                             -> the AI's default figure; matches the P&L sales-return basis.
+      gst_taxable_turnover = Sales Tax Register / GSTR-1 basis: only CNs linked to a final invoice
+                             and not time-barred (CNs that adjust GST).
+    """
+    from billing.models import SalesInvoice
 
     start, end = ist_month_bounds(year, month)
-    # Same document sets as the Sales Tax Register (retest item 3).
     inv_qs = sales_register_invoices(tenant, start, end)
-    no_cn = CreditNote.objects.none()
-    cn_qs = sales_register_credit_notes(tenant, start, end)
-    invoice_taxable = _taxable_net(inv_qs, no_cn, tenant)
-    cn_taxable = (Decimal('0.00') - _taxable_net(SalesInvoice.objects.none(), cn_qs, tenant))
-    debit_notes = Decimal('0.00')
-    total = (invoice_taxable - cn_taxable + debit_notes).quantize(Decimal('0.01'))
+    from billing.models_returns import CreditNote
+    invoice_taxable = _taxable_net(inv_qs, CreditNote.objects.none(), tenant)
+    gst_cn_qs = sales_register_credit_notes(tenant, start, end)
+    gst_cn = (Decimal('0.00') - _taxable_net(SalesInvoice.objects.none(), gst_cn_qs, tenant)).quantize(Decimal('0.01'))
+    books_cn_qs = books_credit_notes(tenant, start, end)
+    books_cn = _books_cn_value(books_cn_qs, tenant)
+    debit_notes = Decimal('0.00')  # no customer-side debit note model in Cenvora (DebitNote = purchase return)
+    net_books = (invoice_taxable - books_cn + debit_notes).quantize(Decimal('0.01'))
+    gst_turnover = (invoice_taxable - gst_cn + debit_notes).quantize(Decimal('0.01'))
     return {
         'year': int(year), 'month': int(month),
         'date_from': start, 'date_to': end,
         'label': f"{_calendar.month_name[int(month)]} {int(year)}",
         'invoice_taxable': invoice_taxable,
-        'credit_note_taxable': cn_taxable.quantize(Decimal('0.01')),
+        'credit_note_books': books_cn,
+        'credit_note_gst': gst_cn,
+        'credit_note_taxable': books_cn,
         'debit_notes': debit_notes,
-        'sales': total,
+        'net_sales_books': net_books,
+        'gst_taxable_turnover': gst_turnover,
+        'sales': net_books,
         'invoice_count': inv_qs.count(),
-        'credit_note_count': cn_qs.count(),
+        'credit_note_count': books_cn_qs.count(),
+        'gst_credit_note_count': gst_cn_qs.count(),
     }
 
 
@@ -224,10 +264,17 @@ def answer_month_sales_question(question: str, tenant, today: date | None = None
     if not ref:
         return None
     r = sales_for_month(tenant, *ref)
-    return (
-        f"**Sales for {r['label']}** ({r['date_from']:%d %b %Y} to {r['date_to']:%d %b %Y}): "
-        f"**₹{r['sales']:,.2f}** taxable value, excluding GST.\n\n"
+    # Default: net sales (books). Add GST taxable turnover when it differs or GST is asked about.
+    asks_gst = bool(_re.search(r'\bgst\b|\bgstr|\btaxable turnover\b|\breturn\b', question, _re.I))
+    out = (
+        f"**Net sales (books) for {r['label']}** ({r['date_from']:%d %b %Y} to {r['date_to']:%d %b %Y}): "
+        f"**₹{r['net_sales_books']:,.2f}**, excluding GST.\n\n"
         f"• Invoices: ₹{r['invoice_taxable']:,.2f} ({r['invoice_count']} final invoices)\n"
-        f"• Less credit notes: ₹{r['credit_note_taxable']:,.2f} ({r['credit_note_count']})\n"
+        f"• Less credit notes: ₹{r['credit_note_books']:,.2f} ({r['credit_note_count']})\n"
         f"Drafts are excluded."
     )
+    if asks_gst or r['gst_taxable_turnover'] != r['net_sales_books']:
+        out += (f"\n\nGST taxable turnover: ₹{r['gst_taxable_turnover']:,.2f} "
+                f"(only credit notes that adjust GST are deducted; credit notes without GST "
+                f"and time-barred ones are commercial credits only).")
+    return out

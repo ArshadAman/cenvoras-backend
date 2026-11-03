@@ -146,7 +146,7 @@ def cn_carry_into(tenant, from_date):
     start = _d(from_date)
     if start.day != 1:
         return []
-    first = (CreditNote.objects.filter(created_by=tenant, original_invoice__isnull=False)
+    first = (CreditNote.objects.filter(created_by=tenant, original_invoice__isnull=False, gst_time_barred=False)
              .order_by('date').values_list('date', flat=True).first())
     if not first or month_start(first) >= start:
         return []

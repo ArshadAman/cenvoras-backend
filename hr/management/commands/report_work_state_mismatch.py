@@ -6,7 +6,7 @@ correct individual profiles in the UI (Edit Profile > Compensation & Tax > Work 
 from django.core.management.base import BaseCommand
 
 from hr.models import Employee
-from hr.services.work_state import resolve_work_state
+from hr.services.work_state import canonical_work_state, resolve_work_state
 
 
 class Command(BaseCommand):
@@ -22,15 +22,21 @@ class Command(BaseCommand):
             qs = qs.filter(tenant_id=opts['tenant'])
         if not opts.get('include_inactive'):
             qs = qs.filter(status__in=['active', 'probation', 'notice_period'])
-        n = 0
-        self.stdout.write('tenant_id\temployee_code\tname\tstored_work_state\tcompany_state')
+        n = bad = 0
+        self.stdout.write('tenant_id\temployee_code\tname\tstored_work_state\tcompany_state\tissue')
         for emp in qs.iterator():
             company = resolve_work_state(tenant=emp.tenant, work_state='')
             stored_raw = (emp.work_state or '').strip()
-            stored = resolve_work_state(work_state=stored_raw) if stored_raw else ''
+            if stored_raw and canonical_work_state(stored_raw) is None:
+                bad += 1
+                self.stdout.write(f"{emp.tenant_id}\t{emp.employee_code}\t{emp.full_name}\t"
+                                  f"{stored_raw}\t{company or '(unknown)'}\tINVALID state value")
+                continue
+            stored = (canonical_work_state(stored_raw) or '') if stored_raw else ''
             if not company or stored.lower() == company.lower():
                 continue
             n += 1
             self.stdout.write(f"{emp.tenant_id}\t{emp.employee_code}\t{emp.full_name}\t"
-                              f"{stored_raw or '(blank)'}\t{company}")
-        self.stdout.write(f'{n} employee(s) differ from their company state. Nothing was changed.')
+                              f"{stored_raw or '(blank)'}\t{company}\tdiffers from company")
+        self.stdout.write(f'{n} employee(s) differ from their company state; {bad} have an invalid '
+                          f'stored work state. Nothing was changed.')

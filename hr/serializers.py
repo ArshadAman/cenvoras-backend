@@ -149,6 +149,18 @@ class EmployeeSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Bank IFSC code is mandatory.')
         return v
 
+    def validate_work_state(self, value):
+        """UAT R2: only a real Indian state/UT (canonical name); blank = company state."""
+        if value is None or not str(value).strip():
+            return value
+        from hr.services.work_state import canonical_work_state
+        name = canonical_work_state(value)
+        if name is None:
+            raise serializers.ValidationError(
+                f'"{str(value).strip()}" is not an Indian state or union territory. '
+                'Choose the work state from the list (e.g. Odisha, Karnataka).')
+        return name
+
     def validate_uan(self, value):
         from hr.validators import uan_error
         return self._id_or_none(value, uan_error)
@@ -467,17 +479,6 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 if user_tenant != tenant and value != tenant:
                     raise serializers.ValidationError("Assigned user does not belong to the active tenant.")
         return value
-
-    def validate_work_state(self, value):
-        """Persist full state name so PT slabs match (KA / 29 → Karnataka)."""
-        state = (value or '').strip()
-        if not state:
-            return state
-        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
-        code = normalize_state_code(state)
-        if code and code in CODE_TO_STATE_NAME:
-            return CODE_TO_STATE_NAME[code]
-        return state
 
     def create(self, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')

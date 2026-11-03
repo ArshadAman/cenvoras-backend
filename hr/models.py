@@ -914,6 +914,20 @@ class PayrollRun(models.Model):
     reopened_at = models.DateTimeField(null=True, blank=True)
     reopen_reason = models.TextField(blank=True)
     reopen_history = models.JSONField(default=list, blank=True, help_text="Audit log of all reopen events with user, timestamp, and reason.")
+    # Statutory remittance flags (Rudra): once TDS, PF or ESI for this run is deposited or filed,
+    # the run can no longer be reopened and its payslips must never be regenerated.
+    tds_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When TDS for this run was deposited/filed.')
+    pf_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When PF (ECR) for this run was deposited/filed.')
+    esi_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When ESI for this run was deposited/filed.')
+
+    @property
+    def statutory_deposited(self):
+        return bool(self.tds_deposited_at or self.pf_deposited_at or self.esi_deposited_at)
+
+    @property
+    def is_paid_or_remitted(self):
+        """Paid to employees, or any of TDS/PF/ESI deposited or filed: payslips are final."""
+        return self.status == 'paid' or bool(self.paid_at) or self.statutory_deposited
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

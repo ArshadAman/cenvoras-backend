@@ -73,6 +73,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
     reporting_manager_name = serializers.CharField(source='reporting_manager.full_name', read_only=True, default='')
     current_ctc = serializers.SerializerMethodField()
+    # UAT item 1: optional on input; blank/omitted defaults to the company's state in create().
+    work_state = serializers.CharField(required=False, allow_blank=True, max_length=100)
     salary_details = serializers.SerializerMethodField()
     kyc_documents = serializers.SerializerMethodField()
 
@@ -1047,6 +1049,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'total_employer_contributions', 'approved_at', 'approved_by',
             'paid_at', 'paid_by', 'locked_at', 'locked_by', 'finalised_at',
             'is_reopened', 'reopened_at', 'reopened_by', 'reopen_history',
+            'tds_deposited_at', 'pf_deposited_at', 'esi_deposited_at',
             'created_at', 'updated_at'
         ]
 

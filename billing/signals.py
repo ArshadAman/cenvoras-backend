@@ -682,3 +682,25 @@ def reconcile_sales_order_sequence(sender, instance, **kwargs):
 @receiver(post_delete, sender=DeliveryChallan)
 def reconcile_delivery_challan_sequence(sender, instance, **kwargs):
     _reconcile_document_sequence(instance, 'delivery_challan')
+
+
+# UAT P1 item 2 (Rudra CA): credit notes reduce what the customer owes. Recompute the stored
+# balance from the shared formula after the CN (and its items/total) is committed.
+from billing.models_returns import CreditNote as _CreditNote  # noqa: E402
+
+
+def _recompute_customer_after_commit(customer_id):
+    from django.db import transaction
+    from billing.balance_sync import recompute_customer_balance
+    if customer_id:
+        transaction.on_commit(lambda: recompute_customer_balance(customer_id))
+
+
+@receiver(post_save, sender=_CreditNote)
+def recompute_balance_on_credit_note_save(sender, instance, **kwargs):
+    _recompute_customer_after_commit(instance.customer_id)
+
+
+@receiver(post_delete, sender=_CreditNote)
+def recompute_balance_on_credit_note_delete(sender, instance, **kwargs):
+    _recompute_customer_after_commit(instance.customer_id)

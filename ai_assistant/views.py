@@ -101,7 +101,10 @@ def gather_business_context(user):
         .order_by('name')[:30]
     )
 
-    # Pending payments
+    # Pending payments. UAT P1 item 2: refresh stored balances from the shared ledger formula
+    # (opening + invoices + DNs - receipts - CNs) so the AI matches the ledger and Receivables.
+    from billing.balance_sync import recompute_customer_balances_for_customers
+    recompute_customer_balances_for_customers(Customer.objects.filter(created_by=tenant), tenant)
     pending = list(
         Customer.objects.filter(created_by=tenant, current_balance__gt=0)
         .order_by('-current_balance')

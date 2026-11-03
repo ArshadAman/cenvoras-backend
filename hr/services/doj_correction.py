@@ -10,8 +10,16 @@ Rules
   (that payslip's total_working_days and the tenant's weekend rule) and summed into
   one line in the next open payroll:
     DOJ earlier → arrears (+);  DOJ later → recovery (−).
-- The line is part of gross in the target month, so TDS (and PT/ESI) are
-  re-projected by the normal engine on the corrected pay.
+- Rudra CA review (#205):
+  (1) A recovery is a negative earning only for excess paid in the SAME FY as the
+      run; excess paid in an earlier FY is a post-tax deduction (flagged). Taxable
+      gross is floored at 0; any excess recovery carries into the next run.
+  (2) PF: the PF-wage part (basic + DA) of arrears goes into that run's PF, capped at
+      the ₹15k ceiling of the month the arrears relate to, kept separately as arrears
+      (Payslip.arrear_* fields, for the ECR arrears columns). Locked months untouched.
+  (3) A recovery carries the warning RECOVERY_PF_WARNING.
+  (4) ESI: arrears count in the month paid; flagged ESIC_FLAG.
+  PT on arrears is slabbed against the month they relate to (compute_pt_arrears).
 - If no payroll has been run yet, a plain edit is allowed.
 """
 import calendar
@@ -23,6 +31,15 @@ from django.db import transaction
 CENT = Decimal('0.01')
 # Run statuses after which a month is "closed" (never recomputed by a correction).
 CLOSED_RUN_STATUSES = {'calculated', 'completed', 'pending_approval', 'approved', 'paid', 'locked', 'finalised'}
+
+
+RECOVERY_PF_WARNING = 'Excess PF already remitted must be corrected on the EPFO portal.'
+ESIC_FLAG = 'ESIC treatment to verify'
+PRIOR_FY_FLAG = 'Recovery of salary paid in an earlier FY: post-tax deduction (not a negative earning)'
+
+
+def fy_start(year, month):
+    return year if month >= 4 else year - 1
 
 
 class DOJCorrectionError(ValueError):
@@ -66,12 +83,16 @@ def month_delta(monthly_gross, working_days, old_doj, new_doj, year, month, excl
     return delta, old_payable, new_payable
 
 
-def monthly_full_gross(employee, year, month):
-    """Un-prorated monthly gross (earning components) of the assignment effective at month end."""
+def _assignment(employee, year, month):
     from hr.models import EmployeeSalaryAssignment
     end = datetime.date(year, month, calendar.monthrange(year, month)[1])
-    a = EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from__lte=end) \
+    return EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from__lte=end) \
         .select_related('salary_structure').order_by('-effective_from').first()
+
+
+def monthly_full_gross(employee, year, month):
+    """Un-prorated monthly gross (earning components) of the assignment effective at month end."""
+    a = _assignment(employee, year, month)
     if not a:
         return Decimal('0.00')
     types = {c.name: c.type for c in a.salary_structure.components.all()}
@@ -83,6 +104,30 @@ def monthly_full_gross(employee, year, month):
             total += Decimal(str(val))
         except Exception:
             continue
+    return total.quantize(CENT)
+
+
+PF_WAGE_NAMES = {'basic', 'da', 'dearness allowance', 'dearness_allowance'}
+
+
+def monthly_pf_wage(employee, year, month):
+    """Un-prorated PF wage (basic + DA) of the assignment effective at month end."""
+    a = _assignment(employee, year, month)
+    if not a:
+        return Decimal('0.00')
+    basic_names = {c.name for c in a.salary_structure.components.all() if getattr(c, 'is_basic', False)}
+    comps = a.computed_components or {}
+    total = Decimal('0.00')
+    found = False
+    for name, val in comps.items():
+        if name in basic_names or str(name).strip().lower() in PF_WAGE_NAMES:
+            try:
+                total += Decimal(str(val))
+                found = True
+            except Exception:
+                pass
+    if not found:  # same fallback as the engine: 50% of CTC
+        total = (Decimal(str(a.monthly_ctc or 0)) * Decimal('0.50'))
     return total.quantize(CENT)
 
 
@@ -129,6 +174,7 @@ def compute_correction(employee, new_doj):
     old_doj = employee.date_of_joining
     settings = get_hrms_settings(employee.tenant)
     excl = _excluded_weekdays(settings)
+    emp_rate = Decimal(str(getattr(settings, 'pf_employee_rate', 12) or 12)) / Decimal('100')
     lines = []
     total = Decimal('0.00')
     for run, slip in payroll_months_from(employee, min(old_doj, new_doj)):
@@ -143,9 +189,15 @@ def compute_correction(employee, new_doj):
         delta, old_p, new_p = month_delta(gross, w, old_doj, new_doj, run.year, run.month, excl)
         if delta == 0 and old_p == new_p:
             continue
+        pf_full = monthly_pf_wage(employee, run.year, run.month)
+        pf_delta, _, _ = month_delta(pf_full, w, old_doj, new_doj, run.year, run.month, excl)
+        paid_pf_wage = (Decimal(str(slip.employee_pf or 0)) / emp_rate).quantize(CENT) \
+            if (slip is not None and emp_rate > 0) else Decimal('0.00')
         lines.append({'year': run.year, 'month': run.month, 'working_days': w,
                       'old_payable_days': old_p, 'new_payable_days': new_p,
                       'monthly_gross': str(gross), 'delta': str(delta),
+                      'pf_wage_delta': str(pf_delta), 'paid_pf_wage': str(paid_pf_wage),
+                      'paid_gross': str(slip.gross_salary if slip is not None else Decimal('0.00')),
                       'had_payslip': slip is not None})
         total += delta
     return total.quantize(CENT), lines
@@ -187,12 +239,101 @@ def apply_doj_correction(employee, new_doj, reason, user):
     return corr
 
 
-def pending_lines_for(employee, month, year):
-    """Corrections to fold into this payslip: (label, amount) pairs; amount < 0 for recovery."""
+def _pf_ceiling(settings):
+    if settings is not None and not bool(getattr(settings, 'pf_apply_ceiling', True)):
+        return None
+    return Decimal(str(getattr(settings, 'pf_wage_ceiling', None) or 15000))
+
+
+def arrears_pf(lines, settings):
+    """PF on the arrears' PF wage, capped per RELATED month at that month's ceiling."""
+    from hr.services.payroll_engine import compute_pf
+    ceiling = _pf_ceiling(settings)
+    out = {'wages': Decimal('0.00'), 'employee_pf': Decimal('0.00'), 'employer_pf': Decimal('0.00'),
+           'employer_epf': Decimal('0.00'), 'employer_eps': Decimal('0.00')}
+    for ln in lines:
+        d = Decimal(str(ln.get('pf_wage_delta', '0')))
+        if d <= 0:
+            continue
+        paid = Decimal(str(ln.get('paid_pf_wage', '0')))
+        wage = d if ceiling is None else max(Decimal('0.00'), min(d, ceiling - paid))
+        if wage <= 0:
+            continue
+        before = compute_pf(paid, settings)
+        after = compute_pf(paid + wage, settings)
+        out['wages'] += wage
+        for k in ('employee_pf', 'employer_pf', 'employer_epf', 'employer_eps'):
+            out[k] += Decimal(str(after[k])) - Decimal(str(before[k]))
+    return {k: v.quantize(CENT) for k, v in out.items()}
+
+
+def pending_for_payslip(employee, month, year, settings=None):
+    """
+    Everything a DOJ correction contributes to the (month, year) payslip:
+      earning_lines  [(label, amount)]  arrears (+) and same-FY recovery (−)
+      deduction_lines [(label, amount)] earlier-FY recovery (post-tax, positive amounts)
+      pf, pt_arrears, warnings, corrections
+    """
     from hr.models import DOJCorrection
-    out = []
+    from hr.services.payroll_engine import compute_pt_arrears
+    run_fy = fy_start(year, month)
+    res = {'earning_lines': [], 'deduction_lines': [], 'pt_arrears': Decimal('0.00'),
+           'pf': arrears_pf([], settings), 'warnings': [], 'corrections': []}
+    pf_lines = []
     for c in DOJCorrection.objects.filter(employee=employee, target_month=month, target_year=year).exclude(amount=0):
-        label = ('DOJ correction arrears' if c.amount > 0 else 'DOJ correction recovery') + \
-            f' ({c.old_doj:%d-%m-%Y} → {c.new_doj:%d-%m-%Y})'
-        out.append((label, Decimal(str(c.amount)).quantize(CENT), c))
-    return out
+        res['corrections'].append(c)
+        tag = f'({c.old_doj:%d-%m-%Y} → {c.new_doj:%d-%m-%Y})'
+        if c.carried_from_id:
+            tag += ' carried forward'
+        same_fy = prior_fy = arrears = Decimal('0.00')
+        for ln in c.breakdown or []:
+            d = Decimal(str(ln['delta']))
+            if d >= 0:
+                arrears += d
+                pf_lines.append(ln)
+                if not ln.get('carry'):
+                    paid = Decimal(str(ln.get('paid_gross', '0')))
+                    res['pt_arrears'] += compute_pt_arrears(employee, ln['month'], ln['year'], paid, paid + d,
+                                                            tenant=employee.tenant)
+            elif fy_start(int(ln['year']), int(ln['month'])) == run_fy:
+                same_fy += d
+            else:
+                prior_fy += d
+        if arrears:
+            res['earning_lines'].append((f'DOJ correction arrears {tag} [{ESIC_FLAG}]', arrears.quantize(CENT)))
+        if same_fy:
+            res['earning_lines'].append((f'DOJ correction recovery {tag}', same_fy.quantize(CENT)))
+        if prior_fy:
+            res['deduction_lines'].append((f'DOJ correction recovery, earlier FY {tag}', (-prior_fy).quantize(CENT)))
+            res['warnings'].append(PRIOR_FY_FLAG)
+        if same_fy or prior_fy:
+            res['warnings'].append(RECOVERY_PF_WARNING)
+        if arrears:
+            res['warnings'].append(f'Arrears: {ESIC_FLAG}')
+    res['pf'] = arrears_pf(pf_lines, settings)
+    res['warnings'] = list(dict.fromkeys(res['warnings']))
+    return res
+
+
+def carry_excess_recovery(corrections, excess, month, year):
+    """Taxable gross was floored at 0: carry the unrecovered same-FY amount into the next run (idempotent)."""
+    from hr.models import DOJCorrection
+    if not corrections:
+        return None
+    parent = corrections[0]
+    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+    DOJCorrection.objects.filter(carried_from=parent, target_month=nm, target_year=ny).delete()
+    if excess <= 0:
+        return None
+    return DOJCorrection.objects.create(
+        tenant=parent.tenant, employee=parent.employee, old_doj=parent.old_doj, new_doj=parent.new_doj,
+        reason=f'Carried forward: excess recovery not covered by {month:02d}/{year} pay',
+        corrected_by=parent.corrected_by, amount=-excess, carried_from=parent,
+        breakdown=[{'year': year, 'month': month, 'delta': str(-excess), 'carry': True}],
+        target_month=nm, target_year=ny,
+    )
+
+
+def pending_lines_for(employee, month, year):
+    """Back-compat: earning lines only."""
+    return [(l, a, None) for l, a in pending_for_payslip(employee, month, year)['earning_lines']]

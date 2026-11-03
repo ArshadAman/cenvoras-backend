@@ -988,6 +988,11 @@ class Payslip(models.Model):
     employer_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # UAT P1 #10: PF on arrears, kept apart from current wages for the ECR arrears columns.
+    arrear_pf_wages = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employee_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_esi = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_total_contribution = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
@@ -1411,6 +1416,9 @@ class DOJCorrection(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
     applied_payslip = models.ForeignKey('Payslip', on_delete=models.SET_NULL, null=True, blank=True,
                                         related_name='+')
+    carried_from = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True,
+                                     related_name='carries',
+                                     help_text='Excess recovery carried forward from this correction.')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

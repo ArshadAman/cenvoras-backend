@@ -148,6 +148,8 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
                 and str(validated_data.get('country', instance.country) or 'IN').upper() == 'IN':
             gstin = str(validated_data.get('gstin', instance.gstin) or '').strip()
             validated_data['gst_status'] = 'regular' if gstin else 'unregistered'
+        if str(validated_data.get('country', instance.country) or 'IN').upper() == 'IN':
+            validated_data['gst_status_confirmed'] = True   # Rudra: setup completion confirms it
         instance = super().update(instance, validated_data)
         # Check if profile should be marked as completed
         instance.mark_profile_completed()
@@ -164,6 +166,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_gst_status(self, obj):
         from billing import gst_status as g
         return g.gst_status(obj)
+
+    def get_gst_status_needs_confirmation(self, obj):
+        # Rudra (#216): admin banner "Confirm your GST status (Regular / Composition / Not registered)".
+        from billing import gst_status as g
+        return g.needs_confirmation(obj)
 
     def get_gst_status_set(self, obj):
         from billing import gst_status as g
@@ -191,6 +198,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     gstin_warning = serializers.SerializerMethodField()
     gst_status = serializers.SerializerMethodField()
     gst_status_set = serializers.SerializerMethodField()
+    gst_status_needs_confirmation = serializers.SerializerMethodField()
     document_title = serializers.SerializerMethodField()
     document_declaration = serializers.SerializerMethodField()
     tax_locked = serializers.SerializerMethodField()
@@ -240,7 +248,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 'gstin_warning',
-            'gst_status', 'gst_status_set', 'document_title', 'document_declaration', 'tax_locked',
+            'gst_status', 'gst_status_set', 'gst_status_needs_confirmation', 'document_title', 'document_declaration', 'tax_locked',
             'gst_returns_available',
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
@@ -448,6 +456,9 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return attrs
     
     def update(self, instance, validated_data):
+        # Rudra (#216): an admin saving the GST status confirms it (dismisses the banner).
+        if validated_data.get('gst_status'):
+            validated_data['gst_status_confirmed'] = True
         # Remove password fields from validated_data for normal update
         current_password = validated_data.pop('current_password', None)
         new_password = validated_data.pop('new_password', None)

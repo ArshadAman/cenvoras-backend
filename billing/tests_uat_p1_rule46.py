@@ -166,3 +166,35 @@ class GstStatusTests(FourFixesBase):
         self.assertEqual(g.gst_status(self.tenant), 'unregistered')   # shown, derived from data
         self.assertFalse(g.tax_locked(self.tenant))                    # but nothing locked/hidden
         self.assertTrue(g.gst_returns_available(self.tenant))
+
+
+class GstStatusConfirmTests(GstStatusTests):
+    """Rudra (#216): admin banner until the GST status is confirmed."""
+
+    def test_banner_for_null_and_migrated_until_saved(self):
+        from billing.gst_status import needs_confirmation
+        self._set(None, self.VALID)
+        self.assertTrue(self._profile()['gst_status_needs_confirmation'])        # null
+        self.tenant.gst_status, self.tenant.gst_status_confirmed = 'regular', False  # as migrated
+        self.tenant.save()
+        self.assertTrue(needs_confirmation(self.tenant))
+        self.assertTrue(self._profile()['gst_status_needs_confirmation'])
+        res = self.client.patch('/api/users/profile/update/', {'gst_status': 'regular'}, format='json')
+        self.assertIn(res.status_code, (200, 201), res.data)
+        self.tenant.refresh_from_db()
+        self.assertTrue(self.tenant.gst_status_confirmed)
+        self.assertFalse(self._profile()['gst_status_needs_confirmation'])
+
+    def test_setup_completion_confirms(self):
+        u = User.objects.create_user(username='g2', email='g2@example.com', password='Secret123!', business_name='X')
+        self.client.force_authenticate(u)
+        res = self.client.patch('/api/users/profile/setup/', {
+            'business_name': 'X', 'business_address': 'Somewhere 1', 'gst_status': 'unregistered'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        u.refresh_from_db()
+        self.assertEqual((u.gst_status, u.gst_status_confirmed), ('unregistered', True))
+
+
+for _n in [n for n in dir(GstStatusTests) if n.startswith('test_')]:
+    if _n not in GstStatusConfirmTests.__dict__:
+        setattr(GstStatusConfirmTests, _n, None)

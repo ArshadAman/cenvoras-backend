@@ -73,3 +73,16 @@ def document_declaration(user):
 def returns_hidden_message(user):
     label = dict(CHOICES).get(stored_gst_status(user) or '', '')
     return RETURNS_HIDDEN_MSG.format(label=label)
+
+
+CONFIRM_BANNER = 'Confirm your GST status (Regular / Composition / Not registered)'
+
+
+def needs_confirmation(user):
+    """Rudra (#216): the no-status fallback is temporary. Indian companies whose status is empty,
+    or was filled by the migration and not yet confirmed (a composition dealer also has a GSTIN),
+    get an admin banner. Saving a status (settings or setup) confirms it."""
+    t = _tenant(user)
+    if str(getattr(t, 'country', 'IN') or 'IN').upper() != 'IN':
+        return False
+    return not getattr(t, 'gst_status', None) or not getattr(t, 'gst_status_confirmed', False)

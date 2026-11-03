@@ -54,6 +54,9 @@ class User(AbstractUser):
         choices=[('regular', 'Regular'), ('composition', 'Composition'), ('unregistered', 'Not registered')],
         help_text="Company GST status: drives document title, tax lock and GST returns",
     )
+    # Rudra (#216): False for rows the migration filled from data (a composition dealer also has a
+    # GSTIN, so 'regular' is only a guess). True once an admin saves the status or setup completes.
+    gst_status_confirmed = models.BooleanField(default=False)
     
     # Optional fields (can be added later)
     gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")

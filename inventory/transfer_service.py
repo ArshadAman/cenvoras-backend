@@ -21,8 +21,8 @@ from django.db.models import F, Sum
 CENT = Decimal('0.01')
 EWAY_WARNING_THRESHOLD = Decimal('50000.00')
 EWAY_WARNING = (
-    "This transfer is worth more than ₹50,000. An e-way bill may be required to move these goods. "
-    "Cenvora does not support e-way bills — generate one on the e-way bill portal before dispatch."
+    "This transfer is worth more than ₹50,000 and may require an e-way bill (thresholds vary by state); "
+    "Cenvora does not generate e-way bills."
 )
 INTER_GSTIN_NOT_SUPPORTED = (
     "These locations are on different GSTINs. A transfer between GSTINs is a taxable supply and "
@@ -99,12 +99,69 @@ def transfer_warnings(total_value):
     return [EWAY_WARNING] if Decimal(str(total_value)) > EWAY_WARNING_THRESHOLD else []
 
 
-def next_challan_number(tenant):
+def fy_label(d):
+    """'26-27' for any date in FY 2026-27 (Apr–Mar)."""
+    start = d.year if d.month >= 4 else d.year - 1
+    return f"{start % 100:02d}-{(start + 1) % 100:02d}"
+
+
+def next_challan_number(tenant, on_date=None):
+    """Rule 55(2): consecutive serial, max 16 chars (A-Z 0-9 - /), unique per FY: STC/26-27/0001."""
+    import datetime
     from inventory.models import StockTransfer
-    n = StockTransfer.objects.filter(created_by=tenant).exclude(challan_number='').count() + 1
-    while StockTransfer.objects.filter(created_by=tenant, challan_number=f'STC-{n:04d}').exists():
-        n += 1
-    return f'STC-{n:04d}'
+    prefix = f"STC/{fy_label(on_date or datetime.date.today())}/"
+    used = StockTransfer.objects.filter(created_by=tenant, challan_number__startswith=prefix) \
+        .values_list('challan_number', flat=True)
+    n = 1 + max((int(x[len(prefix):]) for x in used if x[len(prefix):].isdigit()), default=0)
+    num = f"{prefix}{n:04d}"
+    assert len(num) <= 16
+    return num
+
+
+def challan_context(transfer):
+    """Data for the Rule 55(2) delivery challan print."""
+    tenant = transfer.created_by
+    name = getattr(tenant, 'business_name', '') or getattr(tenant, 'username', '')
+    company_addr = getattr(tenant, 'business_address', '') or ''
+
+    def party(wh):
+        return {'name': f"{name} — {wh.name}", 'address': wh.address or company_addr,
+                'gstin': location_gstin(wh, tenant)}
+    lines = []
+    for i, it in enumerate(transfer.items.select_related('product', 'batch').all(), 1):
+        lines.append({'sn': i, 'description': it.product.name, 'batch': it.batch.batch_number,
+                      'hsn': it.product.hsn_sac_code or '', 'qty': it.quantity, 'unit': it.product.unit or '',
+                      'rate': it.rate, 'value': it.value})
+    return {'challan_number': transfer.challan_number, 'date': transfer.transfer_date,
+            'consignor': party(transfer.source_warehouse), 'consignee': party(transfer.destination_warehouse),
+            'lines': lines, 'total_value': transfer.total_value, 'company': name,
+            'purpose': 'Transfer of stock between locations of the same registration (not a supply; no GST)',
+            'warnings': transfer_warnings(transfer.total_value or 0)}
+
+
+def render_challan_html(transfer):
+    from django.utils.html import escape as e
+    c = challan_context(transfer)
+    rows = ''.join(
+        f"<tr><td>{l['sn']}</td><td>{e(l['description'])}<br><small>Batch {e(l['batch'])}</small></td>"
+        f"<td>{e(l['hsn'])}</td><td class=r>{l['qty']} {e(l['unit'])}</td><td class=r>{l['rate']:,.2f}</td>"
+        f"<td class=r>{l['value']:,.2f}</td></tr>" for l in c['lines'])
+
+    def p(x, title):
+        return (f"<div class=box><b>{title}</b><br>{e(x['name'])}<br>{e(x['address'])}<br>"
+                f"GSTIN: {e(x['gstin'] or '—')}</div>")
+    warn = ''.join(f"<p class=w>{e(w)}</p>" for w in c['warnings'])
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Delivery Challan {e(c['challan_number'])}</title>
+<style>body{{font-family:Arial,sans-serif;font-size:12px;margin:24px}}h1{{font-size:18px;text-align:center}}
+table{{width:100%;border-collapse:collapse}}td,th{{border:1px solid #444;padding:4px}}.r{{text-align:right}}
+.box{{display:inline-block;width:48%;vertical-align:top;border:1px solid #444;padding:6px;margin-bottom:8px}}
+.w{{color:#a00}}.sig{{margin-top:48px;text-align:right}}</style></head><body>
+<h1>DELIVERY CHALLAN</h1><p style="text-align:center">(Rule 55, CGST Rules 2017) — {e(c['purpose'])}</p>
+<p><b>Challan No.:</b> {e(c['challan_number'])} &nbsp; <b>Date:</b> {c['date']:%d-%m-%Y}</p>
+{p(c['consignor'], 'Consignor')} {p(c['consignee'], 'Consignee')}
+<table><tr><th>#</th><th>Description</th><th>HSN</th><th>Quantity</th><th>Rate (WAC)</th><th>Value (₹)</th></tr>
+{rows}<tr><td colspan=5 class=r><b>Total</b></td><td class=r><b>{c['total_value']:,.2f}</b></td></tr></table>
+{warn}<div class=sig>For {e(c['company'])}<br><br><br>Authorised Signatory</div></body></html>"""
 
 
 def post_transfer_journal(transfer, tenant, entered_by=None):

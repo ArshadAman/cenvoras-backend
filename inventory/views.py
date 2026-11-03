@@ -372,6 +372,49 @@ class StockTransferListCreateView(generics.ListCreateAPIView):
             .order_by('-transfer_date')
         )
 
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def stock_transfer_challan(request, pk):
+    """UAT P1 #15: printable Rule 55(2) delivery challan (HTML)."""
+    from django.http import HttpResponse
+    from django.shortcuts import get_object_or_404
+    from .transfer_service import render_challan_html
+    tr = get_object_or_404(StockTransfer.objects.select_related('source_warehouse', 'destination_warehouse',
+                                                                'created_by'),
+                           pk=pk, created_by=request.user.active_tenant)
+    return HttpResponse(render_challan_html(tr), content_type='text/html; charset=utf-8')
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def stock_transfer_preview(request):
+    """UAT P1 #15: value + warnings BEFORE saving (no writes)."""
+    from .stock_sync import resolve_batch_for_product
+    from .transfer_service import TransferError, transfer_warnings, validate_transfer
+    tenant = request.user.active_tenant
+    wh = {w.pk: w for w in Warehouse.objects.filter(created_by=tenant)}
+    try:
+        import uuid as _uuid
+        src = wh.get(_uuid.UUID(str(request.data.get('source_warehouse'))))
+        dst = wh.get(_uuid.UUID(str(request.data.get('destination_warehouse'))))
+        lines = []
+        for it in request.data.get('items') or []:
+            product = Product.objects.get(pk=it.get('product'), created_by=tenant)
+            batch = ProductBatch.objects.filter(pk=it.get('batch'), product=product).first() if it.get('batch') else None
+            if batch is None:
+                batch = ProductBatch.objects.filter(product=product).order_by('created_at').first()
+            if batch is None:
+                return Response({'items': [f'{product.name}: no stock at the source location.']}, status=400)
+            lines.append((product, batch, int(it.get('quantity') or 0)))
+    except (ValueError, TypeError, Product.DoesNotExist):
+        return Response({'error': 'Choose locations, products and quantities.'}, status=400)
+    try:
+        total, _ = validate_transfer(tenant, src, dst, lines)
+    except TransferError as exc:
+        return Response({'items': exc.errors}, status=400)
+    return Response({'total_value': str(total), 'warnings': transfer_warnings(total)})
+
+
 class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StockTransferSerializer
     permission_classes = [permissions.IsAuthenticated]

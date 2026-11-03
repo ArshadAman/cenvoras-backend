@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from billing.gstr1_compute import compute_gstr1
 from inventory.models import Product, ProductBatch, StockPoint, StockTransfer, Warehouse
-from inventory.transfer_service import EWAY_WARNING, INTER_GSTIN_NOT_SUPPORTED, product_wac
+from inventory.transfer_service import EWAY_WARNING, INTER_GSTIN_NOT_SUPPORTED, fy_label, next_challan_number, product_wac
 from ledger.models import GeneralLedgerEntry
 from subscription.models import Plan, TenantSubscription
 from users.models import User
@@ -47,11 +47,12 @@ class StockTransferUAT15Tests(TestCase):
         r = self.post(4)
         self.assertEqual(r.status_code, 201, r.content)
         tr = StockTransfer.objects.get()
-        self.assertEqual(tr.challan_number, 'STC-0001')
+        self.assertEqual(tr.challan_number, f'STC/{fy_label(date.today())}/0001')
+        self.assertLessEqual(len(tr.challan_number), 16)
         self.assertEqual(tr.total_value, Decimal('440.00'))
         self.assertEqual(StockPoint.objects.get(warehouse=self.a, batch=self.b1).quantity, 6)
         self.assertEqual(StockPoint.objects.get(warehouse=self.b, batch=self.b1).quantity, 4)
-        gl = GeneralLedgerEntry.objects.filter(reference='STC-0001')
+        gl = GeneralLedgerEntry.objects.filter(reference=tr.challan_number)
         self.assertEqual(gl.count(), 2)
         self.assertEqual({(e.account.code, e.debit, e.credit) for e in gl},
                          {('1300', Decimal('440.00'), Decimal('0.00')), ('1300', Decimal('0.00'), Decimal('440.00'))})
@@ -70,7 +71,8 @@ class StockTransferUAT15Tests(TestCase):
         r = self.post(500)  # WAC ≈ 100.64 × 500 > ₹50,000
         self.assertEqual(r.status_code, 201, r.content)
         self.assertEqual(r.json()['warnings'], [EWAY_WARNING])
-        self.assertIn('Cenvora does not support e-way bills', EWAY_WARNING)
+        self.assertIn('may require an e-way bill (thresholds vary by state); Cenvora does not generate e-way bills',
+                      EWAY_WARNING)
 
     def test_different_gstin_rejected(self):
         other = Warehouse.objects.create(name='KA', gstin='29ABCDE1234F1Z5', created_by=self.t)
@@ -82,3 +84,43 @@ class StockTransferUAT15Tests(TestCase):
         self.post(4)
         g = compute_gstr1(self.t, date.today().replace(day=1), date.today(), apply_carry=False)
         self.assertEqual((g['b2b'], g['b2cl'], g['b2cs'], g['cdnr'], g['cdnur']), ([], [], [], [], []))
+
+    def test_preview_warns_before_saving_and_writes_nothing(self):
+        StockPoint.objects.filter(warehouse=self.a, batch=self.b1).update(quantity=1000)
+        r = self.c.post(URL + 'preview/', {'source_warehouse': str(self.a.id), 'destination_warehouse': str(self.b.id),
+                                           'items': [{'product': str(self.p.id), 'batch': str(self.b1.id),
+                                                      'quantity': 500}]}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['warnings'], [EWAY_WARNING])
+        self.assertFalse(StockTransfer.objects.exists())
+        self.assertEqual(StockPoint.objects.get(warehouse=self.a, batch=self.b1).quantity, 1000)
+        r = self.c.post(URL + 'preview/', {'source_warehouse': str(self.a.id), 'destination_warehouse': str(self.b.id),
+                                           'items': [{'product': str(self.p.id), 'batch': str(self.b1.id),
+                                                      'quantity': 2000}]}, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_challan_serial_unique_per_fy_and_max_16(self):
+        self.assertEqual(next_challan_number(self.t, date(2026, 11, 3)), 'STC/26-27/0001')
+        self.post(1)
+        self.post(1)
+        nums = sorted(StockTransfer.objects.values_list('challan_number', flat=True))
+        fy = fy_label(date.today())
+        self.assertEqual(nums, [f'STC/{fy}/0001', f'STC/{fy}/0002'])
+        # A new FY restarts the series.
+        self.assertEqual(next_challan_number(self.t, date(2030, 4, 1)), 'STC/30-31/0001')
+        self.assertEqual(fy_label(date(2027, 3, 31)), '26-27')
+
+    def test_challan_print_has_rule_55_particulars(self):
+        self.a.address = 'Plot 1, Cuttack'
+        self.a.save()
+        self.b.address = 'Unit 9, Bhubaneswar'
+        self.b.save()
+        self.t.business_address = 'HQ, Bhubaneswar'
+        self.t.save()
+        self.post(4)
+        tr = StockTransfer.objects.get()
+        html = self.c.get(f'{URL}{tr.id}/challan/').content.decode()
+        for needle in ('DELIVERY CHALLAN', 'Rule 55', tr.challan_number, tr.transfer_date.strftime('%d-%m-%Y'),
+                       'Consignor', 'Consignee', 'UAT', 'Plot 1, Cuttack', 'Unit 9, Bhubaneswar',
+                       '21ABCDE1234F1Z5', '847130', 'Widget', '4 pcs', '440.00', 'Authorised Signatory'):
+            self.assertIn(needle, html, needle)

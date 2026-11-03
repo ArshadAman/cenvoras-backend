@@ -27,12 +27,17 @@ class BalanceTests(SimpleTestCase):
                                           D('30000'))
         self.assertEqual((g, e['Special Allowance'], n), (D('30000'), D('7500'), []))
 
-    def test_above_ctc_without_room_scales_and_flags(self):
+    def test_above_ctc_without_room_flags_no_silent_scaling(self):
         e, g, n = balance_earnings_to_ctc({'Basic': D('20000'), 'HRA': D('20000'), 'Special Allowance': D('5000')},
                                           D('30000'))
-        self.assertEqual(g, D('30000'))
-        self.assertEqual(e['Special Allowance'], D('0'))
-        self.assertTrue(n and 'VERIFY' in n[0])
+        self.assertEqual(g, D('40000'))  # stored components, unscaled
+        self.assertEqual((e['Basic'], e['Special Allowance']), (D('20000'), D('0')))
+        self.assertTrue(n and n[0].startswith('VERIFY salary structure'))
+
+    def test_above_ctc_scaled_when_confirmed(self):
+        e, g, n = balance_earnings_to_ctc({'Basic': D('20000'), 'HRA': D('20000')}, D('30000'), allow_scaling=True)
+        self.assertEqual((g, e['Basic'], e['HRA']), (D('30000'), D('15000.00'), D('15000.00')))
+        self.assertFalse(any(x.startswith('VERIFY') for x in n))
 
     def test_zero_ctc_unchanged(self):
         _e, g, _ = balance_earnings_to_ctc({'Basic': D('100')}, D('0'))

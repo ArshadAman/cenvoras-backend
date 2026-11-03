@@ -109,7 +109,7 @@ def monthly_full_gross(employee, year, month):
     a = _assignment(employee, year, month)
     if not a:
         return Decimal('0.00')
-    from hr.services.payroll_engine import balance_earnings_to_ctc
+    from hr.services.payroll_engine import balance_earnings_to_ctc, scaling_confirmed
     types = {c.name: c.type for c in a.salary_structure.components.all()}
     earnings = {}
     for name, val in (a.computed_components or {}).items():
@@ -120,7 +120,7 @@ def monthly_full_gross(employee, year, month):
         except Exception:
             continue
     # Same rule as the payroll engine: gross == monthly CTC, never above it.
-    _e, gross, _n = balance_earnings_to_ctc(earnings, a.monthly_ctc)
+    _e, gross, _n = balance_earnings_to_ctc(earnings, a.monthly_ctc, allow_scaling=scaling_confirmed(a))
     return gross.quantize(CENT)
 
 
@@ -132,8 +132,14 @@ def monthly_pf_wage(employee, year, month):
     a = _assignment(employee, year, month)
     if not a:
         return Decimal('0.00')
+    from hr.services.payroll_engine import balance_earnings_to_ctc, scaling_confirmed
     basic_names = {c.name for c in a.salary_structure.components.all() if getattr(c, 'is_basic', False)}
-    comps = a.computed_components or {}
+    comps = dict(a.computed_components or {})
+    if scaling_confirmed(a):  # PF wage = the scaled Basic actually paid
+        types = {c.name: c.type for c in a.salary_structure.components.all()}
+        earn = {k: v for k, v in comps.items() if not str(k).startswith('_') and types.get(k, 'earning') != 'deduction'}
+        scaled, _g, _n = balance_earnings_to_ctc(earn, a.monthly_ctc, allow_scaling=True)
+        comps.update({k: str(v) for k, v in scaled.items()})
     total = Decimal('0.00')
     found = False
     for name, val in comps.items():

@@ -910,7 +910,7 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeSalaryAssignment
         exclude = ['tenant']
-        read_only_fields = ['id', 'computed_components', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'computed_components', 'ctc_scaling_confirmation', 'created_at', 'updated_at']
 
     def validate_employee(self, value):
         request = self.context.get('request')

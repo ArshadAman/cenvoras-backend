@@ -100,3 +100,45 @@ class PfCeilingByWageMonthTests(_Base):
         m = self.api.get('/api/hr/pf-wage-components/').data['matches']
         self.assertFalse([x for x in m if x['kind'] == 'custom'])
         self.assertTrue([x for x in m if x['kind'] == 'structure' and x['name'] == 'DA'])
+
+
+class CustomAllowanceSingleSourceTests(_Base):
+    test_ceiling_helper_is_15000_for_now = test_basic_plus_da_under_cap = None
+    test_da_not_counted_unless_flagged = test_basic_plus_da_capped = None
+    test_confirmed_scaled_basic_plus_da = test_preview_flags_pf_wage_change = None
+
+    def setUp(self):
+        super().setUp()
+        self.da.delete()
+
+    def _custom(self):
+        return [x for x in self.api.get('/api/hr/pf-wage-components/').data['matches'] if x['kind'] == 'custom']
+
+    def test_zero_or_superseded_da_not_listed(self):
+        e = self.emp('Z1', '20000', {'Basic': '10000', 'HRA': '5000', 'DA': '0.00', 'da': '0',
+                                     'Special Allowance': '5000'})
+        self.assertEqual(self._custom(), [])
+        # Older assignment had a real DA; the current one (latest effective date) has none.
+        EmployeeSalaryAssignment.objects.create(tenant=self.t, employee=e, salary_structure=self.st,
+                                                effective_from='2025-01-01', monthly_ctc=D('20000'),
+                                                computed_components={'Basic': '8000', 'DA': '2000'})
+        self.assertEqual(self._custom(), [])
+        r = self.api.get(f'/api/hr/employees/{e.id}/')
+        self.assertEqual(r.data['salary_details']['custom_allowances'], {})
+
+    def test_banner_and_form_agree(self):
+        e = self.emp('A1', '20000', {'Basic': '8000', 'DA': '2000', 'Special Allowance': '10000'})
+        self.assertEqual([x['name'] for x in self._custom()], ['DA'])
+        r = self.api.get(f'/api/hr/employees/{e.id}/')
+        self.assertEqual(r.data['salary_details']['custom_allowances'], {'DA': '2000.00'})
+
+    def test_remove_custom_allowance_on_save(self):
+        e = self.emp('R1', '30000', {'Basic': '15000', 'HRA': '7500', 'Retaining Allowance': '1000',
+                                     'Special Allowance': '6500', '_basic_pct': '50.00', '_hra_pct': '50.00'})
+        r = self.api.patch(f'/api/hr/employees/{e.id}/', {'salary': {
+            'monthly_ctc': 30000, 'basic_pct': 50, 'hra_pct': 50,
+            'components': {'Basic': 15000, 'HRA': 7500}}}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        a = EmployeeSalaryAssignment.objects.get(employee=e)
+        self.assertNotIn('Retaining Allowance', a.computed_components)
+        self.assertEqual(self.api.get(f'/api/hr/employees/{e.id}/').data['salary_details']['custom_allowances'], {})

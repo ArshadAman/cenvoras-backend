@@ -328,6 +328,9 @@ class PurchaseBillItem(models.Model):
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    # UAT P1 items 6/7 (Rudra CA)
+    is_rcm = models.BooleanField(default=False, help_text='RCM applicable: buyer pays the GST (e.g. GTA, advocate).')
+    itc_blocked = models.BooleanField(default=False, help_text='ITC blocked under s.17(5): tax is added to cost.')
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     # Scheme Support (Phase 6)

@@ -142,7 +142,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit',
             'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
-            'batch_number', 'expiry_date', 'mrp'
+            'batch_number', 'expiry_date', 'mrp', 'is_rcm', 'itc_blocked'
         ]
 
     def to_representation(self, instance):
@@ -295,7 +295,27 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 exclude_pk = self.instance.pk if self.instance else None
                 if number_taken(tenant, 'purchase_bill', bill_number, exclude_pk=exclude_pk):
                     _raise_number_conflict(DuplicateDocumentNumber(bill_number, 'purchase_bill'))
+        # UAT P1 item 7 (Rudra CA): an unregistered vendor can't charge GST. Tax is locked at 0
+        # on every line that isn't flagged "RCM applicable".
+        if items is not None:
+            from billing.itc import lock_unregistered_line_tax
+            gstin = data.get('vendor_gstin', getattr(self.instance, 'vendor_gstin', None))
+            if not gstin and vendor is not None:
+                gstin = getattr(vendor, 'gstin', None)
+            rcm_bill = data.get('is_reverse_charge', getattr(self.instance, 'is_reverse_charge', False))
+            if lock_unregistered_line_tax(gstin, rcm_bill, items):
+                self._tax_locked_unregistered = True
         return data
+
+    @classmethod
+    def _vendor_payable(cls, item_data, bill_rcm=False):
+        """What the vendor is owed for a line: taxable only on RCM lines (item 7), else taxable + tax."""
+        if bill_rcm or item_data.get('is_rcm'):
+            from billing.sync_service import DocumentSyncService
+            return DocumentSyncService.calculate_line_amount(
+                item_data.get('quantity', 0), item_data.get('price', 0), item_data.get('discount', 0),
+                item_data.get('tax', 0)).quantize(Decimal('0.01'))
+        return cls._calculate_line_gross(item_data)
 
     def validate_vendor_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
@@ -356,8 +376,9 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             validated_data['vendor'] = vendor
         
         # Recalculate total amount from items to ensure integrity (line amount + tax)
+        _bill_rcm = bool(validated_data.get('is_reverse_charge'))
         recalculated_total = sum(
-            (self._calculate_line_gross(item) for item in items_data),
+            (self._vendor_payable(item, _bill_rcm) for item in items_data),
             Decimal('0.00')
         )
         validated_data['total_amount'] = recalculated_total
@@ -461,12 +482,13 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
 
             recalculated_total = sum(
-                (self._calculate_line_gross({
+                (self._vendor_payable({
                     'quantity': item.quantity,
                     'price': item.price,
                     'discount': item.discount,
                     'tax': item.tax,
-                }) for item in instance.items.all()),
+                    'is_rcm': item.is_rcm,
+                }, instance.is_reverse_charge) for item in instance.items.all()),
                 Decimal('0'),
             )
             instance.total_amount = recalculated_total

@@ -407,7 +407,16 @@ def dashboard_summary(request):
             cr = qs.filter(credit__gt=0, debit_note__isnull=False).aggregate(s=_Sum('credit'))['s'] or Decimal('0')
             return max(Decimal(str(dr)) - Decimal(str(cr)), Decimal('0.00'))
 
-        gst_credit_4c = _net_itc('1301') + _net_itc('1302') + _net_itc('1303')
+        # UAT P1 item 6 (Rudra CA): ITC only from registered vendors' bills, not blocked u/s 17(5);
+        # RCM ITC (4A(3)) included. Debit-note reversals still come from the ledger.
+        from billing.itc import itc_summary
+        _itc = itc_summary(tenant, gst_from, gst_to)
+        _claimed = sum(_itc['itc_normal'].values(), Decimal('0.00')) + sum(_itc['itc_rcm'].values(), Decimal('0.00'))
+        _reversed = sum((Decimal(str(GeneralLedgerEntry.objects.filter(
+            created_by=tenant, date__gte=gst_from, date__lte=gst_to, account__code=c, credit__gt=0,
+            debit_note__isnull=False).aggregate(s=_Sum('credit'))['s'] or 0)) for c in ('1301', '1302', '1303')),
+            Decimal('0.00'))
+        gst_credit_4c = max(_claimed - _reversed, Decimal('0.00'))
         gst_collected = Decimal('0.00')
         gst_paid = Decimal('0.00')
         gst_payable = -gst_credit_4c  # negative => UI shows "GST Credit"

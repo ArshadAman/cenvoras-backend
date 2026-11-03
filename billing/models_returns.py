@@ -3,6 +3,7 @@ Sales Return (Credit Note) & Purchase Return (Debit Note) Models.
 These are standard GST-compliant return vouchers.
 """
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
 from .models import SalesInvoice, PurchaseBill, Customer
@@ -137,7 +138,7 @@ class DebitNoteItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)

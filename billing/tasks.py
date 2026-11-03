@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 import csv
 import io
 import json
@@ -315,7 +316,7 @@ def process_sales_invoice_csv(csv_source: str, user_id: str):
             product_name = (row.get('product_name') or '').strip()
 
             try:
-                quantity = int(float(row.get('quantity') or 0))
+                quantity = to_qty((row.get('quantity') or 0))
                 unit = (row.get('unit') or 'pcs').strip() or 'pcs'
                 price = Decimal(str(row.get('price') or '0'))
                 discount = Decimal(str(row.get('discount') or '0'))

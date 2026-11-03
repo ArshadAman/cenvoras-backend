@@ -1,3 +1,4 @@
+from billing.uqc import UQCQuantityMixin
 from datetime import date
 from decimal import Decimal
 from uuid import UUID
@@ -92,7 +93,7 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
 
         return super().update(instance, validated_data)
 
-class SalesOrderItemSerializer(serializers.ModelSerializer):
+class SalesOrderItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -102,9 +103,9 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
-    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
-    dispatched_quantity = serializers.IntegerField(read_only=True)
-    pending_quantity = serializers.IntegerField(read_only=True)
+    free_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, required=False, default=0)
+    dispatched_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, read_only=True)
+    pending_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, read_only=True)
     fulfillment_status = serializers.SerializerMethodField(read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -431,7 +432,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
         return instance
 
-class DeliveryChallanItemSerializer(serializers.ModelSerializer):
+class DeliveryChallanItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -823,7 +824,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         return instance
 
-class PurchaseIndentItemSerializer(serializers.ModelSerializer):
+class PurchaseIndentItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     
     class Meta:
@@ -851,7 +852,7 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
         return indent
 
 
-class QuotationItemSerializer(serializers.ModelSerializer):
+class QuotationItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')

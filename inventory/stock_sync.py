@@ -2,6 +2,7 @@
 Shared helpers to apply stock changes to StockPoint + Product.stock cache.
 Used by StockJournal create and StockAdjustmentView.
 """
+from billing.uqc import to_qty
 from django.db import transaction
 from django.db.models import F, Sum
 
@@ -47,7 +48,7 @@ def apply_stock_delta(product, warehouse, quantity_delta, batch=None, batch_id=N
     # If this is effectively the first stockpoint and product had cached stock, seed it
     seed = 0
     if not had_prior_batches and not StockPoint.objects.filter(batch__product=product).exists():
-        seed = int(product.stock or 0)
+        seed = to_qty(product.stock or 0)
 
     stock_point, created = StockPoint.objects.select_for_update().get_or_create(
         warehouse=warehouse,
@@ -56,9 +57,9 @@ def apply_stock_delta(product, warehouse, quantity_delta, batch=None, batch_id=N
     )
     if created and seed and quantity_delta != 0:
         # seed already set; apply delta on top
-        stock_point.quantity = seed + int(quantity_delta)
+        stock_point.quantity = seed + to_qty(quantity_delta)
     else:
-        stock_point.quantity = int(stock_point.quantity or 0) + int(quantity_delta)
+        stock_point.quantity = to_qty(stock_point.quantity or 0) + to_qty(quantity_delta)
     stock_point.save(update_fields=['quantity', 'last_updated'])
     reconcile_product_stock(product, save=True)
     return stock_point, batch, stock_point.quantity

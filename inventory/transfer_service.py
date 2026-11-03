@@ -13,6 +13,7 @@ Different GSTINs (distinct persons, Sch. I para 2): needs a tax invoice + purcha
 bill at the Rule 28 value with stock in transit/short receipt — NOT implemented
 here; such transfers are rejected with a clear message.
 """
+from billing.uqc import fmt_qty, to_qty
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -71,11 +72,11 @@ def validate_transfer(tenant, source, destination, lines):
         errors.append('Unknown location.')
     elif location_gstin(source, tenant) != location_gstin(destination, tenant):
         errors.append(INTER_GSTIN_NOT_SUPPORTED)
-    need = defaultdict(int)
+    need = defaultdict(Decimal)
     for product, batch, qty in lines:
-        if int(qty) <= 0:
+        if to_qty(qty) <= 0:
             errors.append(f'{product.name}: quantity must be more than 0.')
-        need[(product, batch)] += int(qty)
+        need[(product, batch)] += to_qty(qty)
     if errors:
         raise TransferError(errors)
     valued = []
@@ -83,8 +84,8 @@ def validate_transfer(tenant, source, destination, lines):
     for (product, batch), qty in need.items():
         on_hand = StockPoint.objects.filter(warehouse=source, batch=batch).values_list('quantity', flat=True).first() or 0
         if qty > on_hand:
-            errors.append(f'{product.name} ({batch.batch_number}): only {on_hand} in stock at {source.name}; '
-                          f"can't transfer {qty}.")
+            errors.append(f'{product.name} ({batch.batch_number}): only {fmt_qty(on_hand)} in stock at {source.name}; '
+                          f"can't transfer {fmt_qty(qty)}.")
             continue
         rate = product_wac(product, tenant)
         value = (rate * qty).quantize(CENT, rounding=ROUND_HALF_UP)
@@ -130,7 +131,7 @@ def challan_context(transfer):
     lines = []
     for i, it in enumerate(transfer.items.select_related('product', 'batch').all(), 1):
         lines.append({'sn': i, 'description': it.product.name, 'batch': it.batch.batch_number,
-                      'hsn': it.product.hsn_sac_code or '', 'qty': it.quantity, 'unit': it.product.unit or '',
+                      'hsn': it.product.hsn_sac_code or '', 'qty': fmt_qty(it.quantity), 'unit': it.product.unit or '',
                       'rate': it.rate, 'value': it.value})
     return {'challan_number': transfer.challan_number, 'date': transfer.transfer_date,
             'consignor': party(transfer.source_warehouse), 'consignee': party(transfer.destination_warehouse),

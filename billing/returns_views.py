@@ -1,3 +1,5 @@
+from billing.uqc import fmt_qty
+from billing.uqc import UQCQuantityMixin
 from decimal import Decimal
 from collections import defaultdict
 """
@@ -195,13 +197,6 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             if err:
                 name = getattr(product, 'name', '') or 'item'
                 raise serializers.ValidationError({'items': f'{name}: {err}'})
-            if (attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value()):
-                # Measured unit, fractional: stock is still held in whole units (Product.stock is an
-                # integer), so a fractional return can't go back into stock yet.
-                raise serializers.ValidationError({'items': (
-                    f'{getattr(product, "name", "") or "item"}: stock is kept in whole {unit or "units"}, so a '
-                    f'returned quantity of {q.normalize()} can\'t be put back into stock yet. Return a whole '
-                    f'quantity, or for a value-only credit choose "Post-Sale Discount", "Rate Difference" or "Other".')})
         # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
         from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
         _nd = attrs.get('date') or getattr(self.instance, 'date', None)
@@ -254,7 +249,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
             allowed = remaining['remaining_qty'].get(pid, Decimal('0.00'))
             if qty > allowed:
                 raise serializers.ValidationError({
-                    'items': f'Return quantity exceeds remaining quantity on the original invoice ({allowed}).'
+                    'items': f'Return quantity exceeds remaining quantity on the original invoice ({fmt_qty(allowed)}).'
                 })
         if this_taxable > remaining['remaining_taxable'] + Decimal('0.05'):
             raise serializers.ValidationError({
@@ -372,13 +367,11 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         for item_data in processed_items:
             CreditNoteItem.objects.create(credit_note=credit_note, **item_data)
 
-            # Restore stock (returned goods come back in). R21: only Goods Returned / Defective, whole units.
+            # Restore stock (returned goods come back in). R21: only Goods Returned / Defective.
+            # Stock is decimal(15,3): measured units restore the exact fractional quantity.
             if not restores_stock:
                 continue
             qty = Decimal(str(item_data['quantity']))
-            if qty != qty.to_integral_value():
-                continue
-            qty = int(qty)
             Product.objects.filter(pk=item_data['product'].pk).update(stock=F('stock') + qty)
 
             if item_data.get('batch') and target_warehouse:
@@ -401,7 +394,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         return credit_note
 
 
-class DebitNoteItemSerializer(serializers.ModelSerializer):
+class DebitNoteItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
 
     class Meta:

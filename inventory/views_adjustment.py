@@ -1,3 +1,5 @@
+from decimal import Decimal
+from billing.uqc import to_qty
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -71,7 +73,7 @@ class StockAdjustmentView(APIView):
             )
 
         try:
-            quantity = float(data.get('quantity', 0))
+            quantity = to_qty(data.get('quantity', 0))
             if quantity < 0:
                 raise ValueError()
         except (TypeError, ValueError):
@@ -80,7 +82,7 @@ class StockAdjustmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        qty_int = int(round(quantity))
+        qty_int = quantity  # exact Decimal, never rounded (UQC checked below)
         reason = data.get('reason', 'manual_adjustment')
         notes = data.get('notes', '')
         warehouse_id = data.get('warehouse_id')
@@ -97,6 +99,11 @@ class StockAdjustmentView(APIView):
                     {"message": "Product not found."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+
+            from billing.uqc import quantity_error
+            uqc_err = quantity_error(quantity, product.unit)
+            if uqc_err:
+                return Response({"message": f"{product.name}: {uqc_err}"}, status=status.HTTP_400_BAD_REQUEST)
 
             # Resolve warehouse
             if warehouse_id:
@@ -155,10 +162,10 @@ class StockAdjustmentView(APIView):
                 new_sp_qty = current_sp_qty + qty_int
                 qty_delta = qty_int
             elif adjustment_type == 'remove':
-                new_sp_qty = max(0, current_sp_qty - qty_int)
+                new_sp_qty = max(Decimal('0'), current_sp_qty - qty_int)
                 qty_delta = new_sp_qty - current_sp_qty
             elif adjustment_type == 'set':
-                new_sp_qty = max(0, qty_int)
+                new_sp_qty = max(Decimal('0'), qty_int)
                 qty_delta = new_sp_qty - current_sp_qty
 
             stock_point.quantity = new_sp_qty

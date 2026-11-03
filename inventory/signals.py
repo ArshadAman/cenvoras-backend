@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from .models import StockTransfer, StockPoint, Warehouse
@@ -49,7 +50,7 @@ def process_stock_transfer(sender, instance, created, **kwargs):
             batch=item.batch,
             defaults={'quantity': 0},
         )
-        source_stock.quantity = int(source_stock.quantity or 0) - int(item.quantity)
+        source_stock.quantity = to_qty(source_stock.quantity or 0) - to_qty(item.quantity)
         source_stock.save(update_fields=['quantity', 'last_updated'])
 
         dest_stock, _ = StockPoint.objects.select_for_update().get_or_create(
@@ -57,7 +58,7 @@ def process_stock_transfer(sender, instance, created, **kwargs):
             batch=item.batch,
             defaults={'quantity': 0},
         )
-        dest_stock.quantity = int(dest_stock.quantity or 0) + int(item.quantity)
+        dest_stock.quantity = to_qty(dest_stock.quantity or 0) + to_qty(item.quantity)
         dest_stock.save(update_fields=['quantity', 'last_updated'])
 
         reconcile_product_stock(item.product, save=True)

@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 from collections import defaultdict
 from decimal import Decimal
 from django.utils import timezone
@@ -70,14 +71,14 @@ def evaluate_schemes_for_items(tenant, items, evaluation_date=None):
         p_id = str(p.id) if hasattr(p, 'id') else (str(p) if p else None)
 
         try:
-            qty = int(item_copy.get('quantity', 0) or 0)
+            qty = to_qty(item_copy.get('quantity', 0) or 0)
         except (ValueError, TypeError):
             qty = 0
 
         # Existing free_quantity if manually provided
         existing_free = item_copy.get('free_quantity', 0)
         try:
-            existing_free = int(existing_free or 0)
+            existing_free = to_qty(existing_free or 0)
         except (ValueError, TypeError):
             existing_free = 0
 

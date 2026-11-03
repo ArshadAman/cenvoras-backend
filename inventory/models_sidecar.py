@@ -140,7 +140,7 @@ class StockJournalItem(models.Model):
     batch = models.ForeignKey(ProductBatch, on_delete=models.PROTECT)
     
     # Quantity can be positive (Access) or negative (Shortage)
-    quantity = models.IntegerField(help_text="Positive for Add, Negative for Deduct")
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, help_text="Positive for Add, Negative for Deduct")
     
     def __str__(self):
         return f"{self.product.name}: {self.quantity}"

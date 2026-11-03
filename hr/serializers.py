@@ -50,6 +50,23 @@ class DesignationSerializer(serializers.ModelSerializer):
         return value
 
 
+# UAT P1 #11: salary data is visible only to Admin/HR/Accountant (payroll
+# operators) and to an employee viewing their own record.
+SALARY_VIEW_ROLES = ('admin', 'hr', 'accountant')
+SALARY_FIELDS = ('current_ctc', 'salary_details', 'monthly_salary', 'ctc', 'contract_fee')
+
+
+def can_view_salary(user, employee=None):
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return True  # internal/system serialisation (tasks, PDFs) — no request user
+    role = getattr(user, 'role', None)
+    if role in SALARY_VIEW_ROLES:
+        return True
+    if role == 'employee' and employee is not None and getattr(employee, 'user_id', None) == user.id:
+        return True
+    return False
+
+
 class EmployeeSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
     designation_name = serializers.CharField(source='designation.name', read_only=True)
@@ -328,7 +345,19 @@ class EmployeeSerializer(serializers.ModelSerializer):
         data['work_state_resolved'] = resolve_work_state(
             employee=instance, tenant=getattr(instance, 'tenant', None)
         )
+        if not can_view_salary(getattr(self.context.get('request'), 'user', None), instance):
+            for key in SALARY_FIELDS:
+                data.pop(key, None)
+            data['salary_hidden'] = True
         return data
+
+    def validate_contract_fee(self, value):
+        user = getattr(self.context.get('request'), 'user', None)
+        if not can_view_salary(user, self.instance):
+            if self.instance is not None:
+                return self.instance.contract_fee
+            return value
+        return value
 
     def validate_user(self, value):
         if value:
@@ -412,6 +441,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 )
 
     def _handle_salary_assignment(self, employee, salary_data):
+        if not can_view_salary(getattr(self.context.get('request'), 'user', None), employee):
+            return  # roles that cannot see salary cannot change it either
         if employee.employment_type == 'contract':
             return
         if not salary_data or not isinstance(salary_data, dict):

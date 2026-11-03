@@ -31,6 +31,10 @@ class AccountingService:
             ('1301', 'Input CGST', AccountType.ASSET),
             ('1302', 'Input SGST', AccountType.ASSET),
             ('1303', 'Input IGST', AccountType.ASSET),
+            # UAT P1 item 7 (Rudra CA): reverse charge kept apart for GSTR-3B 3.1(d) / 4A(3)
+            ('1311', 'Input CGST (RCM)', AccountType.ASSET),
+            ('1312', 'Input SGST (RCM)', AccountType.ASSET),
+            ('1313', 'Input IGST (RCM)', AccountType.ASSET),
             ('1400', 'Office Supplies', AccountType.ASSET),
             ('1500', 'Equipment', AccountType.ASSET),
             
@@ -42,6 +46,9 @@ class AccountingService:
             ('2201', 'Output CGST', AccountType.LIABILITY),
             ('2202', 'Output SGST', AccountType.LIABILITY),
             ('2203', 'Output IGST', AccountType.LIABILITY),
+            ('2211', 'RCM CGST Payable', AccountType.LIABILITY),
+            ('2212', 'RCM SGST Payable', AccountType.LIABILITY),
+            ('2213', 'RCM IGST Payable', AccountType.LIABILITY),
             
             # Equity
             ('3001', 'Owner\'s Equity', AccountType.EQUITY),
@@ -496,90 +503,47 @@ class AccountingService:
                 created_by=user
             )
 
-        # Debit: Input GST (Input Tax Credit Asset)
-        if total_tax > Decimal('0.00'):
-            if is_interstate:
-                GeneralLedgerEntry.objects.create(
-                    date=purchase_bill.bill_date,
-                    account=accounts['input_igst'],
-                    debit=total_tax,
-                    credit=0,
-                    description=f"Input IGST for Bill {purchase_bill.bill_number}",
-                    reference=purchase_bill.bill_number,
-                    purchase_bill=purchase_bill,
-                    vendor=vendor_obj,
-                    created_by=user
-                )
-            else:
-                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
-                sgst = total_tax - cgst
-                if cgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=purchase_bill.bill_date,
-                        account=accounts['input_cgst'],
-                        debit=cgst,
-                        credit=0,
-                        description=f"Input CGST for Bill {purchase_bill.bill_number}",
-                        reference=purchase_bill.bill_number,
-                        purchase_bill=purchase_bill,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
-                if sgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=purchase_bill.bill_date,
-                        account=accounts['input_sgst'],
-                        debit=sgst,
-                        credit=0,
-                        description=f"Input SGST for Bill {purchase_bill.bill_number}",
-                        reference=purchase_bill.bill_number,
-                        purchase_bill=purchase_bill,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
+        # UAT P1 items 6/7 (Rudra CA): classify the bill's tax.
+        #   normal ITC (registered vendor, not blocked)  -> Dr Input CGST/SGST/IGST
+        #   RCM                                         -> Dr Input tax (RCM) / Cr RCM tax payable
+        #   blocked s.17(5), or legacy tax on an unregistered vendor's non-RCM line -> Dr Purchases (cost)
+        from billing.itc import bill_tax_classification
+        cls_ = bill_tax_classification(purchase_bill, buyer_code) if line_items else None
 
-        # Reverse Charge: credit Output GST liability matching Input ITC (GSTR-3B inward RCM)
-        is_rcm = bool(getattr(purchase_bill, 'is_reverse_charge', False))
-        if is_rcm and total_tax > Decimal('0.00'):
-            if is_interstate:
-                GeneralLedgerEntry.objects.create(
-                    date=purchase_bill.bill_date,
-                    account=accounts['output_igst'],
-                    debit=0,
-                    credit=total_tax,
-                    description=f"RCM Output IGST for Bill {purchase_bill.bill_number}",
-                    reference=purchase_bill.bill_number,
-                    purchase_bill=purchase_bill,
-                    vendor=vendor_obj,
-                    created_by=user
-                )
-            else:
-                cgst = (total_tax / Decimal('2')).quantize(Decimal('0.01'))
-                sgst = total_tax - cgst
-                if cgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=purchase_bill.bill_date,
-                        account=accounts['output_cgst'],
-                        debit=0,
-                        credit=cgst,
-                        description=f"RCM Output CGST for Bill {purchase_bill.bill_number}",
-                        reference=purchase_bill.bill_number,
-                        purchase_bill=purchase_bill,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
-                if sgst > 0:
-                    GeneralLedgerEntry.objects.create(
-                        date=purchase_bill.bill_date,
-                        account=accounts['output_sgst'],
-                        debit=0,
-                        credit=sgst,
-                        description=f"RCM Output SGST for Bill {purchase_bill.bill_number}",
-                        reference=purchase_bill.bill_number,
-                        purchase_bill=purchase_bill,
-                        vendor=vendor_obj,
-                        created_by=user
-                    )
+        def _gl(account, debit, credit, description):
+            GeneralLedgerEntry.objects.create(
+                date=purchase_bill.bill_date, account=account, debit=debit, credit=credit,
+                description=description, reference=purchase_bill.bill_number,
+                purchase_bill=purchase_bill, vendor=vendor_obj, created_by=user)
+
+        rcm_tax = Decimal('0.00')
+        if cls_ is not None:
+            itc = cls_['itc_normal']
+            for key, code, label in (('igst', 'input_igst', 'IGST'), ('cgst', 'input_cgst', 'CGST'),
+                                     ('sgst', 'input_sgst', 'SGST')):
+                if itc[key] > 0:
+                    _gl(accounts[code], itc[key], 0, f"Input {label} for Bill {purchase_bill.bill_number}")
+            to_cost = cls_['blocked_tax'] + cls_['ineligible_tax']
+            if to_cost > 0:
+                why = []
+                if cls_['blocked_tax'] > 0:
+                    why.append('ITC blocked u/s 17(5)')
+                if cls_['ineligible_tax'] > 0:
+                    why.append('unregistered vendor, no ITC')
+                _gl(pur_account, to_cost, 0, f"GST added to cost ({', '.join(why)}) - Bill {purchase_bill.bill_number}")
+            for key, in_code, pay_code, label in (('igst', '1313', '2213', 'IGST'), ('cgst', '1311', '2211', 'CGST'),
+                                                  ('sgst', '1312', '2212', 'SGST')):
+                pay = cls_['rcm_payable'][key]
+                if pay <= 0:
+                    continue
+                rcm_tax += pay
+                credit_part = cls_['itc_rcm'][key]
+                if credit_part > 0:
+                    _gl(accounts[in_code], credit_part, 0, f"Input {label} (RCM) for Bill {purchase_bill.bill_number}")
+                _gl(accounts[pay_code], 0, pay, f"RCM {label} payable for Bill {purchase_bill.bill_number}")
+            # the blocked part of RCM tax is already inside cls_['blocked_tax'] (cost)
+            total_tax = (sum(itc.values(), Decimal('0.00')) + to_cost
+                         + sum(cls_['itc_rcm'].values(), Decimal('0.00')))
 
         # Create detailed description with line items for accounts payable
         if line_items:
@@ -594,10 +558,8 @@ class AccountingService:
         else:
             detailed_payable_description = f"Amount owed to {purchase_bill.vendor_name}"
 
-        # Under RCM, AP is typically the taxable value (GST paid to govt, not vendor)
-        ap_credit = (
-            total_taxable if is_rcm else Decimal(str(purchase_bill.total_amount or '0.00'))
-        ).quantize(Decimal('0.01'))
+        # Vendor is owed the bill total (taxable only on RCM lines - see PurchaseBillSerializer).
+        ap_credit = Decimal(str(purchase_bill.total_amount or '0.00')).quantize(Decimal('0.01'))
 
         # Credit: Accounts Payable (record total amount owed)
         GeneralLedgerEntry.objects.create(
@@ -613,11 +575,9 @@ class AccountingService:
         )
 
         # Debit/Credit: Rounding Off adjustment (guarantee Debits == Credits down to the exact cent)
-        # RCM: Dr Purchases + Dr Input GST = Cr AP (taxable) + Cr Output GST
+        # Dr Purchases + Dr ITC (+ cost GST) = Cr AP + Cr RCM payable
         total_debited = total_taxable + total_tax
-        total_credited = ap_credit + (total_tax if is_rcm else Decimal('0.00'))
-        if not is_rcm:
-            total_credited = Decimal(str(purchase_bill.total_amount or '0.00'))
+        total_credited = ap_credit + rcm_tax
         round_off_diff = (total_credited - total_debited).quantize(Decimal('0.01'))
 
         if round_off_diff != Decimal('0.00'):

@@ -684,19 +684,32 @@ def gstr3b_summary(request):
             return qs.filter(credit__gt=0).aggregate(s=Sum('credit'))['s'] or Decimal('0.00')
         return Decimal('0.00')
 
-    itc_igst = _sum_input_gst('1303', debit=True, purchase_bill=True)
-    itc_cgst = _sum_input_gst('1301', debit=True, purchase_bill=True)
-    itc_sgst = _sum_input_gst('1302', debit=True, purchase_bill=True)
+    # UAT P1 items 6/7 (Rudra CA): 4A(5) only from bills of registered vendors and not blocked
+    # u/s 17(5); RCM ITC goes to 4A(3) and RCM tax to 3.1(d) (paid in cash, not set off).
+    from billing.itc import itc_summary
+    _itc = itc_summary(tenant, from_date, to_date)
+    itc_igst = _itc['itc_normal']['igst']
+    itc_cgst = _itc['itc_normal']['cgst']
+    itc_sgst = _itc['itc_normal']['sgst']
+    rcm_itc_igst = _itc['itc_rcm']['igst']
+    rcm_itc_cgst = _itc['itc_rcm']['cgst']
+    rcm_itc_sgst = _itc['itc_rcm']['sgst']
+    rcm_igst = _itc['rcm_payable']['igst']
+    rcm_cgst = _itc['rcm_payable']['cgst']
+    rcm_sgst = _itc['rcm_payable']['sgst']
     rev_igst = _sum_input_gst('1303', credit=True, debit_note=True)
     rev_cgst = _sum_input_gst('1301', credit=True, debit_note=True)
     rev_sgst = _sum_input_gst('1302', credit=True, debit_note=True)
 
-    excess_igst = max(rev_igst - itc_igst, Decimal('0.00'))
-    excess_cgst = max(rev_cgst - itc_cgst, Decimal('0.00'))
-    excess_sgst = max(rev_sgst - itc_sgst, Decimal('0.00'))
-    net_itc_igst = max(itc_igst - rev_igst, Decimal('0.00'))
-    net_itc_cgst = max(itc_cgst - rev_cgst, Decimal('0.00'))
-    net_itc_sgst = max(itc_sgst - rev_sgst, Decimal('0.00'))
+    _all_itc_igst = itc_igst + rcm_itc_igst
+    _all_itc_cgst = itc_cgst + rcm_itc_cgst
+    _all_itc_sgst = itc_sgst + rcm_itc_sgst
+    excess_igst = max(rev_igst - _all_itc_igst, Decimal('0.00'))
+    excess_cgst = max(rev_cgst - _all_itc_cgst, Decimal('0.00'))
+    excess_sgst = max(rev_sgst - _all_itc_sgst, Decimal('0.00'))
+    net_itc_igst = max(_all_itc_igst - rev_igst, Decimal('0.00'))
+    net_itc_cgst = max(_all_itc_cgst - rev_cgst, Decimal('0.00'))
+    net_itc_sgst = max(_all_itc_sgst - rev_sgst, Decimal('0.00'))
 
     # Excess reversal adds TAX only to 3.1(a), not taxable value
     outward_taxable = a31['txval']
@@ -732,7 +745,10 @@ def gstr3b_summary(request):
     tot_paid_itc_igst = igst_setoff_igst + cgst_setoff_igst + sgst_setoff_igst
     tot_paid_itc_cgst = igst_setoff_cgst + cgst_setoff_cgst
     tot_paid_itc_sgst = igst_setoff_sgst + sgst_setoff_sgst
-    cash_payable_igst, cash_payable_cgst, cash_payable_sgst = liab_igst, liab_cgst, liab_sgst
+    # RCM tax (3.1(d)) can't be paid from the credit ledger: it is always cash.
+    cash_payable_igst = liab_igst + rcm_igst
+    cash_payable_cgst = liab_cgst + rcm_cgst
+    cash_payable_sgst = liab_sgst + rcm_sgst
     total_cash_payable = cash_payable_igst + cash_payable_cgst + cash_payable_sgst
 
     gstin = g1['gstin']
@@ -753,9 +769,9 @@ def gstr3b_summary(request):
                     f'That extra tax is added to 3.1(a); filing 4C is zero on those heads.'
                 ),
                 'true_4c': {
-                    'iamt': float(itc_igst - rev_igst),
-                    'camt': float(itc_cgst - rev_cgst),
-                    'samt': float(itc_sgst - rev_sgst),
+                    'iamt': float(_all_itc_igst - rev_igst),
+                    'camt': float(_all_itc_cgst - rev_cgst),
+                    'samt': float(_all_itc_sgst - rev_sgst),
                 },
                 'excess_tax_in_3_1_a': {
                     'iamt': float(excess_igst),
@@ -785,7 +801,8 @@ def gstr3b_summary(request):
             },
             'inward_reverse_charge': {
                 'desc': '(d) Inward supplies (liable to reverse charge)',
-                'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0,
+                'txval': float(_itc['rcm_taxable']), 'iamt': float(rcm_igst), 'camt': float(rcm_cgst),
+                'samt': float(rcm_sgst), 'csamt': 0.0,
             },
             'non_gst_outward': {
                 'desc': '(e) Non-GST outward supplies',
@@ -817,7 +834,8 @@ def gstr3b_summary(request):
             'itc_available': {
                 'import_goods': {'iamt': 0.0, 'csamt': 0.0},
                 'import_services': {'iamt': 0.0, 'csamt': 0.0},
-                'inward_reverse_charge': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                'inward_reverse_charge': {'iamt': float(rcm_itc_igst), 'camt': float(rcm_itc_cgst),
+                                          'samt': float(rcm_itc_sgst), 'csamt': 0.0},
                 'inward_isd': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
                 'all_other_itc': {
                     'iamt': float(itc_igst), 'camt': float(itc_cgst), 'samt': float(itc_sgst), 'csamt': 0.0,
@@ -849,7 +867,7 @@ def gstr3b_summary(request):
         },
         'table_6_1_payment': {
             'igst': {
-                'tax_payable': float(outward_igst),
+                'tax_payable': float(outward_igst + rcm_igst),
                 'paid_via_itc': float(tot_paid_itc_igst),
                 'tax_paid_cash': float(cash_payable_igst),
                 'itc_breakup': {
@@ -859,7 +877,7 @@ def gstr3b_summary(request):
                 }
             },
             'cgst': {
-                'tax_payable': float(outward_cgst),
+                'tax_payable': float(outward_cgst + rcm_cgst),
                 'paid_via_itc': float(tot_paid_itc_cgst),
                 'tax_paid_cash': float(cash_payable_cgst),
                 'itc_breakup': {
@@ -868,7 +886,7 @@ def gstr3b_summary(request):
                 }
             },
             'sgst': {
-                'tax_payable': float(outward_sgst),
+                'tax_payable': float(outward_sgst + rcm_sgst),
                 'paid_via_itc': float(tot_paid_itc_sgst),
                 'tax_paid_cash': float(cash_payable_sgst),
                 'itc_breakup': {
@@ -876,7 +894,7 @@ def gstr3b_summary(request):
                     'sgst': float(sgst_setoff_sgst),
                 }
             },
-            'total_tax_payable': float(outward_igst + outward_cgst + outward_sgst),
+            'total_tax_payable': float(outward_igst + outward_cgst + outward_sgst + rcm_igst + rcm_cgst + rcm_sgst),
             'total_net_itc': float(net_itc_igst + net_itc_cgst + net_itc_sgst),
             'total_itc_utilized': float(tot_paid_itc_igst + tot_paid_itc_cgst + tot_paid_itc_sgst),
             'total_tax_paid_cash': float(total_cash_payable),

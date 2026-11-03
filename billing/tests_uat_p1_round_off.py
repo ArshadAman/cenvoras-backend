@@ -44,9 +44,9 @@ class InvoiceRoundOffApiTests(FourFixesBase):
     def _post(self, **extra):
         payload = {
             "customer_name": self.customer.name, "invoice_date": str(date.today()), "status": "final",
-            "total_amount": "0", "place_of_supply": "Karnataka",
+            "total_amount": "0", "place_of_supply": "Karnataka", "customer_address": "MG Road, Bengaluru",
             "items": [{"product": str(self.product.id), "quantity": 1, "price": "980.93", "tax": "18.00",
-                       "amount": "0", "hsn_sac_code": "847130"}],
+                       "amount": "0", "hsn_sac_code": "847130", "unit": "pcs"}],
         }
         payload.update(extra)
         with self.captureOnCommitCallbacks(execute=True):

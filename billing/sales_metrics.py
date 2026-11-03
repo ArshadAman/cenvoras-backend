@@ -106,6 +106,33 @@ def _taxable_net(inv_qs, cn_qs, tenant):
     return taxable.quantize(Decimal('0.01'))
 
 
+def sales_register_invoices(tenant, date_from=None, date_to=None):
+    """Final sales invoices in the Sales Tax Register (shared by the register and AI month sales)."""
+    from billing.models import SalesInvoice
+    qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
+    if date_from:
+        qs = qs.filter(invoice_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(invoice_date__lte=date_to)
+    return qs
+
+
+def sales_register_credit_notes(tenant, date_from=None, date_to=None):
+    """
+    Credit notes in the Sales Tax Register, by CN date: only CNs linked to a final invoice.
+    Unlinked CNs (legacy taxed CNs listed for fixing under #207, or credit notes without GST)
+    are not in any GST table and are not subtracted from taxable sales.
+    """
+    from billing.models_returns import CreditNote
+    qs = CreditNote.objects.filter(created_by=tenant, original_invoice__isnull=False,
+                                   original_invoice__status='final')
+    if date_from:
+        qs = qs.filter(date__gte=date_from)
+    if date_to:
+        qs = qs.filter(date__lte=date_to)
+    return qs
+
+
 def sales_mtd(tenant):
     return aggregate_sales_metric(tenant, mtd=True)
 
@@ -168,10 +195,10 @@ def sales_for_month(tenant, year: int, month: int):
     from billing.models_returns import CreditNote
 
     start, end = ist_month_bounds(year, month)
-    inv_qs = SalesInvoice.objects.filter(_tenant_scope_q(tenant), status='final',
-                                         invoice_date__gte=start, invoice_date__lte=end)
+    # Same document sets as the Sales Tax Register (retest item 3).
+    inv_qs = sales_register_invoices(tenant, start, end)
     no_cn = CreditNote.objects.none()
-    cn_qs = CreditNote.objects.filter(_tenant_scope_q(tenant), date__gte=start, date__lte=end)
+    cn_qs = sales_register_credit_notes(tenant, start, end)
     invoice_taxable = _taxable_net(inv_qs, no_cn, tenant)
     cn_taxable = (Decimal('0.00') - _taxable_net(SalesInvoice.objects.none(), cn_qs, tenant))
     debit_notes = Decimal('0.00')

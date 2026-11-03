@@ -203,6 +203,11 @@ def gst_shield(owner, today, period='month'):
     state_code = (get_state_code_from_gstin(gstin) if gstin else None) or normalize_state_code(getattr(owner, 'state', '') or '') or None
     business_type = getattr(owner, 'business_type', None)
     registered = len(gstin) == 15
+    # UAT P1 #13 rework (Rudra CA): a stored GST status wins; Not registered gets the s.22 reminder.
+    from billing.gst_status import stored_gst_status, UNREGISTERED
+    _st = stored_gst_status(owner)
+    if _st is not None:
+        registered = _st != UNREGISTERED
 
     fy_start, fy_end = fy_bounds(today)
     fy = sales_summary(owner, fy_start, today)
@@ -223,7 +228,8 @@ def gst_shield(owner, today, period='month'):
             'threshold_percent': str(pc), 'liable_to_register': fy['turnover'] > thr,
             'alert': 'exceeded' if pc >= 100 else ('approaching' if pc >= ALERT_PCT else None),
             'alert_text': ('Turnover has crossed the registration threshold. Register within 30 days.' if fy['turnover'] > thr
-                           else 'Approaching the registration threshold. You must register within 30 days of crossing it.' if pc >= ALERT_PCT
+                           else ('Heads-up: your turnover is getting close to the GST registration limit (s.22). '
+                                 'Once it crosses the limit, you will need to register within 30 days.') if pc >= ALERT_PCT
                            else None),
         })
         return out

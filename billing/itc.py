@@ -87,7 +87,11 @@ def s16_4_deadline(bill_date):
 
 
 def itc_time_barred(bill):
-    """True when the bill was recorded in Cenvora after its s.16(4) deadline."""
+    """True when the bill was recorded in Cenvora after its s.16(4) deadline.
+
+    VERIFY: should be based on the 3B period in which ITC is claimed (by 30 Nov after the FY,
+    or the annual return date if earlier). The entry date is a proxy until Cenvora records the
+    claim period."""
     created = getattr(bill, 'created_at', None)
     if not created or not getattr(bill, 'bill_date', None):
         return False
@@ -108,7 +112,7 @@ def itc_pos_lost(bill, buyer_state_code):
     return bool(code) and str(code).strip() != str(buyer_state_code).strip()
 
 
-def bill_tax_classification(bill, buyer_state_code=None):
+def bill_tax_classification(bill, buyer_state_code=None, only=None, item_ids=None):
     """
     Per-bill buckets (Decimal) used by the ledger, GSTR-3B and the dashboard:
       taxable, vendor_payable,
@@ -124,6 +128,10 @@ def bill_tax_classification(bill, buyer_state_code=None):
       lost_4d2 {..}, lost_tax         -> 4D(2): ITC lost to PoS rules or the s.16(4) time limit
                                          (never in 4A; added to cost in the books)
     itc_normal / itc_rcm stay NET claimable (= 4A - 4B(1)); the ledger posts those.
+
+    only: None (all lines), 'rcm' (reverse-charge lines only) or 'non_rcm'; item_ids: limit to
+    these line ids. GSTR-3B places each RCM line by its own time of supply (#219) and the rest
+    by bill date.
     """
     from billing.gst_utils import calculate_item_tax_breakup, get_seller_state_code
     from billing.gst_rules import is_purchase_interstate
@@ -149,6 +157,10 @@ def bill_tax_classification(bill, buyer_state_code=None):
         out['taxable'] += taxable
         blocked = bool(getattr(item, 'itc_blocked', False))
         rcm = line_is_rcm(bill, item)
+        if (only == 'rcm' and not rcm) or (only == 'non_rcm' and rcm):
+            continue
+        if item_ids is not None and item.pk not in item_ids:
+            continue
         if rcm:
             out['vendor_payable'] += taxable
             out['rcm_taxable'] += taxable
@@ -165,7 +177,9 @@ def bill_tax_classification(bill, buyer_state_code=None):
                 out['lost_4d2'][k] += v
             out['lost_tax'] += tax
             continue
-        gross = 'itc_4a_rcm' if rcm else 'itc_4a_normal'
+        # Rudra (#219): s.17(5)-blocked RCM ITC never shows in 4A(3); like other blocked ITC it is
+        # shown in 4A (all other ITC) and reversed in 4B(1).
+        gross = 'itc_4a_rcm' if (rcm and not blocked) else 'itc_4a_normal'
         for k, v in parts:
             out[gross][k] += v
         if blocked:
@@ -181,9 +195,15 @@ def bill_tax_classification(bill, buyer_state_code=None):
 
 
 def itc_summary(tenant, date_from, date_to):
-    """Sum of bill_tax_classification over final purchase bills dated in [from, to]."""
+    """GSTR-3B ITC/RCM buckets for [from, to]: non-RCM lines of bills dated in the period, plus
+    RCM lines whose time of supply (s.12(3)/s.13(3), see rcm_documents) falls in the period."""
     from billing.gst_utils import get_seller_state_code
     from billing.models import PurchaseBill
+    from datetime import date as _d
+    if not isinstance(date_from, _d):
+        date_from = _d.fromisoformat(str(date_from)[:10])
+    if not isinstance(date_to, _d):
+        date_to = _d.fromisoformat(str(date_to)[:10])
     buyer = get_seller_state_code(tenant)
     tot = {'itc_normal': {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO},
            'itc_rcm': {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO},
@@ -192,9 +212,28 @@ def itc_summary(tenant, date_from, date_to):
     for b in ('itc_4a_normal', 'itc_4a_rcm', 'blocked_split', 'lost_4d2'):
         tot[b] = {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO}
     # PurchaseBill has no draft/cancelled status in Cenvora; every saved bill counts.
-    qs = PurchaseBill.objects.filter(created_by=tenant, bill_date__gte=date_from, bill_date__lte=date_to)
-    for bill in qs.select_related('vendor', 'created_by').prefetch_related('items'):
-        b = bill_tax_classification(bill, buyer)
+    def _bills():
+        # Non-RCM lines: by bill date.
+        qs = PurchaseBill.objects.filter(created_by=tenant, bill_date__gte=date_from, bill_date__lte=date_to)
+        for bill in qs.select_related('vendor', 'created_by').prefetch_related('items'):
+            yield bill_tax_classification(bill, buyer, only='non_rcm')
+        # RCM lines (Rudra, #219): each line by its own time of supply - SAC chapter 99 (services)
+        # s.13(3), everything else s.12(3). A time of supply is never later than bill date + 61
+        # days, so older bills can't land in this period.
+        # 4A(3) ITC goes in the same 3B as the 3.1(d) tax (s.49(4), paid in cash). VERIFY: Cenvora
+        # has no record of when the 3B cash payment is actually made, so a liability paid late in a
+        # later 3B still shows its ITC in the time-of-supply month (follow-up).
+        from datetime import timedelta
+        from django.db.models import Q
+        from billing.rcm_documents import rcm_line_times
+        rq = (PurchaseBill.objects.filter(created_by=tenant, bill_date__gte=date_from - timedelta(days=62))
+              .filter(Q(is_reverse_charge=True) | Q(items__is_rcm=True)).distinct())
+        for bill in rq.select_related('vendor', 'created_by').prefetch_related('items'):
+            ids = {line.pk for line, tos in rcm_line_times(bill) if date_from <= tos <= date_to}
+            if ids:
+                yield bill_tax_classification(bill, buyer, only='rcm', item_ids=ids)
+
+    for b in _bills():
         for bucket in ('itc_normal', 'itc_rcm', 'rcm_payable', 'itc_4a_normal', 'itc_4a_rcm',
                        'blocked_split', 'lost_4d2'):
             for k in ('cgst', 'sgst', 'igst'):

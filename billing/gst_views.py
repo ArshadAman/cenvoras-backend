@@ -50,13 +50,9 @@ def hsn_summary_report(request):
     hsn_dict = {}
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
 
         seller_state_code = get_seller_state_code(tenant)
         for inv in invoices:
@@ -245,13 +241,9 @@ def tax_register(request):
     }
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
         invoices = invoices.order_by('-invoice_date', '-created_at')
 
         for inv in invoices:
@@ -299,15 +291,8 @@ def tax_register(request):
             totals['total_tax'] += inv_tax
             totals['total'] += inv.total_amount
 
-        credit_notes = CreditNote.objects.filter(
-            created_by=tenant,
-            original_invoice__isnull=False,
-            original_invoice__status='final',
-        ).select_related('customer', 'original_invoice').prefetch_related('items')
-        if from_date:
-            credit_notes = credit_notes.filter(date__gte=from_date)
-        if to_date:
-            credit_notes = credit_notes.filter(date__lte=to_date)
+        credit_notes = sales_register_credit_notes(tenant, from_date, to_date
+                                                   ).select_related('customer', 'original_invoice').prefetch_related('items')
         for cn in credit_notes.order_by('-date', '-created_at'):
             brk = credit_note_tax_breakup(cn, seller_state_code)
             gstin = (cn.customer.gstin.strip().upper() if cn.customer and cn.customer.gstin else '')
@@ -509,6 +494,11 @@ def gstr1_json_export(request):
     Generate GSTR-1 compliant JSON for a given period.
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
@@ -581,6 +571,11 @@ def gstr1_advances_csv(request):
     ?from=&to=&sheet=at|atadj. VERIFY: column headers follow the offline-tool Excel template as we
     understand it; the official field tables could not be read. Amounts are TAXABLE value (Rudra CA).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     import csv
     from django.http import HttpResponse
     tenant = getattr(request.user, 'active_tenant', request.user)
@@ -653,6 +648,11 @@ def gstr3b_summary(request):
     3.1(a) taxable outward only; 3.1(b) zero-rated; 3.1(c) nil/exempt; 3.1(e) non-GST.
     Filing 4C = max(4A-4B, 0). Excess reversal adds tax only to 3.1(a).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')

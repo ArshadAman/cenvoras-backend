@@ -7,8 +7,8 @@ from django.test import TransactionTestCase
 
 
 class DecimalStockMigrationTests(TransactionTestCase):
-    before = [('inventory', '0027_stock_transfer_challan_wac'), ('billing', '0062_creditnoteitem_quantity_3dp')]
-    after = [('inventory', '0028_stock_qty_decimal_3dp'), ('billing', '0063_stock_qty_decimal_3dp')]
+    before = [('inventory', '0027_stock_transfer_challan_wac'), ('billing', '0063_purchasebillitem_rcm_itc_blocked')]
+    after = [('inventory', '0028_stock_qty_decimal_3dp'), ('billing', '0064_stock_qty_decimal_3dp')]
 
     def test_integers_convert_exactly(self):
         from django.contrib.auth import get_user_model

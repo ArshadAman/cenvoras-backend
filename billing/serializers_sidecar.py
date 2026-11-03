@@ -29,6 +29,19 @@ def _raise_number_conflict(exc):
     raise error
 
 
+
+def _legacy_customer_gstins(serializer):
+    """GSTINs already on record for this document/customer (accepted on format alone, item 14)."""
+    from billing.models import Customer
+    legacy = [getattr(serializer.instance, 'customer_gstin', None)]
+    cid = (getattr(serializer, 'initial_data', None) or {}).get('customer')
+    if cid:
+        try:
+            legacy += list(Customer.objects.filter(pk=cid).values_list('gstin', flat=True)[:1])
+        except Exception:
+            pass
+    return legacy
+
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransactionMeta
@@ -575,7 +588,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     def validate_customer_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=_legacy_customer_gstins(self)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
@@ -990,7 +1003,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     def validate_customer_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=_legacy_customer_gstins(self)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 

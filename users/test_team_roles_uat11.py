@@ -45,6 +45,18 @@ class TeamRoleUAT11Tests(TestCase):
         self.assertEqual(last.user_id, self.admin.id)
         self.assertIsNotNone(last.timestamp)
 
+    def test_role_change_writes_only_the_structured_row(self):
+        member = self._create(role='employee')
+        before = AuditLog.objects.filter(object_id=str(member.id)).count()
+        s = TeamMemberSerializer(member, data={'role': 'manager'}, partial=True,
+                                 context={'request': self.req})
+        self.assertTrue(s.is_valid(), s.errors)
+        s.save()
+        new = list(AuditLog.objects.filter(object_id=str(member.id)).order_by('timestamp')[before:])
+        role_rows = [l for l in new if 'role' in (l.changes or {}) or (l.changes or {}).get('event') == 'role_change']
+        self.assertEqual(len(role_rows), 1, [l.changes for l in new])
+        self.assertEqual(role_rows[0].changes['event'], 'role_change')
+
     def test_no_audit_when_role_unchanged(self):
         member = self._create(role='hr')
         s = TeamMemberSerializer(member, data={'first_name': 'Z'}, partial=True,

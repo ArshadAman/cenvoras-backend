@@ -507,6 +507,8 @@ class TeamMemberSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
         old_role = instance.role
+        if 'role' in validated_data and validated_data['role'] != old_role:
+            instance._role_change_audited = True  # generic signal skips the role field
         instance = super().update(instance, validated_data)
         if 'role' in validated_data and validated_data['role'] != old_role:
             # UAT P1 #11: every role change is audit-logged (who, when, old, new).

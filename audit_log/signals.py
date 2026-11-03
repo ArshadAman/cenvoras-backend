@@ -84,6 +84,11 @@ def audit_log_save(sender, instance, created, **kwargs):
     if request and request.path.startswith('/admin/'):
         return
 
+    # UAT P1 #11: the team serializer writes one structured role_change row; don't add a
+    # second generic 'role old → new' row for the same save.
+    if not created and getattr(instance, '_role_change_audited', False) and isinstance(changes, dict):
+        changes.pop('role', None)
+
     if action == 'UPDATE' and not changes:
         return # Nothing changed
 
@@ -133,6 +138,11 @@ def audit_log_delete(sender, instance, **kwargs):
 
     if request and request.path.startswith('/admin/'):
         return
+
+    # UAT P1 #11: the team serializer writes one structured role_change row; don't add a
+    # second generic 'role old → new' row for the same save.
+    if not created and getattr(instance, '_role_change_audited', False) and isinstance(changes, dict):
+        changes.pop('role', None)
 
     AuditLog.objects.create(
         tenant=getattr(user, 'active_tenant', None) if user and getattr(user, 'is_authenticated', False) else None,

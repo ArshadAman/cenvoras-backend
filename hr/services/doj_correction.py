@@ -299,6 +299,7 @@ def pending_for_payslip(employee, month, year, settings=None):
                 same_fy += d
             else:
                 prior_fy += d
+                res.setdefault('prior_fy_month', (int(ln['month']), int(ln['year'])))
         if arrears:
             res['earning_lines'].append((f'DOJ correction arrears {tag} [{ESIC_FLAG}]', arrears.quantize(CENT)))
         if same_fy:
@@ -322,7 +323,8 @@ def carry_excess_recovery(corrections, excess, month, year):
         return None
     parent = corrections[0]
     ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
-    DOJCorrection.objects.filter(carried_from=parent, target_month=nm, target_year=ny).delete()
+    DOJCorrection.objects.filter(carried_from=parent, target_month=nm, target_year=ny).exclude(
+        reason__startswith=PRIOR_FY_CARRY_REASON).delete()
     if excess <= 0:
         return None
     return DOJCorrection.objects.create(
@@ -330,6 +332,55 @@ def carry_excess_recovery(corrections, excess, month, year):
         reason=f'Carried forward: excess recovery not covered by {month:02d}/{year} pay',
         corrected_by=parent.corrected_by, amount=-excess, carried_from=parent,
         breakdown=[{'year': year, 'month': month, 'delta': str(-excess), 'carry': True}],
+        target_month=nm, target_year=ny,
+    )
+
+
+PRIOR_FY_CARRY_REASON = 'Carried forward (earlier-FY recovery)'
+# VERIFY limit/applicability: Code on Wages s.18 caps TOTAL deductions in the wage period at 50% of
+# wages. Which deductions count toward the 50% (PF, TDS, PT, ESI, loans/advances...) also needs verifying.
+DEFAULT_RECOVERY_CAP_PERCENT = Decimal('50.00')
+
+
+def cap_prior_fy_recovery(deduction_lines, wages, available, cap_percent=None, other_deductions=Decimal('0')):
+    """
+    Earlier-FY recovery is a post-tax deduction (Rudra CA):
+      recovery = max(0, min(balance, cap% x wages - other deductions this month, net pay before recovery))
+    The cap applies to TOTAL deductions in the wage period, so other deductions use up the headroom.
+    Returns (applied_lines, recovered, balance) with balance carried to the next run.
+    """
+    pct = DEFAULT_RECOVERY_CAP_PERCENT if cap_percent is None else Decimal(str(cap_percent))
+    total = sum((a for _l, a in deduction_lines), Decimal('0.00'))
+    cap = (max(Decimal('0.00'), Decimal(str(wages))) * pct / Decimal('100')).quantize(CENT)
+    headroom = cap - Decimal(str(other_deductions)).quantize(CENT)
+    allowed = max(Decimal('0.00'), min(headroom, Decimal(str(available)).quantize(CENT)))
+    left = min(total, allowed)
+    recovered = left
+    applied = []
+    for label, amt in deduction_lines:
+        take = min(amt, left)
+        left -= take
+        if take > 0:
+            applied.append((label, take.quantize(CENT)))
+    return applied, recovered.quantize(CENT), (total - recovered).quantize(CENT)
+
+
+def carry_prior_fy_recovery(corrections, balance, month, year, related_month, related_year):
+    """Carry the uncovered earlier-FY recovery to the next run, keeping it earlier-FY (idempotent)."""
+    from hr.models import DOJCorrection
+    if not corrections:
+        return None
+    parent = corrections[0]
+    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+    DOJCorrection.objects.filter(carried_from=parent, target_month=nm, target_year=ny,
+                                 reason__startswith=PRIOR_FY_CARRY_REASON).delete()
+    if balance <= 0:
+        return None
+    return DOJCorrection.objects.create(
+        tenant=parent.tenant, employee=parent.employee, old_doj=parent.old_doj, new_doj=parent.new_doj,
+        reason=f'{PRIOR_FY_CARRY_REASON}: balance after the {month:02d}/{year} cap',
+        corrected_by=parent.corrected_by, amount=-balance, carried_from=parent,
+        breakdown=[{'year': related_year, 'month': related_month, 'delta': str(-balance), 'carry': True}],
         target_month=nm, target_year=ny,
     )
 

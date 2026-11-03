@@ -58,8 +58,10 @@ class RecoveryFYTests(_Base):
         self.assertEqual(ps.gross_salary, D('26000.00'))  # taxable gross untouched
         key = [k for k in ps.deductions if k.startswith('DOJ correction recovery, earlier FY')]
         self.assertEqual(len(key), 1)
-        self.assertEqual(D(ps.deductions[key[0]]), -c.amount)
-        self.assertGreaterEqual(ps.total_deductions, -c.amount)
+        # #217: capped at 50% of wages on total deductions; the rest carries forward.
+        self.assertGreater(D(ps.deductions[key[0]]), 0)
+        self.assertEqual(D(ps.deductions[key[0]]) + ps.doj_recovery_balance, -c.amount)
+        self.assertLessEqual(ps.total_deductions, D('13000.00'))
         w = ps.deduction_reasons['DOJ correction']['warnings']
         self.assertIn(RECOVERY_PF_WARNING, w)
         self.assertTrue(any('earlier FY' in x for x in w))

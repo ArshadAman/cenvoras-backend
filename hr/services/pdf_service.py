@@ -235,6 +235,13 @@ def generate_payslip_pdf(payslip):
             comp_cell_content,
             Paragraph(f"Rs. {float(amt):,.2f}", tbl_cell),
         ])
+    if float(getattr(payslip, 'doj_recovery_balance', 0) or 0) > 0:
+        deductions_rows.append([
+            [Paragraph("Recovery balance (carried forward)", tbl_cell),
+             Paragraph("Earlier-FY DOJ correction recovery still to be recovered; not deducted this month.",
+                       reason_subtext)],
+            Paragraph(f"Rs. {float(payslip.doj_recovery_balance):,.2f}", tbl_cell),
+        ])
     deductions_rows.append([
         Paragraph("Total Deductions", tbl_cell_bold),
         Paragraph(f"Rs. {float(payslip.total_deductions):,.2f}", tbl_cell_bold),

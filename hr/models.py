@@ -511,6 +511,11 @@ class SalaryComponent(models.Model):
         return f'{self.salary_structure.name} — {self.name} ({self.type})'
 
 
+# Latest salary assignment: effective date, then most recently created (ties on the same date).
+# Used by the Employees list (current_ctc), salary details and the save path so they agree.
+LATEST_ASSIGNMENT_ORDER = ('-effective_from', '-created_at', '-id')
+
+
 class EmployeeSalaryAssignment(models.Model):
     """
     Links an employee to a SalaryStructure with an effective date and CTC.
@@ -690,7 +695,7 @@ class OvertimeRecord(models.Model):
         if self.hours:
             rate = self.hourly_rate
             if not rate or rate == Decimal('0.00'):
-                active_assign = self.employee.salary_assignments.order_by('-effective_from').first()
+                active_assign = self.employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
                 if active_assign and active_assign.monthly_ctc:
                     # 26 working days * 8 hours = 208 hours standard
                     rate = (active_assign.monthly_ctc / Decimal('208.0')).quantize(Decimal('0.01'))

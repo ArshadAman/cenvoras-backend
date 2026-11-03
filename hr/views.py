@@ -1,3 +1,4 @@
+from hr.models import LATEST_ASSIGNMENT_ORDER  # noqa: E402
 # HR DRF ViewSets and function-based views — implemented in tasks 6–16
 
 import logging
@@ -426,7 +427,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             if not effective_from:
                 effective_from = timezone.now().date()
 
-            latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by('-effective_from').first()
+            latest_assignment = EmployeeSalaryAssignment.objects.filter(employee=instance).order_by(*LATEST_ASSIGNMENT_ORDER).first()
             prev_ctc = latest_assignment.monthly_ctc if latest_assignment else Decimal('0.00')
             target_structure = latest_assignment.salary_structure if latest_assignment else None
 

@@ -430,8 +430,10 @@ def arrears_pf(lines, settings):
         if d <= 0:
             continue
         paid = Decimal(str(ln.get('paid_pf_wage', '0')))
-        ly, lm = int(ln['year']), int(ln['month'])
-        rel = datetime.date(ly, lm, calendar.monthrange(ly, lm)[1])  # ceiling of the RELATED month
+        rel = None  # ceiling of the RELATED month (None → current statutory ceiling)
+        if ln.get('year') and ln.get('month'):
+            ly, lm = int(ln['year']), int(ln['month'])
+            rel = datetime.date(ly, lm, calendar.monthrange(ly, lm)[1])
         ceiling = _pf_ceiling(settings, rel)
         wage = d if ceiling is None else max(Decimal('0.00'), min(d, ceiling - paid))
         if wage <= 0:

@@ -175,14 +175,14 @@ def _block_critical_exceptions(run, verb='approve'):
         details = []
         for exc in critical_exceptions:
             emp_label = f"{exc.employee.full_name} ({exc.employee.employee_code})" if exc.employee else "System"
-            details.append(f"{emp_label}: {exc.message}")
+            details.append(f"{emp_label}: {(exc.message or '').rstrip().rstrip('.')}")
         issues_text = "; ".join(details)
         raise ValidationError(
             f"Cannot {verb} payroll ({count} unresolved critical issue{'s' if count > 1 else ''}): {issues_text}. "
             f"Please review and resolve in the Exceptions panel before {'approving' if verb == 'approve' else 'finalising'}.")
 
 
-def _block_unconfirmed_ctc_scaling(run):
+def _block_unconfirmed_ctc_scaling(run, verb='approve'):
     """Rudra CA: no approval while any payslip still carries 'VERIFY salary structure'."""
     from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE
     flagged = [f"{ps.employee.full_name} ({ps.employee.employee_code})"
@@ -190,7 +190,7 @@ def _block_unconfirmed_ctc_scaling(run):
                if (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)]
     if flagged:
         raise ValidationError(
-            f"Cannot approve payroll: {VERIFY_SALARY_STRUCTURE} for {', '.join(flagged)}. Their salary "
+            f"Cannot {verb} payroll: {VERIFY_SALARY_STRUCTURE} for {', '.join(flagged)}. Their salary "
             "components exceed the monthly CTC. Fix the salary structure and recalculate, or confirm the "
             "scaled amounts.")
 
@@ -1606,7 +1606,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         if instance.status not in ['completed', 'calculated']:
             raise ValidationError("Only completed or calculated payroll runs can be finalised.")
-        _block_unconfirmed_ctc_scaling(instance)
+        _block_unconfirmed_ctc_scaling(instance, 'finalise')
         _block_critical_exceptions(instance, 'finalise')
 
         before_status = instance.status

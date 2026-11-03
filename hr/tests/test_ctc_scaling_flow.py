@@ -129,6 +129,8 @@ class FinaliseGuardTests(CtcScalingFlowTests):
         resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/finalise/')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('Emp X1 (X1)', str(resp.data))
+        self.assertIn('Cannot finalise payroll', str(resp.data))
+        self.assertNotIn('Cannot approve', str(resp.data))
         r.refresh_from_db()
         self.assertEqual(r.status, 'calculated')
 
@@ -138,6 +140,7 @@ class FinaliseGuardTests(CtcScalingFlowTests):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('Emp P1 (P1)', str(resp.data))
         self.assertIn('Cannot finalise payroll', str(resp.data))
+        self.assertNotIn('..', str(resp.data))
         r.refresh_from_db()
         self.assertEqual(r.status, 'calculated')
 

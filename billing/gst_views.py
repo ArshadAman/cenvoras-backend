@@ -858,7 +858,9 @@ def gstr3b_summary(request):
                 'iamt': float(net_itc_igst), 'camt': float(net_itc_cgst), 'samt': float(net_itc_sgst), 'csamt': 0.0,
             },
             'ineligible_itc': {
-                'as_per_section_17_5': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4D(1): ITC reclaimed that was reversed under 4B(2) in an earlier period. Cenvora does
+                # not track reclaims yet, so 0. Blocked s.17(5) ITC is never here: it is in 4A and 4B(1).
+                'itc_reclaimed': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
                 # 4D(2): ineligible ITC u/s 16(4) and ITC restricted due to PoS rules.
                 'others': {'iamt': float(_4d2['igst']), 'camt': float(_4d2['cgst']),
                            'samt': float(_4d2['sgst']), 'csamt': 0.0},

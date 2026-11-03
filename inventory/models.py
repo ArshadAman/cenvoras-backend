@@ -130,6 +130,8 @@ class Warehouse(models.Model):
     name = models.CharField(max_length=100)
     address = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    gstin = models.CharField(max_length=15, blank=True, default='',
+                             help_text="GSTIN this location is registered under; blank = the company GSTIN.")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -196,6 +198,9 @@ class StockTransfer(models.Model):
     transfer_date = models.DateField(auto_now_add=True)
     status = models.CharField(max_length=20, default='completed', choices=[('pending', 'Pending'), ('completed', 'Completed')])
     notes = models.TextField(blank=True, null=True)
+    # UAT P1 #15: same-GSTIN transfer = delivery challan at weighted-average cost, no GST.
+    challan_number = models.CharField(max_length=30, blank=True, default='')
+    total_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -209,6 +214,8 @@ class StockTransferItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
+    rate = models.DecimalField(max_digits=14, decimal_places=2, default=0, help_text="Weighted-average cost per unit")
+    value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
 
     def __str__(self):
         return f"{self.product.name} ({self.quantity})"

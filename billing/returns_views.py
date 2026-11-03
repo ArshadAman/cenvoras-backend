@@ -15,6 +15,7 @@ from .models import Customer, SalesInvoice
 from inventory.models import Product, ProductBatch, StockPoint, Warehouse
 
 TWOPLACES = Decimal('0.01')
+QTYPLACES = Decimal('0.001')
 
 
 def remaining_qty_for_invoice(invoice):
@@ -42,7 +43,7 @@ def remaining_qty_for_invoice(invoice):
         rem = qty - credited.get(pid, Decimal('0'))
         if rem < 0:
             rem = Decimal('0')
-        remaining[pid] = rem.quantize(TWOPLACES)
+        remaining[pid] = rem.quantize(QTYPLACES)
     return remaining
 
 
@@ -182,16 +183,25 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         if is_gstr1_filed(invoice.created_by, attrs['date']):
             raise serializers.ValidationError({'date': (
                 "That month's GSTR-1 is filed. Date the credit note in the current month.")})
+        # UAT P1 item 5 (Rudra CA): precision follows the UQC, never rounded silently.
+        from billing.uqc import quantity_error
         for it in items:
             q = Decimal(str(it.get('quantity', 0) or 0))
             if q <= 0:
                 raise serializers.ValidationError({'items': 'Quantities must be greater than 0.'})
-            if q != q.quantize(Decimal('0.01')):
-                raise serializers.ValidationError({'items': 'Quantities can have at most 2 decimals.'})
-            if attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value():
+            product = it.get('product')
+            unit = it.get('unit') or getattr(product, 'unit', None)
+            err = quantity_error(q, unit)
+            if err:
+                name = getattr(product, 'name', '') or 'item'
+                raise serializers.ValidationError({'items': f'{name}: {err}'})
+            if (attrs.get('reason', 'return') in STOCK_RETURN_REASONS and q != q.to_integral_value()):
+                # Measured unit, fractional: stock is still held in whole units (Product.stock is an
+                # integer), so a fractional return can't go back into stock yet.
                 raise serializers.ValidationError({'items': (
-                    'Returns and defective items must be whole units. For a part-quantity '
-                    'credit, choose the reason "Post-Sale Discount", "Rate Difference" or "Other".')})
+                    f'{getattr(product, "name", "") or "item"}: stock is kept in whole {unit or "units"}, so a '
+                    f'returned quantity of {q.normalize()} can\'t be put back into stock yet. Return a whole '
+                    f'quantity, or for a value-only credit choose "Post-Sale Discount", "Rate Difference" or "Other".')})
         # Rudra CA s.34(2): after the deadline a CN can't reduce GST. Offer a commercial CN without GST.
         from billing.gst_rules import cn_time_bar, cn_tax_cap_errors
         _nd = attrs.get('date') or getattr(self.instance, 'date', None)

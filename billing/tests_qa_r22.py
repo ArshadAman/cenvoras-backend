@@ -63,7 +63,8 @@ class R22CreditNoteMessageTests(R21CreditNoteDateQtyTests):
         self.assertIn(self.inv.invoice_date.strftime('%d/%m/%Y'), str(res.data))
 
     def test_whole_units_message(self):
-        self.assertIn('Returns and defective items must be whole units', str(self._post(qty="0.5", reason="defective").data))
+        # UAT P1 item 5: message now follows the UQC rule (pcs = whole numbers).
+        self.assertIn('whole number', str(self._post(qty="0.5", reason="defective").data))
 
     def test_credit_note_save_query_budget(self):
         self.assertEqual(self._post(qty=1, reason="return").status_code, 201)  # first CN seeds the chart of accounts
@@ -82,6 +83,9 @@ class R22CreditNoteMessageTests(R21CreditNoteDateQtyTests):
 class R22CreditNoteListQueryTests(R21CreditNoteDateQtyTests):
     def test_list_query_count_does_not_grow_per_note(self):
         import os
+        # UAT P1 item 5: fractional quantities need a measured unit.
+        self.product.unit = 'kg'
+        self.product.save(update_fields=['unit'])
         for _ in range(2):
             self.assertEqual(self._post(qty="0.2", reason="discount").status_code, 201)
         with CaptureQueriesContext(connection) as c2:

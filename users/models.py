@@ -45,6 +45,8 @@ class User(AbstractUser):
     pan_number = models.CharField(max_length=20, blank=True, null=True, help_text="PAN Number (optional, for India)")
     trn = models.CharField(max_length=15, blank=True, null=True, help_text="Tax Registration Number (15-digit for UAE)")
     is_vat_registered = models.BooleanField(default=False, help_text="Is the business VAT registered? (for UAE)")
+    # UAT P1 item 4 (Rudra CA): round sales invoice totals to the rupee (half up) by default.
+    auto_round_off = models.BooleanField(default=True, help_text="Round invoice totals to the nearest rupee (half up)")
     
     # Optional fields (can be added later)
     gem_id = models.CharField(max_length=50, blank=True, null=True, help_text="GEM ID (optional)")

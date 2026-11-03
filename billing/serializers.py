@@ -887,7 +887,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     invoice_date = serializers.DateField(required=False, allow_null=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    # UAT P1 item 4: round_off is computed by the server (round half up to the rupee); a value sent
+    # by the client only signals "round" (non-zero) or "don't round" (zero).
+    round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    apply_round_off = serializers.BooleanField(required=False, allow_null=True, write_only=True)
     meta = TransactionMetaSerializer(required=False)
     bank_account_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     template_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -898,7 +901,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_challans', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -1220,6 +1223,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         bank_account_id = validated_data.pop('bank_account_id', None)
         template_id = validated_data.pop('template_id', None)
         provided_total_amount = validated_data.pop('total_amount', None)
+        _apply_round_off = validated_data.pop('apply_round_off', None)
+        _client_round_off = validated_data.pop('round_off', None)
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
 
         recalculated_total = sum(
@@ -1286,9 +1291,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
-            round_off = validated_data.get('round_off', Decimal('0.00'))
+            from billing.round_off import compute_round_off, resolve_apply_round_off
             from billing.sync_service import DocumentSyncService
-            recalculated_total = sum(
+            unrounded_total = sum(
                 (
                     DocumentSyncService.calculate_line_gross(
                         item.quantity, item.price, item.discount, item.tax
@@ -1297,7 +1302,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if getattr(item, 'row_type', 'item') != 'note'
                 ),
                 Decimal('0'),
-            ) + Decimal(str(round_off or 0))
+            )
+            recalculated_total, round_off = compute_round_off(
+                unrounded_total,
+                resolve_apply_round_off(sales_invoice.created_by, _apply_round_off, _client_round_off))
             sales_invoice.total_amount = recalculated_total
             sales_invoice.round_off = round_off
             if sales_invoice.amount_paid > sales_invoice.total_amount:
@@ -1352,6 +1360,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         meta_data = validated_data.pop('meta', None)
         bank_account_id = validated_data.pop('bank_account_id', None)
         template_id = validated_data.pop('template_id', None)
+        _apply_round_off = validated_data.pop('apply_round_off', None)
+        _client_round_off = validated_data.pop('round_off', None)
+        _previous_round_off = instance.round_off
         old_customer_id = instance.customer_id
         old_status = instance.status
         old_place_of_supply = instance.place_of_supply
@@ -1446,9 +1457,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             from billing.sync_service import DocumentSyncService
             DocumentSyncService.sync_document_items(instance, all_items_to_sync, user=instance.created_by)
 
-            round_off = validated_data.get('round_off', instance.round_off)
-            instance.round_off = round_off
+            from billing.round_off import compute_round_off, resolve_apply_round_off
+            instance.round_off = Decimal('0.00')
             DocumentSyncService.recalculate_document_total(instance)
+            instance.total_amount, instance.round_off = compute_round_off(
+                instance.total_amount,
+                resolve_apply_round_off(instance.created_by, _apply_round_off, _client_round_off,
+                                        _previous_round_off))
 
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount

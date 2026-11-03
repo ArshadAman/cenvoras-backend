@@ -184,7 +184,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections',
+            'auto_round_off',
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -225,7 +226,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections',
+            'auto_round_off',
         ]
         extra_kwargs = {
             'phone': {'required': False},

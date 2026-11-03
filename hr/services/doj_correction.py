@@ -134,8 +134,9 @@ def monthly_pf_wage(employee, year, month):
         return Decimal('0.00')
     from hr.services.payroll_engine import balance_earnings_to_ctc, scaling_confirmed
     # EPF Act s.6: Basic + components flagged as DA (not matched by name).
-    basic_names = {c.name for c in a.salary_structure.components.all()
-                   if getattr(c, 'is_basic', False) or getattr(c, 'counts_as_pf_wages', False)}
+    from hr.services.payroll_engine import pf_wage_component_names
+    basic_names = {c.name for c in a.salary_structure.components.all() if getattr(c, 'is_basic', False)}
+    basic_names |= pf_wage_component_names(a)
     comps = dict(a.computed_components or {})
     if scaling_confirmed(a):  # PF wage = the scaled Basic actually paid
         types = {c.name: c.type for c in a.salary_structure.components.all()}

@@ -276,6 +276,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
         components = dict(latest.computed_components or {})
         meta_basic_pct = components.pop('_basic_pct', None)
         meta_hra_pct = components.pop('_hra_pct', None)
+        pf_wage_flags = components.pop('_pf_wages', None) or []
+        components = {k: v for k, v in components.items() if not str(k).startswith('_')}
 
         basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))
         hra = Decimal(str(components.get('HRA') or components.get('hra') or (basic * Decimal('0.50')))).quantize(Decimal('0.01'))
@@ -417,6 +419,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'effective_from': str(latest.effective_from),
             'components': components_dict,
             'earnings': earnings_dict,
+            'pf_wage_components': list(pf_wage_flags),
+            # Same-name rule (Rudra): a custom row named like a structure component takes that component's PF flag.
+            'structure_components': [{'name': c.name, 'counts_as_pf_wages': bool(c.counts_as_pf_wages or c.is_basic)}
+                                     for c in latest.salary_structure.components.all()],
             'employee_deductions': deductions_dict,
             'statutory_estimates': deductions_dict,
             'employer_contributions': employer_dict,
@@ -664,7 +670,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
             except Exception:
                 computed_from_pct = None
 
+        # Custom allowances ticked 'Counts as PF wages (DA / retaining allowance)' (default off).
+        _pf_flags = salary_data.get('pf_wage_components')
+        if not isinstance(_pf_flags, (list, tuple)):
+            # Not sent (older client / other screens): keep the flags already saved.
+            _pf_flags = list(((assignment.computed_components or {}) if assignment else {}).get('_pf_wages') or [])
         if computed_from_pct is not None:
+            if isinstance(_pf_flags, (list, tuple)):
+                computed_from_pct['_pf_wages'] = sorted({str(n).strip() for n in _pf_flags
+                                                         if str(n).strip() in computed_from_pct})
             assignment.computed_components = computed_from_pct
             assignment.save(update_fields=['computed_components'])
         elif custom_components:
@@ -696,6 +710,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     computed['_hra_pct'] = str((h * Decimal('100') / b).quantize(Decimal('0.01'))) if b > 0 else '0.00'
             except Exception:
                 pass
+            if isinstance(_pf_flags, (list, tuple)):
+                computed['_pf_wages'] = sorted({str(n).strip() for n in _pf_flags if str(n).strip() in computed})
             assignment.computed_components = computed
             assignment.save(update_fields=['computed_components'])
         else:

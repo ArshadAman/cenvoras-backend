@@ -2926,8 +2926,14 @@ class PFWageComponentsView(APIView):
             return Response({'show_banner': False, 'matches': []})
         tenant = getattr(request.user, 'active_tenant', request.user)
         dismissed = set(get_hrms_settings(tenant).pf_wages_banner_dismissed or [])
-        matches = [{'id': str(c.id), 'name': c.name, 'salary_structure': c.salary_structure.name,
+        from hr.services.payroll_engine import unflagged_custom_pf_wage_candidates
+        matches = [{'id': str(c.id), 'kind': 'structure', 'name': c.name, 'salary_structure': c.salary_structure.name,
                     'dismissed': str(c.id) in dismissed} for c in unflagged_pf_wage_candidates(tenant)]
+        for a, name, val in unflagged_custom_pf_wage_candidates(tenant):
+            key = f'custom:{a.id}:{name}'
+            matches.append({'id': key, 'kind': 'custom', 'name': name, 'assignment_id': str(a.id),
+                            'employee': f'{a.employee.full_name} ({a.employee.employee_code})',
+                            'amount': str(val), 'dismissed': key in dismissed})
         return Response({'show_banner': any(not m['dismissed'] for m in matches), 'matches': matches})
 
     def post(self, request, *args, **kwargs):
@@ -2936,6 +2942,22 @@ class PFWageComponentsView(APIView):
             return Response({'error': 'Only an admin can change PF wage flags.'}, status=403)
         tenant = getattr(request.user, 'active_tenant', request.user)
         action_name = request.data.get('action')
+        if action_name == 'flag' and request.data.get('assignment_id'):
+            # Employee-level custom allowance: add its name to the assignment's PF-wages list.
+            from hr.services.payroll_engine import PF_WAGES_META_KEY
+            a = EmployeeSalaryAssignment.objects.filter(pk=request.data.get('assignment_id'),
+                                                        employee__tenant=tenant).first()
+            name = request.data.get('name')
+            if a is None or name not in (a.computed_components or {}) or str(name).startswith('_'):
+                return Response({'error': 'Custom allowance not found.'}, status=404)
+            comps = dict(a.computed_components)
+            before = list(comps.get(PF_WAGES_META_KEY) or [])
+            comps[PF_WAGES_META_KEY] = sorted(set(before) | {name})
+            a.computed_components = comps
+            a.save(update_fields=['computed_components'])
+            audit_service.log_update(request, a, before={'pf_wage_custom_allowances': before},
+                                     after={'pf_wage_custom_allowances': comps[PF_WAGES_META_KEY]})
+            return Response({'status': 'flagged', 'assignment_id': str(a.id), 'name': name})
         if action_name == 'flag':
             comp = SalaryComponent.objects.filter(pk=request.data.get('component_id'),
                                                   salary_structure__tenant=tenant).first()
@@ -2948,7 +2970,9 @@ class PFWageComponentsView(APIView):
             return Response({'status': 'flagged', 'id': str(comp.id), 'name': comp.name})
         if action_name == 'dismiss':
             s = get_hrms_settings(tenant)
+            from hr.services.payroll_engine import unflagged_custom_pf_wage_candidates
             ids = {str(c.id) for c in unflagged_pf_wage_candidates(tenant)}
+            ids |= {f'custom:{a.id}:{n}' for a, n, _ in unflagged_custom_pf_wage_candidates(tenant)}
             s.pf_wages_banner_dismissed = sorted(set(s.pf_wages_banner_dismissed or []) | ids)
             s.save(update_fields=['pf_wages_banner_dismissed'])
             return Response({'status': 'dismissed'})

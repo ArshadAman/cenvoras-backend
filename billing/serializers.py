@@ -262,7 +262,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
-            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge',
+            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge', 'rcm_receipt_date',
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']

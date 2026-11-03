@@ -103,7 +103,7 @@ class ProductSerializer(serializers.ModelSerializer):
 class WarehouseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Warehouse
-        fields = ['id', 'name', 'address', 'is_active', 'created_by']
+        fields = ['id', 'name', 'address', 'gstin', 'is_active', 'created_by']
         read_only_fields = ['id', 'created_by']
 
 class ProductBatchSerializer(serializers.ModelSerializer):
@@ -137,27 +137,46 @@ class StockTransferItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StockTransferItem
-        fields = ['id', 'product', 'product_name', 'batch', 'batch_number', 'quantity']
+        fields = ['id', 'product', 'product_name', 'batch', 'batch_number', 'quantity', 'rate', 'value']
+        read_only_fields = ['rate', 'value']
+        extra_kwargs = {'batch': {'required': False}}
 
 class StockTransferSerializer(serializers.ModelSerializer):
+    """UAT P1 #15: same-GSTIN transfer = delivery challan at WAC, no GST, capped at stock on hand."""
     items = StockTransferItemSerializer(many=True)
     source_warehouse_name = serializers.CharField(source='source_warehouse.name', read_only=True)
     destination_warehouse_name = serializers.CharField(source='destination_warehouse.name', read_only=True)
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    warnings = serializers.SerializerMethodField()
 
     class Meta:
         model = StockTransfer
         fields = [
             'id', 'source_warehouse', 'source_warehouse_name', 
             'destination_warehouse', 'destination_warehouse_name',
-            'transfer_date', 'status', 'notes', 'items', 'created_by'
+            'transfer_date', 'status', 'notes', 'items', 'created_by',
+            'challan_number', 'total_value', 'warnings',
         ]
-        read_only_fields = ['id', 'transfer_date', 'created_by']
+        read_only_fields = ['id', 'transfer_date', 'created_by', 'challan_number', 'total_value']
+
+    def get_warnings(self, obj):
+        from .transfer_service import transfer_warnings
+        return transfer_warnings(obj.total_value or 0)
+
+    def update(self, instance, validated_data):
+        # Stock and the journal are posted once at creation; editing lines/locations would desync them.
+        validated_data.pop('items', None)
+        for f in ('source_warehouse', 'destination_warehouse'):
+            validated_data.pop(f, None)
+        return super().update(instance, validated_data)
 
     def create(self, validated_data):
         from django.db import transaction
         from .models import StockPoint
         from .stock_sync import reconcile_product_stock, resolve_batch_for_product
+        from .transfer_service import (
+            TransferError, next_challan_number, post_transfer_journal, validate_transfer,
+        )
 
         items_data = validated_data.pop('items')
         request = self.context['request']
@@ -168,16 +187,25 @@ class StockTransferSerializer(serializers.ModelSerializer):
         validated_data['status'] = 'pending'
 
         with transaction.atomic():
-            transfer = StockTransfer.objects.create(**validated_data)
-
+            lines = []
             for item_data in items_data:
                 product = item_data['product']
                 batch = item_data.get('batch') or resolve_batch_for_product(product)
+                lines.append((product, batch, item_data['quantity']))
+            try:
+                total_value, valued = validate_transfer(
+                    tenant, validated_data.get('source_warehouse'), validated_data.get('destination_warehouse'), lines)
+            except TransferError as exc:
+                raise serializers.ValidationError({'items': exc.errors})
+
+            validated_data['challan_number'] = next_challan_number(tenant)
+            validated_data['total_value'] = total_value
+            transfer = StockTransfer.objects.create(**validated_data)
+
+            for v in valued:
                 StockTransferItem.objects.create(
-                    transfer=transfer,
-                    product=product,
-                    batch=batch,
-                    quantity=item_data['quantity'],
+                    transfer=transfer, product=v['product'], batch=v['batch'],
+                    quantity=v['qty'], rate=v['rate'], value=v['value'],
                 )
 
             if target_status == 'completed':
@@ -187,6 +215,10 @@ class StockTransferSerializer(serializers.ModelSerializer):
                         batch=item.batch,
                         defaults={'quantity': 0},
                     )
+                    if int(source_stock.quantity or 0) < int(item.quantity):
+                        raise serializers.ValidationError({'items': [
+                            f"{item.product.name}: only {source_stock.quantity} in stock at "
+                            f"{transfer.source_warehouse.name}."]})
                     source_stock.quantity = int(source_stock.quantity or 0) - int(item.quantity)
                     source_stock.save(update_fields=['quantity', 'last_updated'])
 
@@ -202,6 +234,7 @@ class StockTransferSerializer(serializers.ModelSerializer):
                 transfer._stock_applied_inline = True
                 transfer.status = 'completed'
                 transfer.save(update_fields=['status'])
+                post_transfer_journal(transfer, tenant, entered_by=request.user)
 
         return transfer
 

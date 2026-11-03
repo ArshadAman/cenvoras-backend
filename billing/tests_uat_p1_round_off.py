@@ -81,3 +81,16 @@ class InvoiceRoundOffApiTests(FourFixesBase):
         self.tenant.save(update_fields=['auto_round_off'])
         inv2 = self._post(invoice_number="")
         self.assertEqual(inv2.round_off, Decimal('0.00'))
+
+    def test_gstr1_val_is_rounded_total_txval_and_tax_unrounded(self):
+        """Rudra: GSTR-1 'val' = rounded invoice value; txval and tax amounts stay unrounded."""
+        from billing.gstr1_compute import compute_gstr1
+        inv = self._post()
+        out = compute_gstr1(self.tenant, inv.invoice_date, inv.invoice_date)
+        rows = [i for b in out['b2b'] for i in b['inv'] if i['inum'] == inv.invoice_number]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(Decimal(str(row['val'])), Decimal('1158.00'))
+        self.assertEqual(Decimal(str(row['txval'])), Decimal('980.93'))
+        tax = Decimal(str(row['camt'])) + Decimal(str(row['samt'])) + Decimal(str(row['iamt']))
+        self.assertEqual(tax, Decimal('176.57'))

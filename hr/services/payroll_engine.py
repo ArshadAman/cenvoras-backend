@@ -368,6 +368,49 @@ def compute_pt_arrears(employee, related_month, related_year, paid_gross, revise
     return (after - before).quantize(Decimal('0.01'))
 
 
+SPECIAL_ALLOWANCE = 'Special Allowance'
+
+
+def balance_earnings_to_ctc(full_earnings, monthly_ctc):
+    """
+    Un-prorated monthly earnings balanced so gross == monthly CTC (Rudra CA).
+      - below CTC: the shortfall goes to Special Allowance (as before);
+      - above CTC: Special Allowance is reduced, floored at 0;
+      - if the other components alone still exceed CTC, all earnings are scaled down pro rata to
+        CTC and a VERIFY note is returned (the salary structure needs fixing).
+    Cenvora's CTC excludes employer PF/ESI (they are shown on top as total employer cost), so
+    nothing is subtracted for them. A CTC of 0 (not set) leaves the components as they are.
+    Returns (earnings_dict, gross, notes).
+    """
+    D = Decimal
+    earnings = {k: D(str(v)) for k, v in (full_earnings or {}).items()}
+    ctc = D(str(monthly_ctc or 0))
+    notes = []
+    total = sum(earnings.values(), D('0'))
+    if ctc <= 0:
+        return earnings, total, notes
+    if total < ctc:
+        earnings[SPECIAL_ALLOWANCE] = earnings.get(SPECIAL_ALLOWANCE, D('0')) + (ctc - total)
+    elif total > ctc:
+        excess = total - ctc
+        sa = earnings.get(SPECIAL_ALLOWANCE)
+        if sa is not None:
+            cut = min(sa, excess)
+            earnings[SPECIAL_ALLOWANCE] = sa - cut
+            excess -= cut
+        if excess > 0:
+            others = sum(earnings.values(), D('0'))
+            factor = ctc / others
+            earnings = {k: (v * factor).quantize(D('0.01')) for k, v in earnings.items()}
+            drift = ctc - sum(earnings.values(), D('0'))
+            if drift and earnings:
+                k = max(earnings, key=lambda n: earnings[n])
+                earnings[k] += drift
+            notes.append('Salary components exceed monthly CTC; scaled down to CTC, VERIFY the salary structure')
+    gross = sum(earnings.values(), D('0'))
+    return earnings, gross, notes
+
+
 def compute_gross(employee, month, year):
     """
     Computes prorated gross salary, differentiating earning components from deduction components.
@@ -403,8 +446,7 @@ def compute_gross(employee, month, year):
     # Separate earnings from deductions based on SalaryStructure component types
     structure_components = {c.name: c for c in assignment.salary_structure.components.all()}
     
-    total_monthly_gross = Decimal('0.0')
-    earnings_map = {}
+    full_earnings = {}
     custom_deductions_map = {}
 
     for comp_name, value_str in assignment.computed_components.items():
@@ -422,17 +464,13 @@ def compute_gross(employee, month, year):
             prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
             custom_deductions_map[comp_name] = prorated_val
         else:
-            total_monthly_gross += val
-            prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
-            earnings_map[comp_name] = prorated_val
+            full_earnings[comp_name] = val
 
-    # Balancing Component: If total earnings < monthly_ctc and no component covers it,
-    # allocate remainder to Special Allowance so employee receives full assigned compensation.
-    monthly_ctc = Decimal(str(assignment.monthly_ctc))
-    if total_monthly_gross < monthly_ctc and 'Special Allowance' not in earnings_map:
-        remainder = monthly_ctc - total_monthly_gross
-        total_monthly_gross = monthly_ctc
-        earnings_map['Special Allowance'] = (remainder * proration_factor).quantize(Decimal('0.01'))
+    # Rudra CA: monthly gross = monthly CTC (employer PF/ESI are not part of Cenvora's CTC) and
+    # never above it. Special Allowance balances in both directions, floored at 0.
+    full_earnings, total_monthly_gross, _gross_notes = balance_earnings_to_ctc(
+        full_earnings, assignment.monthly_ctc)
+    earnings_map = {k: (v * proration_factor).quantize(Decimal('0.01')) for k, v in full_earnings.items()}
 
     prorated_gross = (total_monthly_gross * proration_factor).quantize(Decimal('0.01'))
 

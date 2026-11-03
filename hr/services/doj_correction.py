@@ -109,21 +109,19 @@ def monthly_full_gross(employee, year, month):
     a = _assignment(employee, year, month)
     if not a:
         return Decimal('0.00')
+    from hr.services.payroll_engine import balance_earnings_to_ctc
     types = {c.name: c.type for c in a.salary_structure.components.all()}
-    total = Decimal('0.00')
+    earnings = {}
     for name, val in (a.computed_components or {}).items():
         if str(name).startswith('_') or types.get(name, 'earning') == 'deduction':
             continue
         try:
-            total += Decimal(str(val))
+            earnings[name] = Decimal(str(val))
         except Exception:
             continue
-    # Same balancing as the payroll engine (calculate_prorated_gross): if the earning components
-    # are below the monthly CTC and there is no Special Allowance, the engine pays up to monthly CTC.
-    ctc = Decimal(str(a.monthly_ctc or 0))
-    if total < ctc and 'Special Allowance' not in (a.computed_components or {}):
-        total = ctc
-    return total.quantize(CENT)
+    # Same rule as the payroll engine: gross == monthly CTC, never above it.
+    _e, gross, _n = balance_earnings_to_ctc(earnings, a.monthly_ctc)
+    return gross.quantize(CENT)
 
 
 PF_WAGE_NAMES = {'basic', 'da', 'dearness allowance', 'dearness_allowance'}

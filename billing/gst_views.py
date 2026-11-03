@@ -94,6 +94,7 @@ def hsn_summary_report(request):
             created_by=tenant,
             original_invoice__isnull=False,
             original_invoice__status='final',
+            gst_time_barred=False,  # time-barred CNs never enter GST tables (#191)
         ).select_related('original_invoice').prefetch_related('items__product')
         if from_date:
             credit_notes = credit_notes.filter(date__gte=from_date)

@@ -837,6 +837,20 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
         return data
 
 
+def same_date_assignment_warnings(employee, effective_from, exclude_pk=None):
+    """Shared (#230): warning when the employee already has an assignment with this effective date."""
+    import datetime as _dt
+    if isinstance(effective_from, str):
+        effective_from = _dt.date.fromisoformat(effective_from[:10])
+    qs = EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=effective_from)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    if not qs.exists():
+        return []
+    return [f'This replaces the assignment effective {effective_from:%d-%m-%Y}. '
+            'Payroll uses the most recently saved assignment for that date.']
+
+
 class SalaryComponentSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalaryComponent
@@ -923,11 +937,9 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
 
     def _same_date_warning(self, assignment):
         """Warn (not block) when another assignment already has this effective date: the newest one wins."""
-        dup = EmployeeSalaryAssignment.objects.filter(
-            employee=assignment.employee, effective_from=assignment.effective_from).exclude(pk=assignment.pk)
-        if dup.exists():
-            self._warnings = [f'This replaces the assignment effective {assignment.effective_from:%d-%m-%Y}. '
-                              'Payroll uses the most recently saved assignment for that date.']
+        w = same_date_assignment_warnings(assignment.employee, assignment.effective_from, exclude_pk=assignment.pk)
+        if w:
+            self._warnings = w
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

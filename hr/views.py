@@ -520,10 +520,13 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 'monthly_ctc': new_ctc
             }
 
+            from hr.serializers import same_date_assignment_warnings
+            revise_warnings = same_date_assignment_warnings(instance, effective_from)
+            # Update the assignment payroll actually uses for that date (same tie-break as #229/#230).
             existing_assignment = EmployeeSalaryAssignment.objects.filter(
                 employee=instance,
                 effective_from=effective_from
-            ).first()
+            ).order_by(*LATEST_ASSIGNMENT_ORDER).first()
 
             if existing_assignment:
                 serializer = EmployeeSalaryAssignmentSerializer(
@@ -583,6 +586,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                 'status': 'Salary updated successfully',
                 'previous_ctc': str(prev_ctc),
                 'new_ctc': str(new_ctc),
+                **({'warnings': revise_warnings} if revise_warnings else {}),
             }, status=status.HTTP_200_OK)
         except ValidationError as ve:
             detail = ve.detail if hasattr(ve, 'detail') else str(ve)

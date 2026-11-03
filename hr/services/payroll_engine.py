@@ -608,15 +608,17 @@ def compute_payslip_for_employee(employee, payroll_run):
         employee, available_for_loans, settings.allow_negative_salary
     )
 
-    # Earlier-FY DOJ recovery: capped at doj_recovery_cap_percent of this month's wages (default 50%,
-    # Code on Wages s.18, VERIFY limit/applicability) and at the pay left, so net never goes below 0.
+    # Earlier-FY DOJ recovery = min(balance, cap% x wages - other deductions, net before recovery), >= 0.
+    # Default cap 50% of wages on TOTAL deductions (Code on Wages s.18). VERIFY limit/applicability,
+    # and which deductions count toward the 50%.
     from hr.services.doj_correction import cap_prior_fy_recovery, carry_prior_fy_recovery
     doj_recovery_balance = Decimal('0.00')
     if doj['corrections']:
         doj['deduction_lines'], doj_post_tax, doj_recovery_balance = cap_prior_fy_recovery(
             doj['deduction_lines'], gross_with_earnings,
             gross_with_earnings - statutory_deductions - advance_rec - loan_rec,
-            getattr(settings, 'doj_recovery_cap_percent', None))
+            getattr(settings, 'doj_recovery_cap_percent', None),
+            other_deductions=statutory_deductions + advance_rec + loan_rec)
         rm, ry = doj.get('prior_fy_month', (int(month), int(year)))
         carry_prior_fy_recovery(doj['corrections'], doj_recovery_balance, int(month), int(year), rm, ry)
     raw_total_deductions = (statutory_deductions + advance_rec + loan_rec + doj_post_tax).quantize(Decimal('0.01'))
@@ -750,7 +752,7 @@ def compute_payslip_for_employee(employee, payroll_run):
             f"ceiling of the months the arrears relate to. Report in the ECR arrears columns.")}
     if doj_recovery_balance > 0:
         doj['warnings'].append(f'Earlier-FY recovery balance ₹{doj_recovery_balance} carried to the next payroll '
-                               f'(monthly cap {getattr(settings, "doj_recovery_cap_percent", 50)}% of wages).')
+                               f'(total deductions capped at {getattr(settings, "doj_recovery_cap_percent", 50)}% of wages).')
     if doj['warnings']:
         deduction_reasons['DOJ correction'] = {'amount': '0', 'reason': ' '.join(doj['warnings']),
                                                'warnings': doj['warnings']}

@@ -337,20 +337,23 @@ def carry_excess_recovery(corrections, excess, month, year):
 
 
 PRIOR_FY_CARRY_REASON = 'Carried forward (earlier-FY recovery)'
-# VERIFY limit/applicability: Code on Wages s.18 caps total deductions at 50% of wages.
+# VERIFY limit/applicability: Code on Wages s.18 caps TOTAL deductions in the wage period at 50% of
+# wages. Which deductions count toward the 50% (PF, TDS, PT, ESI, loans/advances...) also needs verifying.
 DEFAULT_RECOVERY_CAP_PERCENT = Decimal('50.00')
 
 
-def cap_prior_fy_recovery(deduction_lines, wages, available, cap_percent=None):
+def cap_prior_fy_recovery(deduction_lines, wages, available, cap_percent=None, other_deductions=Decimal('0')):
     """
-    Earlier-FY recovery is a post-tax deduction. Cap it at cap_percent of the month's wages and at
-    the pay left after all other deductions, so net pay never goes below 0.
+    Earlier-FY recovery is a post-tax deduction (Rudra CA):
+      recovery = max(0, min(balance, cap% x wages - other deductions this month, net pay before recovery))
+    The cap applies to TOTAL deductions in the wage period, so other deductions use up the headroom.
     Returns (applied_lines, recovered, balance) with balance carried to the next run.
     """
     pct = DEFAULT_RECOVERY_CAP_PERCENT if cap_percent is None else Decimal(str(cap_percent))
     total = sum((a for _l, a in deduction_lines), Decimal('0.00'))
     cap = (max(Decimal('0.00'), Decimal(str(wages))) * pct / Decimal('100')).quantize(CENT)
-    allowed = max(Decimal('0.00'), min(cap, Decimal(str(available)).quantize(CENT)))
+    headroom = cap - Decimal(str(other_deductions)).quantize(CENT)
+    allowed = max(Decimal('0.00'), min(headroom, Decimal(str(available)).quantize(CENT)))
     left = min(total, allowed)
     recovered = left
     applied = []

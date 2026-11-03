@@ -444,6 +444,10 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         except Exception:
             pass
 
+    # UAT P1 #11: least-access default. A team member created without an
+    # explicit role becomes a self-service Employee, never Admin/Manager.
+    DEFAULT_TEAM_ROLE = 'employee'
+
     def create(self, validated_data):
         admin_user = self.context['request'].user
         
@@ -451,6 +455,8 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         if admin_user.role != 'admin':
             raise serializers.ValidationError("Only Admins can spawn team members.")
             
+        if not validated_data.get('role') or 'role' not in self.initial_data:
+            validated_data['role'] = self.DEFAULT_TEAM_ROLE
         validated_data['username'] = validated_data['email']
         password = validated_data.pop('password', None)
         if not password:
@@ -465,12 +471,21 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         )
         member.set_password(password)
         member.save()
+        self._write_team_audit('UPDATE', member, {'event': 'role_change',
+            'field': 'role', 'old': None, 'new': member.role,
+        })
         # AuditLog CREATE is written by the global post_save signal — avoid double-logging here.
         return member
 
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
+        old_role = instance.role
         instance = super().update(instance, validated_data)
+        if 'role' in validated_data and validated_data['role'] != old_role:
+            # UAT P1 #11: every role change is audit-logged (who, when, old, new).
+            self._write_team_audit('UPDATE', instance, {'event': 'role_change',
+                'field': 'role', 'old': old_role, 'new': instance.role,
+            })
         if password:
             instance.set_password(password)
             instance.save()

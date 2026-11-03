@@ -2902,3 +2902,50 @@ class EmployeeTaxDeclarationViewSet(viewsets.ModelViewSet):
         audit_service.log_delete(self.request, instance)
         instance.delete()
 
+
+
+class PFWageComponentsView(APIView):
+    """
+    One-time admin banner (Rudra CA): salary components that look like DA / retaining allowance but are
+    not flagged 'Counts as PF wages'. GET lists them; POST {action:'flag', component_id} sets the flag;
+    POST {action:'dismiss'} hides the banner for the current matches (it shows again for a new match).
+    The flag also drives DOJ-correction PF arrears.
+    """
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def _admin(self, request):
+        return getattr(request.user, 'role', None) == 'admin'
+
+    def get(self, request, *args, **kwargs):
+        from hr.services.payroll_engine import get_hrms_settings, unflagged_pf_wage_candidates
+        if not self._admin(request):
+            return Response({'show_banner': False, 'matches': []})
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        dismissed = set(get_hrms_settings(tenant).pf_wages_banner_dismissed or [])
+        matches = [{'id': str(c.id), 'name': c.name, 'salary_structure': c.salary_structure.name,
+                    'dismissed': str(c.id) in dismissed} for c in unflagged_pf_wage_candidates(tenant)]
+        return Response({'show_banner': any(not m['dismissed'] for m in matches), 'matches': matches})
+
+    def post(self, request, *args, **kwargs):
+        from hr.services.payroll_engine import get_hrms_settings, unflagged_pf_wage_candidates
+        if not self._admin(request):
+            return Response({'error': 'Only an admin can change PF wage flags.'}, status=403)
+        tenant = getattr(request.user, 'active_tenant', request.user)
+        action_name = request.data.get('action')
+        if action_name == 'flag':
+            comp = SalaryComponent.objects.filter(pk=request.data.get('component_id'),
+                                                  salary_structure__tenant=tenant).first()
+            if comp is None:
+                return Response({'error': 'Salary component not found.'}, status=404)
+            comp.counts_as_pf_wages = True
+            comp.save(update_fields=['counts_as_pf_wages'])
+            audit_service.log_update(request, comp, before={'counts_as_pf_wages': False},
+                                     after={'counts_as_pf_wages': True})
+            return Response({'status': 'flagged', 'id': str(comp.id), 'name': comp.name})
+        if action_name == 'dismiss':
+            s = get_hrms_settings(tenant)
+            ids = {str(c.id) for c in unflagged_pf_wage_candidates(tenant)}
+            s.pf_wages_banner_dismissed = sorted(set(s.pf_wages_banner_dismissed or []) | ids)
+            s.save(update_fields=['pf_wages_banner_dismissed'])
+            return Response({'status': 'dismissed'})
+        return Response({'error': "action must be 'flag' or 'dismiss'."}, status=400)

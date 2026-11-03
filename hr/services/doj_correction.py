@@ -125,7 +125,6 @@ def monthly_full_gross(employee, year, month):
     return gross.quantize(CENT)
 
 
-PF_WAGE_NAMES = {'basic', 'da', 'dearness allowance', 'dearness_allowance'}
 
 
 def monthly_pf_wage(employee, year, month):
@@ -134,7 +133,9 @@ def monthly_pf_wage(employee, year, month):
     if not a:
         return Decimal('0.00')
     from hr.services.payroll_engine import balance_earnings_to_ctc, scaling_confirmed
-    basic_names = {c.name for c in a.salary_structure.components.all() if getattr(c, 'is_basic', False)}
+    # EPF Act s.6: Basic + components flagged as DA (not matched by name).
+    basic_names = {c.name for c in a.salary_structure.components.all()
+                   if getattr(c, 'is_basic', False) or getattr(c, 'counts_as_pf_wages', False)}
     comps = dict(a.computed_components or {})
     if scaling_confirmed(a):  # PF wage = the scaled Basic actually paid
         types = {c.name: c.type for c in a.salary_structure.components.all()}
@@ -144,7 +145,7 @@ def monthly_pf_wage(employee, year, month):
     total = Decimal('0.00')
     found = False
     for name, val in comps.items():
-        if name in basic_names or str(name).strip().lower() in PF_WAGE_NAMES:
+        if name in basic_names or (not basic_names and str(name).strip().lower() == 'basic'):
             try:
                 total += Decimal(str(val))
                 found = True
@@ -412,16 +413,16 @@ def recomputable_correction(employee):
         applied_payslip__isnull=True, carried_from__isnull=True).order_by('-created_at').first()
 
 
-def _pf_ceiling(settings):
+def _pf_ceiling(settings, on_date=None):
+    from hr.services.payroll_engine import pf_wage_ceiling
     if settings is not None and not bool(getattr(settings, 'pf_apply_ceiling', True)):
         return None
-    return Decimal(str(getattr(settings, 'pf_wage_ceiling', None) or 15000))
+    return pf_wage_ceiling(on_date, settings)
 
 
 def arrears_pf(lines, settings):
     """PF on the arrears' PF wage, capped per RELATED month at that month's ceiling."""
     from hr.services.payroll_engine import compute_pf
-    ceiling = _pf_ceiling(settings)
     out = {'wages': Decimal('0.00'), 'employee_pf': Decimal('0.00'), 'employer_pf': Decimal('0.00'),
            'employer_epf': Decimal('0.00'), 'employer_eps': Decimal('0.00')}
     for ln in lines:
@@ -429,11 +430,16 @@ def arrears_pf(lines, settings):
         if d <= 0:
             continue
         paid = Decimal(str(ln.get('paid_pf_wage', '0')))
+        rel = None  # ceiling of the RELATED month (None → current statutory ceiling)
+        if ln.get('year') and ln.get('month'):
+            ly, lm = int(ln['year']), int(ln['month'])
+            rel = datetime.date(ly, lm, calendar.monthrange(ly, lm)[1])
+        ceiling = _pf_ceiling(settings, rel)
         wage = d if ceiling is None else max(Decimal('0.00'), min(d, ceiling - paid))
         if wage <= 0:
             continue
-        before = compute_pf(paid, settings)
-        after = compute_pf(paid + wage, settings)
+        before = compute_pf(paid, settings, on_date=rel)
+        after = compute_pf(paid + wage, settings, on_date=rel)
         out['wages'] += wage
         for k in ('employee_pf', 'employer_pf', 'employer_epf', 'employer_eps'):
             out[k] += Decimal(str(after[k])) - Decimal(str(before[k]))

@@ -483,6 +483,13 @@ class SalaryComponent(models.Model):
         default=False,
         help_text='Designates this component as the Basic salary component.',
     )
+    # EPF Act s.6: PF wages = Basic + Dearness Allowance + retaining allowance. Off by default;
+    # never auto-set from the component's name (admins flag it, e.g. via the PF-wages banner).
+    counts_as_pf_wages = models.BooleanField(
+        default=False,
+        help_text='Counts as PF wages (DA / retaining allowance): added to Basic for PF, capped at the PF wage ceiling. '
+                  'Also used for DOJ-correction PF arrears.',
+    )
     # For fixed: INR amount. For pct_*: percentage value (e.g. 40.00 = 40%).
     value = models.DecimalField(max_digits=10, decimal_places=4, default=0)
     percentage = models.DecimalField(max_digits=7, decimal_places=4, default=0)
@@ -1204,6 +1211,8 @@ class HRMSSettings(models.Model):
     payroll_frequency = models.CharField(max_length=20, default='monthly')
     payroll_cutoff_day = models.PositiveSmallIntegerField(default=25)
     default_working_days = models.PositiveSmallIntegerField(default=26)
+    # One-time admin banner: component ids an admin chose not to flag as PF wages.
+    pf_wages_banner_dismissed = models.JSONField(default=list, blank=True)
     lop_calculation_rule = models.CharField(
         max_length=30,
         choices=[

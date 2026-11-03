@@ -103,3 +103,56 @@ class ItcRcmTests(FourFixesBase):
         self.assertEqual((a5['camt'], a5['samt']), (0.0, 0.0))
         pay = res.data['table_6_1_payment']
         self.assertEqual(pay['cgst']['tax_paid_cash'], 250.0)  # RCM is paid in cash
+
+    def _3b(self, d=None):
+        d = str(d or date.today())
+        res = self.client.get(f'/api/billing/gst/gstr3b/?from={d}&to={d}')
+        self.assertEqual(res.status_code, 200, res.data)
+        return res.data['table_4_itc']
+
+    def test_blocked_17_5_in_4a_reversed_in_4b1(self):
+        """Rudra (#214): blocked ITC still shows in 4A and is reversed in 4B(1); cost in books."""
+        self._post(self.reg, [self._line(itc_blocked=True), self._line()])
+        t4 = self._3b()
+        a5 = t4['itc_available']['all_other_itc']
+        self.assertEqual((a5['camt'], a5['samt']), (180.0, 180.0))       # gross, incl. blocked
+        b1 = t4['itc_reversed']['as_per_rules']
+        self.assertEqual((b1['camt'], b1['samt']), (90.0, 90.0))         # blocked part reversed
+        net = t4['net_itc_available']
+        self.assertEqual((net['camt'], net['samt']), (90.0, 90.0))
+        self.assertEqual(t4['ineligible_itc']['others']['camt'], 0.0)
+        self.assertIn('VERIFY table mapping', t4['mapping_note'])
+
+    def test_pos_lost_itc_in_4d2_not_4a(self):
+        """Rudra (#214): ITC lost to PoS rules goes to 4D(2) only, and to cost in the books."""
+        other = Vendor.objects.create(name='MH Hotel', gstin='27AAPFU0939F1ZV', state='Maharashtra',
+                                      created_by=self.tenant)
+        bill = self._post(other, [self._line()], place_of_supply='Maharashtra', gst_treatment='intrastate')
+        c = bill_tax_classification(bill)
+        self.assertEqual(c['lost_tax'], Decimal('180.00'))
+        self.assertEqual(sum(c['itc_4a_normal'].values(), Decimal('0')), Decimal('0'))
+        self.assertEqual(self._gl(bill, '1301') + self._gl(bill, '1302'), Decimal('0'))
+        self.assertEqual(self._gl(bill, '6001'), Decimal('1180.00'))
+        self._balanced(bill)
+        t4 = self._3b()
+        self.assertEqual(t4['itc_available']['all_other_itc']['camt'], 0.0)
+        d2 = t4['ineligible_itc']['others']
+        self.assertEqual((d2['camt'], d2['samt']), (90.0, 90.0))
+
+    def test_s16_4_time_barred_in_4d2(self):
+        from django.utils import timezone
+        from billing.itc import s16_4_deadline, itc_time_barred
+        self.assertEqual(s16_4_deadline(date(2024, 3, 31)), date(2024, 11, 30))
+        self.assertEqual(s16_4_deadline(date(2024, 4, 1)), date(2025, 11, 30))
+        old = date(2023, 6, 15)  # FY 2023-24 -> deadline 30-11-2024, recorded today (2026) -> barred
+        bill = PurchaseBill.objects.create(created_by=self.tenant, bill_number='OLD-1', bill_date=old,
+                                           vendor=self.reg, vendor_name=self.reg.name, vendor_gstin=REG_GSTIN,
+                                           total_amount=Decimal('1180'))
+        PurchaseBillItem.objects.create(purchase_bill=bill, product=self.product, quantity=1, price=Decimal('1000'),
+                                        tax=Decimal('18'), amount=Decimal('1000'), hsn_sac_code='847130')
+        self.assertTrue(itc_time_barred(bill))
+        c = bill_tax_classification(bill)
+        self.assertEqual(c['lost_4d2']['cgst'], Decimal('90.00'))
+        self.assertEqual(sum(c['itc_normal'].values(), Decimal('0')), Decimal('0'))
+        bill.created_at = timezone.make_aware(timezone.datetime(2023, 7, 1))
+        self.assertFalse(itc_time_barred(bill))

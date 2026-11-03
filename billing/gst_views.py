@@ -688,6 +688,9 @@ def gstr3b_summary(request):
     # u/s 17(5); RCM ITC goes to 4A(3) and RCM tax to 3.1(d) (paid in cash, not set off).
     from billing.itc import itc_summary
     _itc = itc_summary(tenant, from_date, to_date)
+    # Rudra (#214): 4A is GROSS (incl. s.17(5) blocked), reversed in 4B(1); PoS / s.16(4) lost ITC
+    # is shown only in 4D(2). Net ITC (4C) = 4A - 4B is unchanged: itc_normal/itc_rcm are net.
+    _4a_n, _4a_r, _4b1, _4d2 = _itc['itc_4a_normal'], _itc['itc_4a_rcm'], _itc['blocked_split'], _itc['lost_4d2']
     itc_igst = _itc['itc_normal']['igst']
     itc_cgst = _itc['itc_normal']['cgst']
     itc_sgst = _itc['itc_normal']['sgst']
@@ -834,15 +837,18 @@ def gstr3b_summary(request):
             'itc_available': {
                 'import_goods': {'iamt': 0.0, 'csamt': 0.0},
                 'import_services': {'iamt': 0.0, 'csamt': 0.0},
-                'inward_reverse_charge': {'iamt': float(rcm_itc_igst), 'camt': float(rcm_itc_cgst),
-                                          'samt': float(rcm_itc_sgst), 'csamt': 0.0},
+                'inward_reverse_charge': {'iamt': float(_4a_r['igst']), 'camt': float(_4a_r['cgst']),
+                                          'samt': float(_4a_r['sgst']), 'csamt': 0.0},
                 'inward_isd': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
                 'all_other_itc': {
-                    'iamt': float(itc_igst), 'camt': float(itc_cgst), 'samt': float(itc_sgst), 'csamt': 0.0,
+                    'iamt': float(_4a_n['igst']), 'camt': float(_4a_n['cgst']), 'samt': float(_4a_n['sgst']),
+                    'csamt': 0.0,
                 },
             },
             'itc_reversed': {
-                'as_per_rules': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4B(1): Rules 38, 42, 43 and s.17(5). Cenvora fills only the s.17(5) blocked part.
+                'as_per_rules': {'iamt': float(_4b1['igst']), 'camt': float(_4b1['cgst']),
+                                 'samt': float(_4b1['sgst']), 'csamt': 0.0},
                 'others': {
                     'iamt': float(rev_igst), 'camt': float(rev_cgst), 'samt': float(rev_sgst), 'csamt': 0.0,
                 },
@@ -852,8 +858,12 @@ def gstr3b_summary(request):
             },
             'ineligible_itc': {
                 'as_per_section_17_5': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
-                'others': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4D(2): ineligible ITC u/s 16(4) and ITC restricted due to PoS rules.
+                'others': {'iamt': float(_4d2['igst']), 'camt': float(_4d2['cgst']),
+                           'samt': float(_4d2['sgst']), 'csamt': 0.0},
             },
+            'mapping_note': ('VERIFY table mapping against current 3B instructions '
+                             '(Notfn 14/2022-CT, Circular 170/02/2022)'),
         },
         'table_5_exempt': {
             'inter_state': 0.0, 'intra_state': 0.0,

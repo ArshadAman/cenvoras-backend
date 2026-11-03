@@ -523,9 +523,11 @@ class AccountingService:
                                      ('sgst', 'input_sgst', 'SGST')):
                 if itc[key] > 0:
                     _gl(accounts[code], itc[key], 0, f"Input {label} for Bill {purchase_bill.bill_number}")
-            to_cost = cls_['blocked_tax'] + cls_['ineligible_tax']
+            to_cost = cls_['blocked_tax'] + cls_['ineligible_tax'] + cls_['lost_tax']
             if to_cost > 0:
                 why = []
+                if cls_['lost_tax'] > 0:
+                    why.append('ITC lost: PoS rules / s.16(4) time limit')
                 if cls_['blocked_tax'] > 0:
                     why.append('ITC blocked u/s 17(5)')
                 if cls_['ineligible_tax'] > 0:

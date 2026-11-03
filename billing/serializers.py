@@ -296,6 +296,16 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 exclude_pk = self.instance.pk if self.instance else None
                 if number_taken(tenant, 'purchase_bill', bill_number, exclude_pk=exclude_pk):
                     _raise_number_conflict(DuplicateDocumentNumber(bill_number, 'purchase_bill'))
+        # Import of services (IGST Act s.5(3), Rudra): on an Overseas bill every SAC (chapter 99) line is
+        # reverse charge - the foreign supplier charges no GST; we pay IGST under RCM.
+        treatment = (data.get('gst_treatment', getattr(self.instance, 'gst_treatment', None)) or '').strip().lower()
+        if not treatment and vendor is not None and getattr(vendor, 'gst_type', '') == 'overseas':
+            data['gst_treatment'] = treatment = 'overseas'
+        if items is not None and treatment == 'overseas':
+            from billing.itc import is_import_of_services_line
+            for it in items:
+                if is_import_of_services_line(it.get('hsn_sac_code')):
+                    it['is_rcm'] = True
         # UAT P1 item 7 (Rudra CA): an unregistered vendor can't charge GST. Tax is locked at 0
         # on every line that isn't flagged "RCM applicable".
         if items is not None:
@@ -528,6 +538,9 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         buyer = get_seller_state_code(tenant) if tenant else None
         supplier = get_purchase_supplier_state_code(instance, buyer)
         is_interstate = bool(buyer and supplier and buyer != supplier)
+        from billing.gst_rules import INTERSTATE_TREATMENTS
+        if (getattr(instance, 'gst_treatment', '') or '').strip().lower() in INTERSTATE_TREATMENTS:
+            is_interstate = True  # import of services / SEZ: always IGST (IGST Act s.7(4), s.5(3))
 
         taxable_total = Decimal('0.00')
         cgst_total = Decimal('0.00')
@@ -552,6 +565,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 items_out[idx]['igst'] = str(igst)
                 items_out[idx]['tax_rate'] = str(tax_rate)
                 items_out[idx]['tax_display'] = f"{tax_rate}%" if tax_rate <= Decimal('40') else str(tax_rate)
+                from billing.itc import line_is_rcm
+                items_out[idx]['rcm_line'] = line_is_rcm(instance, item)
 
         ret['items'] = items_out
         ret['taxable_amount'] = str(taxable_total.quantize(Decimal('0.01')))
@@ -561,6 +576,19 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         ret['tax_amount'] = str(tax_total.quantize(Decimal('0.01')))
         ret['is_interstate'] = is_interstate
         ret['subtotal'] = ret['taxable_amount']
+        ret['vendor_country'] = getattr(getattr(instance, 'vendor', None), 'country', '') or ''
+        # Same split as the books / 3B (#214/#219): RCM tax is payable by us, not part of the vendor payable.
+        try:
+            from billing.itc import bill_tax_classification, import_of_services_warning
+            c = bill_tax_classification(instance, buyer)
+            ret['vendor_payable'] = str(c['vendor_payable'].quantize(Decimal('0.01')))
+            ret['rcm_tax_payable'] = {k: str(v.quantize(Decimal('0.01'))) for k, v in c['rcm_payable'].items()}
+            ret['rcm_tax_payable']['total'] = str(sum(c['rcm_payable'].values(), Decimal('0.00')).quantize(Decimal('0.01')))
+            w = import_of_services_warning(instance)
+            if w:
+                ret['warnings'] = [w]
+        except Exception:
+            pass
         return ret
 
 class SalesInvoiceItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
@@ -1604,8 +1632,22 @@ class VendorSerializer(serializers.ModelSerializer):
         from billing.gst_utils import gstin_warning
         return gstin_warning(getattr(obj, 'gstin', None))
 
-    # Accepted for FE compatibility but ignored — PartyMeta is customer-only
+    # Accepted for FE compatibility; only meta.gst_type is used (-> Vendor.gst_type). PartyMeta is customer-only.
     meta = serializers.JSONField(required=False, write_only=True)
+
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        meta = ret.pop('meta', None)
+        if isinstance(meta, dict) and meta.get('gst_type') and 'gst_type' not in ret:
+            gt = str(meta['gst_type']).strip().lower()
+            if gt in dict(Vendor.GST_TYPE_CHOICES):
+                ret['gst_type'] = gt
+        return ret
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['meta'] = {'gst_type': instance.gst_type or ''}  # the bill form reads vendor.meta.gst_type
+        return ret
     linked_customer = serializers.SerializerMethodField()
 
     def get_linked_customer(self, obj):
@@ -1615,7 +1657,7 @@ class VendorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vendor
         fields = [
-            'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state',
+            'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state', 'gst_type', 'country',
             'created_by', 'created_at', 'meta', 'linked_customer', 'gstin_warning',
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'linked_customer', 'gstin_warning']

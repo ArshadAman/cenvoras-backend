@@ -993,6 +993,8 @@ class Payslip(models.Model):
     arrear_employee_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     arrear_employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     arrear_employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Earlier-FY DOJ recovery still to be recovered after this payslip (carried to the next run).
+    doj_recovery_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_esi = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_total_contribution = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
@@ -1193,6 +1195,13 @@ class HRMSSettings(models.Model):
     )
     overtime_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.5)
     allow_negative_salary = models.BooleanField(default=False)
+    # VERIFY limit/applicability: default 50% of the month's wages per Code on Wages s.18
+    # (deductions cap); confirm with the CA before relying on it for every establishment.
+    doj_recovery_cap_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('50.00'),
+        help_text='Max % of a month\'s wages deducted to recover earlier-FY DOJ excess pay; the rest carries '
+                  'forward. Default 50% (Code on Wages s.18), VERIFY limit/applicability.',
+    )
     salary_rounding = models.CharField(
         max_length=20,
         choices=[('nearest_one', 'Nearest ₹1'), ('nearest_ten', 'Nearest ₹10'), ('exact', 'Exact 2 Decimals')],

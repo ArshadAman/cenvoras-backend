@@ -1025,6 +1025,9 @@ class Payslip(models.Model):
     employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     # UAT P1 #10: PF on arrears, kept apart from current wages for the ECR arrears columns.
+    # Rudra CA (#234): any future revised-ECR / PF-difference builder must recompute PF wages from the stored
+    # components (assignment.computed_components + compute_pf), NEVER from a base derived from employee_pf
+    # (payroll_engine._payslip_pf_wage source='derived', which is preview-only).
     arrear_pf_wages = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     arrear_employee_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     arrear_employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)

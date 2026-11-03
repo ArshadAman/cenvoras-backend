@@ -420,6 +420,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'components': components_dict,
             'earnings': earnings_dict,
             'pf_wage_components': list(pf_wage_flags),
+            # Same-name rule (Rudra): a custom row named like a structure component takes that component's PF flag.
+            'structure_components': [{'name': c.name, 'counts_as_pf_wages': bool(c.counts_as_pf_wages or c.is_basic)}
+                                     for c in latest.salary_structure.components.all()],
             'employee_deductions': deductions_dict,
             'statutory_estimates': deductions_dict,
             'employer_contributions': employer_dict,

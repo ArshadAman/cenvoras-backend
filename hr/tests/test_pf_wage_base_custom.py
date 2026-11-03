@@ -44,3 +44,59 @@ class PfBaseAndCustomTests(_Base):
         self.assertEqual(self.slip(self.run_month(), e).employee_pf, D('1200.00'))
         self.assertFalse([x for x in self.api.get('/api/hr/pf-wage-components/').data['matches']
                           if x['kind'] == 'custom'])
+
+
+import datetime as _dt
+from hr.services.payroll_engine import _payslip_pf_wage, compute_pf, pf_wage_ceiling
+
+# (wage-month date, Basic, DA, expected employee PF at the CURRENT ceiling helper).
+# When the ₹25k ceiling is approved for months from 17-09-2026, change the second row's expectation to
+# 2040.00 (12% of 17,000) — the test takes the date and asks pf_wage_ceiling(date), it hardcodes no ceiling.
+PF_CASES = [
+    (_dt.date(2026, 10, 31), '8000', '2000', '1200.00'),
+    (_dt.date(2026, 10, 31), '15000', '2000', '1800.00'),
+]
+
+
+class PfCeilingByWageMonthTests(_Base):
+    test_ceiling_helper_is_15000_for_now = test_basic_plus_da_under_cap = None
+    test_da_not_counted_unless_flagged = test_basic_plus_da_capped = None
+    test_confirmed_scaled_basic_plus_da = test_preview_flags_pf_wage_change = None
+
+    def test_cases(self):
+        for on, basic, da, expected in PF_CASES:
+            with self.subTest(on=on, basic=basic, da=da):
+                wage = D(basic) + D(da)
+                pf = compute_pf(wage, None, on_date=on)
+                self.assertEqual(pf['employee_pf'], D(expected))
+                self.assertEqual(pf['pf_contribution_base'], min(wage, pf_wage_ceiling(on)))
+
+    def test_vpf_employee_derived_base(self):
+        # 'VPF' is a custom deduction component, never part of employee_pf; arrears PF is excluded too.
+        SalaryComponent.objects.create(salary_structure=self.st, name='VPF', type='deduction',
+                                       component_type='fixed', value='0')
+        e = self.emp('V1', '40000', {'Basic': '20000', 'Special Allowance': '20000', 'VPF': '3000'})
+        r = self.run_month()
+        ps = self.slip(r, e)
+        self.assertEqual(ps.employee_pf, D('1800.00'))
+        reasons = dict(ps.deduction_reasons)
+        reasons['PF'] = {k: v for k, v in reasons['PF'].items() if k != 'pf_contribution_base'}
+        Payslip.objects.filter(pk=ps.pk).update(deduction_reasons=reasons, employee_pf=D('2100.00'),
+                                                arrear_employee_pf=D('300.00'))
+        ps.refresh_from_db()
+        self.assertEqual(_payslip_pf_wage(ps), (D('15000.00'), 'derived'))
+        # Even if a voluntary extra had been folded into employee_pf, the derived base stays at the ceiling.
+        Payslip.objects.filter(pk=ps.pk).update(employee_pf=D('5000.00'), arrear_employee_pf=0)
+        ps.refresh_from_db()
+        self.assertEqual(_payslip_pf_wage(ps), (pf_wage_ceiling(_dt.date(2026, 9, 30)), 'derived'))
+        resp = self.api.post(f'/api/hr/payroll-runs/{r.id}/recalculate-preview/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_same_name_custom_row_not_in_banner(self):
+        # 'DA' is a structure component (flag on/off there), so it is never listed as a custom allowance.
+        self.da.counts_as_pf_wages = False
+        self.da.save()
+        self.emp('N1', '20000', {'Basic': '8000', 'DA': '2000', 'Special Allowance': '10000'})
+        m = self.api.get('/api/hr/pf-wage-components/').data['matches']
+        self.assertFalse([x for x in m if x['kind'] == 'custom'])
+        self.assertTrue([x for x in m if x['kind'] == 'structure' and x['name'] == 'DA'])

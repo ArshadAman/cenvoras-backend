@@ -972,15 +972,32 @@ class _Rollback(Exception):
 ESI_GROSS_LIMIT = Decimal('21000')
 
 
-def _payslip_pf_wage(ps):
-    """PF contribution base (after the ceiling) of a payslip. Older payslips stored only the uncapped
-    statutory 'pf_wage' or nothing, so fall back to employee PF / 12% (which is the capped base)."""
+def _payslip_pf_wage(ps, settings=None):
+    """(PF contribution base, source) of a payslip, for the recalculation PREVIEW only.
+
+    'stored': deduction_reasons['PF']['pf_contribution_base'] (payslips from #234 on).
+    'derived': older payslips. Worked out from STATUTORY employee PF only: Payslip.employee_pf minus
+    arrear_employee_pf (DOJ arrears PF is added into employee_pf). Cenvora has no VPF / voluntary or
+    higher-wage PF field: employee_pf is the statutory contribution and any 'VPF' set up as a custom
+    deduction lives in deductions, not employee_pf. The derived base is still capped at the ceiling
+    helper's value in case such an extra was ever folded in.
+
+    NEVER use a derived base as the source for a revised ECR or any PF difference calculation:
+    recompute from the stored components (computed_components + compute_pf) instead.
+    """
     pf = (ps.deduction_reasons or {}).get('PF') or {}
     if pf.get('pf_contribution_base') is not None:
-        return Decimal(str(pf['pf_contribution_base']))
-    if (ps.employee_pf or 0) > 0:
-        return (Decimal(str(ps.employee_pf)) / Decimal('0.12')).quantize(Decimal('0.01'))
-    return Decimal('0.00')
+        return Decimal(str(pf['pf_contribution_base'])), 'stored'
+    statutory_ee = Decimal(str(ps.employee_pf or 0)) - Decimal(str(getattr(ps, 'arrear_employee_pf', 0) or 0))
+    if statutory_ee <= 0:
+        return Decimal('0.00'), 'derived'
+    rate = Decimal(str(getattr(settings, 'pf_employee_rate', 12.0) if settings is not None else 12.0)) / Decimal('100')
+    base = (statutory_ee / rate).quantize(Decimal('0.01'))
+    if settings is None or bool(getattr(settings, 'pf_apply_ceiling', True)):
+        run = ps.payroll_run
+        on = datetime.date(int(run.year), int(run.month), calendar.monthrange(int(run.year), int(run.month))[1])
+        base = min(base, pf_wage_ceiling(on, settings))
+    return base, 'derived'
 
 
 def preview_recalculation(run):
@@ -988,7 +1005,8 @@ def preview_recalculation(run):
     Dry run: compute every payslip the run would get, compare with the stored payslips, and roll
     everything back (nothing is saved). Returns per-employee old vs new gross, ESI and PT.
     """
-    old = {ps.employee_id: ps for ps in Payslip.objects.filter(payroll_run=run).select_related('employee')}
+    old = {ps.employee_id: ps for ps in Payslip.objects.filter(payroll_run=run).select_related('employee', 'payroll_run')}
+    _settings = get_hrms_settings(run.tenant)
     rows = []
     try:
         with transaction.atomic():
@@ -1007,8 +1025,8 @@ def preview_recalculation(run):
                 if o is not None and o_esi != n_esi:
                     esi_change = 'now ESI-covered' if n_esi else 'no longer ESI-covered'
                 verify = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)
-                o_pfw = _payslip_pf_wage(o) if o else None
-                n_pfw = _payslip_pf_wage(ps)
+                o_pfw, o_src = _payslip_pf_wage(o, _settings) if o else (None, None)
+                n_pfw, _ = _payslip_pf_wage(ps, _settings)
                 rows.append({
                     'employee_id': str(emp.pk), 'employee_code': emp.employee_code, 'name': emp.full_name,
                     'old_gross': str(og) if og is not None else None, 'new_gross': str(ng),
@@ -1019,6 +1037,7 @@ def preview_recalculation(run):
                     'old_pt': str(o_pt) if o_pt is not None else None, 'new_pt': str(n_pt),
                     'pt_changed': o is not None and o_pt != n_pt,
                     'old_pf_wage': str(o_pfw) if o_pfw is not None else None,
+                    'pf_base_source': o_src,  # 'derived' = display/compare only, never an ECR source
                     'new_pf_wage': str(n_pfw) if n_pfw is not None else None,
                     # Only the contribution base or the PF amount, not an internal representation.
                     'pf_wage_changed': o is not None and (o_pfw != n_pfw

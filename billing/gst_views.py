@@ -515,7 +515,7 @@ def gstr1_json_export(request):
     if not from_date or not to_date:
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
-    from billing.gstr1_compute import compute_gstr1, row_label
+    from billing.gstr1_compute import compute_gstr1, row_label, cdnr_for_portal
     from billing.advances import group_for_portal
     data = compute_gstr1(tenant, from_date, to_date)
     payload = {
@@ -525,7 +525,7 @@ def gstr1_json_export(request):
         # R21: rows floored to 0 by CN carry-forward are not filed (kept on screen via _cenvora).
         'b2cs': [r for r in data['b2cs'] if any(r[k] for k in ('txval', 'camt', 'samt', 'iamt'))],
         'b2cl': data['b2cl'],
-        'cdnr': data['cdnr'],
+        'cdnr': cdnr_for_portal(data['cdnr']),
         'cdnur': data['cdnur'],
         'hsn': {
             'data': data['hsn_data'],

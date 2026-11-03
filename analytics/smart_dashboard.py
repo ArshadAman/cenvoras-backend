@@ -162,13 +162,10 @@ class SmartDashboard:
         return float(total_payments)
     
     def _get_total_receivables(self):
-        """Total money owed to the business"""
-        # Sum of all customer outstanding balance
-        result = Customer.objects.filter(
-            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
-            current_balance__gt=0
-        ).aggregate(total=Sum('current_balance'))
-        return float(result['total'] or 0)
+        """Total money owed to the business (UAT P1 item 2: same formula as the customer ledger,
+        so credit notes reduce it)."""
+        from billing.balance_sync import total_receivables
+        return float(total_receivables(self.owner))
     
     # ═══════════════════════════════════════════════════════════════
     # WARNING SYSTEM - What needs attention NOW?
@@ -263,10 +260,13 @@ class SmartDashboard:
         # Find customers with credit used and invoices past due
         overdue_customers = []
         
-        customers_with_credit = Customer.objects.filter(
-            Q(created_by=self.owner) | Q(created_by__parent=self.owner),
-            current_balance__gt=0
-        ).values('id', 'name', 'current_balance', 'credit_limit')[:5]
+        # UAT P1 item 2: balances from the shared ledger formula (credit notes included).
+        from billing.balance_sync import customer_balance_breakdown
+        _bal = customer_balance_breakdown(self.owner)
+        _owing = sorted(((cid, r['outstanding']) for cid, r in _bal.items() if r['outstanding'] > 0),
+                        key=lambda x: x[1], reverse=True)[:5]
+        _names = dict(Customer.objects.filter(id__in=[cid for cid, _ in _owing]).values_list('id', 'name'))
+        customers_with_credit = [{'id': cid, 'name': _names.get(cid), 'current_balance': amt} for cid, amt in _owing]
         
         for c in customers_with_credit:
             # Check for overdue invoices

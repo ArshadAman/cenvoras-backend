@@ -350,9 +350,8 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         date__lte=to_date,
         gst_time_barred=False,  # commercial CNs (time-barred, no GST) never enter GST returns
     ).filter(
-        # UAT P1 #12: linked CNs need a final original invoice; an unlinked CN is
-        # filed only when the recipient is registered (cdnr) — see below.
-        Q(original_invoice__isnull=True) | Q(original_invoice__status='final')
+        # UAT P1 #12 (Rudra CA): only CNs linked to a final original invoice enter GSTR-1.
+        original_invoice__isnull=False, original_invoice__status='final',
     ).select_related('customer', 'original_invoice').prefetch_related('items__product').order_by(
         'date', 'credit_note_number'
     )
@@ -368,15 +367,9 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
             cust_gstin = cn.customer.gstin.strip().upper() if (cn.customer and cn.customer.gstin) else ''
         has_gstin = len(cust_gstin) == 15
         if orig_inv is None:
-            clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
-            if not has_gstin:
-                cn_warnings.append({'code': 'cn_unlinked_unregistered', 'message': (
-                    f"{clean_cn_number} is not linked to an invoice and the customer has no GSTIN; "
-                    f"it is not reported in GSTR-1. Link it to the original invoice.")})
-                continue
-            cn_warnings.append({'code': 'cn_unlinked_registered', 'message': (
-                f"{clean_cn_number} is not linked to an invoice; reported in cdnr as a regular (R) note. "
-                f"The s.34 time limit could not be checked — link it to the original invoice.")})
+            # UAT P1 #12 (Rudra CA): unlinked taxed CNs can't be saved any more; legacy ones are
+            # listed by `list_unlinked_taxed_cns` for fixing and never enter a GST table.
+            continue
         cn_taxable = brk['totals']['taxable']
         cn_cgst = brk['totals']['cgst']
         cn_sgst = brk['totals']['sgst']

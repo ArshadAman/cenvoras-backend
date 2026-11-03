@@ -81,7 +81,7 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'credit_note_number', 'created_by', 'created_at', 'section34_warning',
                             'gst_time_barred', 'stock_restored']
         extra_kwargs = {
-            'original_invoice': {'required': True, 'allow_null': False},
+            'original_invoice': {'required': False, 'allow_null': True},
             'date': {'required': False},  # R21: defaults to today (IST)
         }
 
@@ -164,13 +164,13 @@ class CreditNoteSerializer(serializers.ModelSerializer):
                 'customer': 'Customer not found for this business.'
             })
         invoice = attrs.get('original_invoice')
-        if not invoice:
-            raise serializers.ValidationError({
-                'original_invoice': 'Credit notes must reference the original posted invoice.'
-            })
         items = attrs.get('items') or []
         if not items:
             raise serializers.ValidationError({'items': 'At least one item is required.'})
+        if not invoice:
+            # UAT P1 #12 (Rudra CA): a taxed CN must be linked to the invoice(s) it adjusts, for
+            # registered and unregistered customers alike. Unlinked = 'Credit note without GST' only.
+            return self._validate_unlinked(attrs, items)
         # R21: CN date (default today): not before the invoice, not in the future, not in a filed month.
         from billing.advances import today_ist, is_gstr1_filed
         if not attrs.get('date'):
@@ -267,6 +267,37 @@ class CreditNoteSerializer(serializers.ModelSerializer):
         note_date = attrs.get('date') or getattr(self.instance, 'date', None)
         warning = section34_warning(invoice.invoice_date, note_date, this_has_tax)
         attrs['_section34_warning'] = warning
+        return attrs
+
+    UNLINKED_TAXED_ERROR = "Link this credit note to the invoice(s) it adjusts, or issue it without GST."
+
+    def _validate_unlinked(self, attrs, items):
+        from billing.advances import today_ist
+        without_gst = bool(attrs.pop('without_gst', False))
+        if not without_gst:
+            raise serializers.ValidationError({'original_invoice': self.UNLINKED_TAXED_ERROR})
+        if not attrs.get('date'):
+            attrs['date'] = today_ist()
+        if attrs['date'] > today_ist():
+            raise serializers.ValidationError({'date': "The credit note date can't be in the future."})
+        from billing.uqc import quantity_error
+        total = Decimal('0.00')
+        for it in items:
+            q = Decimal(str(it.get('quantity', 0) or 0))
+            if q <= 0:
+                raise serializers.ValidationError({'items': 'Quantities must be greater than 0.'})
+            product = it.get('product')
+            err = quantity_error(q, it.get('unit') or getattr(product, 'unit', None))
+            if err:
+                raise serializers.ValidationError({'items': f"{getattr(product, 'name', '') or 'item'}: {err}"})
+            it['tax'] = Decimal('0')
+            price = Decimal(str(it.get('price', 0) or 0))
+            disc = Decimal(str(it.get('discount', 0) or 0))
+            base = q * price
+            total += (base - (base * disc / Decimal('100')).quantize(Decimal('0.01'))).quantize(Decimal('0.01'))
+        attrs['gst_time_barred'] = True  # commercial CN without GST: enters no GST table
+        attrs['total_amount'] = total
+        attrs['_section34_warning'] = None
         return attrs
 
     def to_representation(self, instance):

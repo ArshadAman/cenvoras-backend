@@ -16,6 +16,8 @@ import re
 from decimal import Decimal
 
 SERIAL_RE = re.compile(r'^[A-Z0-9/-]{1,16}$')
+# VERIFY current Rule 46(e) threshold (Rudra): address of an unregistered recipient when the
+# taxable value is ₹50,000 or more.
 UNREGISTERED_ADDRESS_THRESHOLD = Decimal('50000')
 
 

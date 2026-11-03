@@ -68,6 +68,23 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         )
         return user
 
+def _validate_gst_status(attrs, instance=None):
+    """UAT P1 #13 rework (Rudra CA): Regular/Composition need a GSTIN; Not registered has none."""
+    from billing.gst_status import REGULAR, COMPOSITION, UNREGISTERED
+    status = attrs.get('gst_status', getattr(instance, 'gst_status', None))
+    country = str(attrs.get('country', getattr(instance, 'country', 'IN')) or 'IN').upper()
+    if not status or country != 'IN':
+        return attrs
+    gstin = str(attrs.get('gstin', getattr(instance, 'gstin', '')) or '').strip()
+    if status in (REGULAR, COMPOSITION) and not gstin:
+        raise serializers.ValidationError({'gstin': 'GSTIN is required for a GST-registered business '
+                                                    '(Regular or Composition).'})
+    if status == UNREGISTERED and gstin:
+        raise serializers.ValidationError({'gst_status': 'A business that is not registered has no GSTIN. '
+                                                         'Remove the GSTIN or choose Regular / Composition.'})
+    return attrs
+
+
 def _require_company_identity(attrs, instance=None, require_all=False):
     """
     UAT P1 item 13 (Rudra CA): a company can't be saved with a blank legal (business) name or
@@ -99,7 +116,7 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'first_name', 'last_name', 'business_name', 'business_address', 
             'gstin', 'pan_number', 'gem_id', 'dl_number', 'phone', 'state', 'city',
             'country', 'trn', 'bank_name', 'bank_account_number', 'bank_ifsc_code',
-            'bank_branch', 'bank_upi_id', 'bank_qr_code'
+            'bank_branch', 'bank_upi_id', 'bank_qr_code', 'gst_status'
         )
         extra_kwargs = {
             'business_name': {'required': True},
@@ -120,23 +137,17 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
-    def validate_gstin(self, value):
-        """UAT P1 item 13 (Rudra CA): an Indian company can't finish setup without its GSTIN."""
-        from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
-        country = (getattr(self, 'initial_data', {}) or {}).get('country') or getattr(self.instance, 'country', 'IN')
-        try:
-            gstin = validate_gstin_format(value)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
-        if not gstin and str(country or 'IN').upper() == 'IN':
-            raise serializers.ValidationError('GSTIN is required to set up the company.')
-        return gstin
     
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        _validate_gst_status(attrs, self.instance)
         return _require_company_identity(attrs, self.instance, require_all=True)
 
     def update(self, instance, validated_data):
+        if not validated_data.get('gst_status') and not instance.gst_status \
+                and str(validated_data.get('country', instance.country) or 'IN').upper() == 'IN':
+            gstin = str(validated_data.get('gstin', instance.gstin) or '').strip()
+            validated_data['gst_status'] = 'regular' if gstin else 'unregistered'
         instance = super().update(instance, validated_data)
         # Check if profile should be marked as completed
         instance.mark_profile_completed()
@@ -149,10 +160,41 @@ class UserProfileSerializer(serializers.ModelSerializer):
         from billing.gst_utils import gstin_warning
         return gstin_warning(getattr(obj, 'gstin', None))
 
+    # UAT P1 #13 rework (Rudra CA): GST status and what it drives (see billing/gst_status.py).
+    def get_gst_status(self, obj):
+        from billing import gst_status as g
+        return g.gst_status(obj)
+
+    def get_gst_status_set(self, obj):
+        from billing import gst_status as g
+        return g.stored_gst_status(obj) is not None
+
+    def get_document_title(self, obj):
+        from billing import gst_status as g
+        return g.document_title(obj)
+
+    def get_document_declaration(self, obj):
+        from billing import gst_status as g
+        return g.document_declaration(obj)
+
+    def get_tax_locked(self, obj):
+        from billing import gst_status as g
+        return g.tax_locked(obj)
+
+    def get_gst_returns_available(self, obj):
+        from billing import gst_status as g
+        return g.gst_returns_available(obj)
+
     is_trial_active = serializers.SerializerMethodField()
     profile_completed = serializers.SerializerMethodField()
     can_generate_gst_invoice = serializers.SerializerMethodField()
     gstin_warning = serializers.SerializerMethodField()
+    gst_status = serializers.SerializerMethodField()
+    gst_status_set = serializers.SerializerMethodField()
+    document_title = serializers.SerializerMethodField()
+    document_declaration = serializers.SerializerMethodField()
+    tax_locked = serializers.SerializerMethodField()
+    gst_returns_available = serializers.SerializerMethodField()
     parent_business_name = serializers.CharField(source='parent.business_name', read_only=True)
     plan_name = serializers.SerializerMethodField()
     plan_code = serializers.SerializerMethodField()
@@ -198,6 +240,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
             'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 'gstin_warning',
+            'gst_status', 'gst_status_set', 'document_title', 'document_declaration', 'tax_locked',
+            'gst_returns_available',
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',
@@ -245,7 +289,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
             'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections',
-            'auto_round_off',
+            'auto_round_off', 'gst_status',
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -323,6 +367,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         user = self.instance
         _require_company_identity(attrs, user)
+        _validate_gst_status(attrs, user)
         
         # Password change validation
         new_password = attrs.get('new_password')

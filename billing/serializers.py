@@ -1048,6 +1048,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         total_amount = data.get('total_amount', getattr(self.instance, 'total_amount', 0))
         items = data.get('items')
+        # UAT P1 item 13 rework (Rudra CA): Composition / Not registered companies can't charge
+        # GST (s.10 / s.32): lock every line's tax at 0.
+        from billing import gst_status as _gs
+        _req_user = getattr(self.context.get('request'), 'user', None)
+        if _req_user is not None and _gs.tax_locked(_req_user):
+            for _it in (items or []):
+                if (_it.get('row_type') or 'item') != 'note' and Decimal(str(_it.get('tax', 0) or 0)) != 0:
+                    _it['tax'] = Decimal('0.00')
         if items:
             total_amount = sum(
                 (self._calculate_line_gross(item) for item in items),
@@ -1071,9 +1079,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
+        # Rule 46 checks apply to Regular companies only (UAT P1 #13 rework).
+        _rule46_on = _req_user is None or _gs.rule46_applies(_req_user)
+
         # UAT P1 item 13 (Rudra CA): Rule 46 essentials on a final invoice.
         _status = data.get('status', getattr(self.instance, 'status', 'final'))
-        if _status == 'final' and (items is not None or not self.instance):
+        if _rule46_on and _status == 'final' and (items is not None or not self.instance):
             from billing.rule46 import rule46_errors
             from billing.sync_service import DocumentSyncService
             _init = getattr(self, 'initial_data', {}) or {}

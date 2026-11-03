@@ -509,6 +509,11 @@ def gstr1_json_export(request):
     Generate GSTR-1 compliant JSON for a given period.
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
@@ -581,6 +586,11 @@ def gstr1_advances_csv(request):
     ?from=&to=&sheet=at|atadj. VERIFY: column headers follow the offline-tool Excel template as we
     understand it; the official field tables could not be read. Amounts are TAXABLE value (Rudra CA).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     import csv
     from django.http import HttpResponse
     tenant = getattr(request.user, 'active_tenant', request.user)
@@ -653,6 +663,11 @@ def gstr3b_summary(request):
     3.1(a) taxable outward only; 3.1(b) zero-rated; 3.1(c) nil/exempt; 3.1(e) non-GST.
     Filing 4C = max(4A-4B, 0). Excess reversal adds tax only to 3.1(a).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')

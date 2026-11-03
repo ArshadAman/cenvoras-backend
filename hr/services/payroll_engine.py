@@ -530,7 +530,25 @@ def compute_payslip_for_employee(employee, payroll_run):
         total_ab_amount += calc_amt
         ab_breakdown.append((label, calc_amt))
 
+    # UAT P1 #10: DOJ-correction arrears (+) / same-FY recovery (−) for months already run;
+    # earlier-FY recovery is a post-tax deduction (Rudra CA).
+    from hr.services.doj_correction import pending_for_payslip, carry_excess_recovery
+    doj = pending_for_payslip(employee, month, year, settings)
+    doj_earn_total = Decimal('0.00')
+    for label, amt in doj['earning_lines']:
+        total_ab_amount += amt
+        doj_earn_total += amt
+        ab_breakdown.append((label, amt))
+
     gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
+    if doj['corrections']:
+        # Taxable gross is floored at 0; the unrecovered excess carries into the next run.
+        excess = -gross_with_earnings if gross_with_earnings < 0 else Decimal('0.00')
+        if excess > 0:
+            gross_with_earnings = Decimal('0.00')
+            doj_earn_total += excess
+            ab_breakdown.append((f'DOJ correction recovery carried to next run', excess))
+        carry_excess_recovery(doj['corrections'], excess, int(month), int(year))
 
     # Basic component lookup for PF — same fallback as salary card (50% CTC / computed Basic)
     basic_comp = assignment.salary_structure.components.filter(is_basic=True).first()
@@ -548,6 +566,11 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # Statutory Calculations
     pf_details = compute_pf(basic_salary, settings)
+    arrear_pf = doj['pf']
+    if arrear_pf['wages'] > 0:
+        pf_details = dict(pf_details)
+        for k in ('employee_pf', 'employer_pf', 'employer_epf', 'employer_eps'):
+            pf_details[k] = (Decimal(str(pf_details[k])) + arrear_pf[k]).quantize(Decimal('0.01'))
     esi_details = compute_esi(gross_with_earnings, settings)
     tds_data = compute_dynamic_tds(employee, gross_with_earnings, month, year)
     tds_val = tds_data['monthly_tds']
@@ -557,7 +580,7 @@ def compute_payslip_for_employee(employee, payroll_run):
     from hr.services.work_state import resolve_work_state
     resolved_pt_state = resolve_work_state(employee=employee, tenant=tenant)
     pt_val = compute_pt(
-        gross_with_earnings,
+        max(Decimal('0.00'), gross_with_earnings - doj_earn_total),  # arrears are slabbed by their own month
         resolved_pt_state,
         month=int(month),
         on_date=_dt.date(int(year), int(month), pt_day),
@@ -565,8 +588,11 @@ def compute_payslip_for_employee(employee, payroll_run):
         tenant=tenant,
     )
 
+    pt_val = (pt_val + doj['pt_arrears']).quantize(Decimal('0.01'))
+
     # Custom deductions total
     custom_deductions_total = sum(custom_deductions.values(), Decimal('0.00'))
+    doj_post_tax = sum((a for _l, a in doj['deduction_lines']), Decimal('0.00'))
 
     # Statutory Deductions subtotal
     statutory_deductions = (
@@ -582,7 +608,7 @@ def compute_payslip_for_employee(employee, payroll_run):
         employee, available_for_loans, settings.allow_negative_salary
     )
 
-    raw_total_deductions = (statutory_deductions + advance_rec + loan_rec).quantize(Decimal('0.01'))
+    raw_total_deductions = (statutory_deductions + advance_rec + loan_rec + doj_post_tax).quantize(Decimal('0.01'))
     raw_net_salary = (gross_with_earnings - raw_total_deductions).quantize(Decimal('0.01'))
 
     # Apply tenant salary rounding rule
@@ -701,6 +727,20 @@ def compute_payslip_for_employee(employee, payroll_run):
             'reason': "; ".join(ln_details) or "Monthly personal loan recovery installment"
         }
 
+    # UAT P1 #10: DOJ correction post-tax recovery, PF arrears and review flags
+    for label, amt in doj['deduction_lines']:
+        deductions[label] = str(amt)
+        deduction_reasons[label] = {'amount': str(amt), 'reason': (
+            'Recovery of salary paid in an earlier financial year after a DOJ correction; '
+            'deducted after tax (not a negative earning).')}
+    if arrear_pf['wages'] > 0:
+        deduction_reasons['PF (arrears)'] = {'amount': str(arrear_pf['employee_pf']), 'reason': (
+            f"Employee PF on DOJ-correction arrears: PF wage ₹{arrear_pf['wages']} (basic + DA), capped at the "
+            f"ceiling of the months the arrears relate to. Report in the ECR arrears columns.")}
+    if doj['warnings']:
+        deduction_reasons['DOJ correction'] = {'amount': '0', 'reason': ' '.join(doj['warnings']),
+                                               'warnings': doj['warnings']}
+
     payslip = Payslip(
         tenant=tenant,
         payroll_run=payroll_run,
@@ -729,6 +769,10 @@ def compute_payslip_for_employee(employee, payroll_run):
         employer_esi=esi_details['employer_esi'],
         employer_total_contribution=employer_total,
         net_salary=net_salary,
+        arrear_pf_wages=arrear_pf['wages'],
+        arrear_employee_pf=arrear_pf['employee_pf'],
+        arrear_employer_epf=arrear_pf['employer_epf'],
+        arrear_employer_eps=arrear_pf['employer_eps'],
     )
     return payslip
 

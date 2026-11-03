@@ -167,6 +167,41 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             
         return qs
 
+    @action(detail=True, methods=['post', 'get'], url_path='doj-correction')
+    def doj_correction(self, request, pk=None):
+        """UAT P1 #10: admin-only DOJ correction. GET ?new_doj= previews; POST applies (reason required)."""
+        from hr.services.doj_correction import (
+            DOJCorrectionError, apply_doj_correction, compute_correction, next_open_month,
+            RECOVERY_PF_WARNING, ESIC_FLAG,
+        )
+
+        def doj_warnings(amount):
+            return [RECOVERY_PF_WARNING] if amount < 0 else ([f'Arrears: {ESIC_FLAG}'] if amount > 0 else [])
+        import datetime as _dt
+        if getattr(request.user, 'role', None) != 'admin':
+            return Response({'error': 'Only an admin can correct a date of joining.'}, status=403)
+        employee = self.get_object()
+        raw = request.data.get('new_doj') if request.method == 'POST' else request.query_params.get('new_doj')
+        try:
+            new_doj = _dt.date.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            return Response({'new_doj': 'Give the corrected date of joining as YYYY-MM-DD.'}, status=400)
+        if request.method == 'GET':
+            amount, lines = compute_correction(employee, new_doj)
+            ty, tm = next_open_month(employee.tenant)
+            return Response({'old_doj': str(employee.date_of_joining), 'new_doj': str(new_doj),
+                             'amount': str(amount), 'kind': 'arrears' if amount >= 0 else 'recovery',
+                             'target_month': tm, 'target_year': ty, 'lines': lines,
+                             'warnings': doj_warnings(amount)})
+        try:
+            corr = apply_doj_correction(employee, new_doj, request.data.get('reason'), request.user)
+        except DOJCorrectionError as exc:
+            return Response({'error': str(exc)}, status=400)
+        return Response({'id': str(corr.id), 'old_doj': str(corr.old_doj), 'new_doj': str(corr.new_doj),
+                         'amount': str(corr.amount), 'kind': corr.kind,
+                         'target_month': corr.target_month, 'target_year': corr.target_year,
+                         'lines': corr.breakdown, 'warnings': doj_warnings(corr.amount)}, status=201)
+
     def perform_create(self, serializer):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)
         

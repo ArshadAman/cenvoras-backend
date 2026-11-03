@@ -359,6 +359,18 @@ class EmployeeSerializer(serializers.ModelSerializer):
             return value
         return value
 
+    def validate_date_of_joining(self, value):
+        # UAT P1 #10: once payroll exists from min(old, new DOJ), a plain edit is blocked.
+        inst = self.instance
+        if inst is not None and value and inst.date_of_joining and value != inst.date_of_joining:
+            from hr.services.doj_correction import employee_has_payroll_from
+            if employee_has_payroll_from(inst, min(value, inst.date_of_joining)):
+                raise serializers.ValidationError(
+                    'Payroll has already been run for this employee from that month. Use "DOJ correction" '
+                    '(admin only, with a reason) so locked months stay unchanged and the difference is '
+                    'paid or recovered in the next open payroll.')
+        return value
+
     def validate_user(self, value):
         if value:
             request = self.context.get('request')

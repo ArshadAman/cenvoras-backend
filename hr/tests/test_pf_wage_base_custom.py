@@ -142,3 +142,17 @@ class CustomAllowanceSingleSourceTests(_Base):
         a = EmployeeSalaryAssignment.objects.get(employee=e)
         self.assertNotIn('Retaining Allowance', a.computed_components)
         self.assertEqual(self.api.get(f'/api/hr/employees/{e.id}/').data['salary_details']['custom_allowances'], {})
+
+    def test_remove_same_name_flagged_structure_allowance_on_save(self):
+        # 'Retaining Allowance' is also a flagged structure component: saving without it must not put it back.
+        SalaryComponent.objects.create(salary_structure=self.st, name='Retaining Allowance', component_type='fixed',
+                                       value='1000', counts_as_pf_wages=True)
+        e = self.emp('R2', '30000', {'Basic': '15000', 'HRA': '7500', 'Retaining Allowance': '1000',
+                                     'Special Allowance': '6500', '_basic_pct': '50.00', '_hra_pct': '50.00'})
+        r = self.api.patch(f'/api/hr/employees/{e.id}/', {'salary': {
+            'monthly_ctc': 30000, 'basic_pct': 50, 'hra_pct': 50, 'salary_structure_id': str(self.st.id),
+            'components': {'Basic': 15000, 'HRA': 7500}}}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertNotIn('Retaining Allowance', EmployeeSalaryAssignment.objects.get(employee=e).computed_components)
+        self.assertNotIn('Retaining Allowance',
+                         self.api.get(f'/api/hr/employees/{e.id}/').data['salary_details']['earnings'])

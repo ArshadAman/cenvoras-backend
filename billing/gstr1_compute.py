@@ -4,6 +4,7 @@ Build GSTR-1 tables once so GSTR-3B 3.1 / 3.2 can reuse the same figures.
 from decimal import Decimal
 import datetime
 import re
+from django.db.models import Q
 
 from billing.gst_rules import EXPORT_TREATMENTS, cn_time_bar, section34_deadline, advance_tax_split, classify_outward_supply, customer_pos
 from billing.gst_utils import (
@@ -180,6 +181,41 @@ def _customer_gstin(inv):
     return (getattr(inv, 'customer_gstin', None) or '').strip().upper()
 
 
+SEZ_TREATMENTS = {'sez', 'sezu', 'sezd'}
+DEEMED_EXPORT_TREATMENTS = {'deemed_export', 'deemed-export', 'deemed'}
+CDNR_NT_PORTAL_KEYS = ('nt_num', 'nt_dt', 'ntty', 'val', 'pos', 'rchrg', 'inv_typ', 'itms')
+
+
+def cdnr_inv_typ(orig_inv, igst):
+    """GSTR-1 cdnr inv_typ: R (regular), SEWP/SEWOP (SEZ with/without payment), DE (deemed export)."""
+    treat = (getattr(orig_inv, 'gst_treatment', '') or '').strip().lower() if orig_inv is not None else ''
+    if treat in SEZ_TREATMENTS:
+        return 'SEWP' if Decimal(str(igst or 0)) > ZERO else 'SEWOP'
+    if treat in DEEMED_EXPORT_TREATMENTS:
+        return 'DE'
+    return 'R'
+
+
+def cdnr_itm_det(ln, is_inter):
+    """{rt, txval, iamt | camt+samt, csamt} — IGST for inter-state, CGST+SGST for intra-state."""
+    det = {'rt': float(ln['rate']), 'txval': float(ln['taxable'])}
+    if is_inter:
+        det['iamt'] = float(ln['igst'])
+    else:
+        det['camt'] = float(ln['cgst'])
+        det['samt'] = float(ln['sgst'])
+    det['csamt'] = 0.0
+    return det
+
+
+def cdnr_for_portal(cdnr):
+    """Strip on-screen helper keys (inum/idt/txval/p_gst/…) so each note matches the GSTN cdnr schema."""
+    return [
+        {'ctin': c['ctin'], 'nt': [{k: nt[k] for k in CDNR_NT_PORTAL_KEYS if k in nt} for nt in c['nt']]}
+        for c in cdnr
+    ]
+
+
 def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
     seller_state_code = get_seller_state_code(tenant)
 
@@ -312,9 +348,11 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         created_by=tenant,
         date__gte=from_date,
         date__lte=to_date,
-        original_invoice__isnull=False,
-        original_invoice__status='final',
         gst_time_barred=False,  # commercial CNs (time-barred, no GST) never enter GST returns
+    ).filter(
+        # UAT P1 #12: linked CNs need a final original invoice; an unlinked CN is
+        # filed only when the recipient is registered (cdnr) — see below.
+        Q(original_invoice__isnull=True) | Q(original_invoice__status='final')
     ).select_related('customer', 'original_invoice').prefetch_related('items__product').order_by(
         'date', 'credit_note_number'
     )
@@ -324,17 +362,30 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         brk = credit_note_tax_breakup(cn, seller_state_code)
         pos_code = brk['pos_code']
         is_inter = brk['is_interstate']
-        cust_gstin = cn.customer.gstin.strip().upper() if (cn.customer and cn.customer.gstin) else ''
+        # UAT P1 #12 (Rudra CA): classify by the recipient GSTIN on the ORIGINAL invoice.
+        cust_gstin = _customer_gstin(orig_inv) if orig_inv is not None else ''
+        if not cust_gstin:
+            cust_gstin = cn.customer.gstin.strip().upper() if (cn.customer and cn.customer.gstin) else ''
         has_gstin = len(cust_gstin) == 15
+        if orig_inv is None:
+            clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
+            if not has_gstin:
+                cn_warnings.append({'code': 'cn_unlinked_unregistered', 'message': (
+                    f"{clean_cn_number} is not linked to an invoice and the customer has no GSTIN; "
+                    f"it is not reported in GSTR-1. Link it to the original invoice.")})
+                continue
+            cn_warnings.append({'code': 'cn_unlinked_registered', 'message': (
+                f"{clean_cn_number} is not linked to an invoice; reported in cdnr as a regular (R) note. "
+                f"The s.34 time limit could not be checked — link it to the original invoice.")})
         cn_taxable = brk['totals']['taxable']
         cn_cgst = brk['totals']['cgst']
         cn_sgst = brk['totals']['sgst']
         cn_igst = brk['totals']['igst']
         cn_val = (cn_taxable + cn_cgst + cn_sgst + cn_igst).quantize(Decimal('0.01'))
-        bucket = classify_outward_supply(orig_inv)
+        bucket = classify_outward_supply(orig_inv) if orig_inv is not None else 'taxable'
         clean_cn_number = re.sub(r'^(CN-)+', 'CN-', cn.credit_note_number)
-        deadline = section34_deadline(orig_inv.invoice_date)
-        bar = cn_time_bar(tenant, orig_inv.invoice_date, cn.date)
+        deadline = section34_deadline(orig_inv.invoice_date) if orig_inv is not None else None
+        bar = cn_time_bar(tenant, orig_inv.invoice_date, cn.date) if orig_inv is not None else None
         if bar:
             # Rudra CA: a time-barred CN reduces GST nowhere (GSTR-1 tables, Table 8, 3B).
             cn_warnings.append({'code': 'cn_after_s34', 'message': (
@@ -372,24 +423,15 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
                 hsn_dict[key]['iamt'] -= igst
 
         cn_items_data = [
-            {
-                'num': idx,
-                'itm_det': {
-                    'txval': float(ln['taxable']),
-                    'rt': float(ln['rate']),
-                    'camt': float(ln['cgst']),
-                    'samt': float(ln['sgst']),
-                    'iamt': float(ln['igst']),
-                    'csamt': 0.0,
-                }
-            }
+            {'num': idx, 'itm_det': cdnr_itm_det(ln, is_inter)}
             for idx, ln in enumerate(brk['lines'], 1)
         ]
         nt_entry = {
             'nt_num': clean_cn_number,
             'nt_dt': cn.date.strftime('%d-%m-%Y'),
-            'inum': orig_inv.invoice_number,
-            'idt': orig_inv.invoice_date.strftime('%d-%m-%Y'),
+            'inum': orig_inv.invoice_number if orig_inv is not None else '',
+            'idt': orig_inv.invoice_date.strftime('%d-%m-%Y') if orig_inv is not None else '',
+            'inv_typ': cdnr_inv_typ(orig_inv, cn_igst),
             'val': float(cn_val),
             'txval': float(cn_taxable),
             'camt': float(cn_cgst),
@@ -403,7 +445,7 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
         }
         if bucket in ('nil_exempt', 'non_gst') and cn_tax == ZERO:
             # Rudra CA: CN on a nil/exempt/non-GST invoice reduces Table 8 (same inter/intra, B2B/B2C bucket).
-            orig_gstin = len(_customer_gstin(orig_inv)) == 15
+            orig_gstin = orig_inv is not None and len(_customer_gstin(orig_inv)) == 15
             _add_nil(nil, _nil_key(is_inter, orig_gstin or has_gstin), _nil_field(orig_inv, bucket),
                      -float(cn_taxable), deadline=deadline)
             continue
@@ -417,10 +459,10 @@ def compute_gstr1(tenant, from_date, to_date, apply_carry=True):
             # cdnur only for CNs on B2CL or export invoices (Rudra CA).
             treat = (orig_inv.gst_treatment or '').strip().lower()
             typ = 'EXPWOP' if (treat in ('lut', 'bond') or cn_igst == ZERO) else 'EXPWP'
-            cdnur.append({**{k: v for k, v in nt_entry.items() if k != 'rchrg'}, 'typ': typ})
+            cdnur.append({**{k: v for k, v in nt_entry.items() if k not in ('rchrg', 'inv_typ')}, 'typ': typ})
         elif _is_b2cl(orig_inv, _invoice_pos(orig_inv, seller_state_code), seller_state_code,
                       len(_customer_gstin(orig_inv)) == 15):
-            cdnur.append({**{k: v for k, v in nt_entry.items() if k != 'rchrg'}, 'typ': 'B2CL'})
+            cdnur.append({**{k: v for k, v in nt_entry.items() if k not in ('rchrg', 'inv_typ')}, 'typ': 'B2CL'})
         else:
             # CN on a b2cs invoice: net into b2cs by POS + rate + supply type.
             for ln in brk['lines']:

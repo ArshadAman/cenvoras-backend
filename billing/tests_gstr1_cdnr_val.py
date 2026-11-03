@@ -24,7 +24,15 @@ class GSTR1CDNRNoteValueTests(FourFixesBase):
         res = self.client.get(f"/api/billing/gst/gstr1-export/?from={today}&to={today}")
         self.assertEqual(res.status_code, 200, getattr(res, "data", res.content))
         data = res.json() if hasattr(res, "json") else res.data
-        return {nt["nt_num"]: nt for c in data["cdnr"] for nt in c["nt"]}
+        notes = {}
+        for c in data["cdnr"]:
+            for nt in c["nt"]:
+                # Portal schema (UAT P1 #12): tax heads live in itms[].itm_det only.
+                flat = dict(nt)
+                for k in ("txval", "camt", "samt", "iamt"):
+                    flat[k] = sum(Decimal(str(i["itm_det"].get(k, 0))) for i in nt["itms"])
+                notes[nt["nt_num"]] = flat
+        return notes
 
     def test_val_includes_tax_even_when_stored_total_is_tax_exclusive(self):
         mh = Customer.objects.create(name="MH Buyer", gstin="27ABCDE1234F1Z5", state="Maharashtra", created_by=self.tenant)

@@ -52,6 +52,7 @@ def first_payment_date(bill):
 def rcm_time_of_supply(bill, is_service, payment_date=None):
     """Time of supply of an RCM supply on this bill (goods s.12(3) / services s.13(3))."""
     pay = payment_date if payment_date is not None else first_payment_date(bill)
+    pay = pay or None
     if is_service:
         candidates = [bill.bill_date + timedelta(days=61)]
     else:
@@ -59,6 +60,16 @@ def rcm_time_of_supply(bill, is_service, payment_date=None):
     if pay:
         candidates.append(pay)
     return min(candidates)
+
+
+def rcm_line_times(bill, payment_date=None):
+    """[(line, time_of_supply)] for the bill's RCM lines: SAC chapter 99 (services) -> s.13(3),
+    every other line -> s.12(3). A bill's lines can fall in different months."""
+    from billing.gst_thresholds import is_services_sac
+    from billing.itc import line_is_rcm
+    pay = payment_date if payment_date is not None else first_payment_date(bill)
+    return [(it, rcm_time_of_supply(bill, is_services_sac(getattr(it, 'hsn_sac_code', '')), payment_date=pay or False))
+            for it in bill.items.all() if line_is_rcm(bill, it)]
 
 
 def bill_has_rcm(bill):
@@ -148,3 +159,63 @@ def self_invoices_due(tenant, today):
                     'bill_date': bill.bill_date.isoformat(), 'supplier_name': bill.vendor_name,
                     'deadline': deadline.isoformat(), 'overdue': today > deadline})
     return out
+
+
+# ---- Books vs return (Rudra, #219) --------------------------------------------------------
+RCM_PAYABLE_CODES = ('2211', '2212', '2213')
+
+
+def _month(d):
+    return d.strftime('%Y-%m')
+
+
+def _month_iter(date_from, date_to):
+    from datetime import date as _d
+    cur = _d(date_from.year, date_from.month, 1)
+    while cur <= date_to:
+        nxt = _d(cur.year + (cur.month == 12), 1 if cur.month == 12 else cur.month + 1, 1)
+        yield max(cur, date_from), min(nxt - timedelta(days=1), date_to)
+        cur = nxt
+
+
+def rcm_ledger_vs_3b(tenant, date_from, date_to):
+    """READ-ONLY. The ledger books RCM tax payable (2211-2213) on the bill date; GSTR-3B 3.1(d)
+    takes each RCM line in the month of its time of supply. Per month: ledger vs 3.1(d), and the
+    per-bill lines whose return month differs from the books month (timing differences)."""
+    from django.db.models import Q, Sum
+    from billing.itc import itc_summary, line_is_rcm, bill_tax_classification
+    from billing.models import PurchaseBill
+    from ledger.models import GeneralLedgerEntry
+    months = []
+    for m_start, m_end in _month_iter(date_from, date_to):
+        agg = GeneralLedgerEntry.objects.filter(
+            created_by=tenant, account__code__in=RCM_PAYABLE_CODES, date__gte=m_start, date__lte=m_end
+        ).aggregate(cr=Sum('credit'), dr=Sum('debit'))
+        ledger = (Decimal(str(agg['cr'] or 0)) - Decimal(str(agg['dr'] or 0))).quantize(Decimal('0.01'))
+        ret = sum(itc_summary(tenant, m_start, m_end)['rcm_payable'].values(), ZERO)
+        months.append({'month': _month(m_start), 'ledger_rcm_payable': str(ledger),
+                       'gstr3b_3_1_d_tax': str(ret), 'difference': str(ledger - ret)})
+    rows = []
+    rq = (PurchaseBill.objects.filter(created_by=tenant, bill_date__gte=date_from - timedelta(days=62))
+          .filter(Q(is_reverse_charge=True) | Q(items__is_rcm=True)).distinct()
+          .select_related('vendor', 'created_by').prefetch_related('items'))
+    for bill in rq:
+        books = _month(bill.bill_date)
+        for line, tos in rcm_line_times(bill):
+            ret_m = _month(tos)
+            if ret_m == books or not (date_from <= bill.bill_date <= date_to or date_from <= tos <= date_to):
+                continue
+            c = bill_tax_classification(bill, only='rcm', item_ids={line.pk})
+            tax = sum(c['rcm_payable'].values(), ZERO)
+            if tax == 0:
+                continue
+            rows.append({'bill_id': str(bill.id), 'bill_number': bill.bill_number,
+                         'bill_date': bill.bill_date.isoformat(), 'line_id': str(line.pk),
+                         'hsn_sac_code': getattr(line, 'hsn_sac_code', '') or '',
+                         'books_month': books, 'gstr3b_month': ret_m, 'time_of_supply': tos.isoformat(),
+                         'tax': str(tax),
+                         'reason': ('Books on bill date; 3.1(d) on time of supply '
+                                    '(services s.13(3) / goods s.12(3)).')})
+    return {'months': months, 'timing_differences': rows,
+            'note': ('Read-only. The ledger books RCM tax on the bill date; GSTR-3B 3.1(d) uses the '
+                     'time of supply. Differences listed here are timing only.')}

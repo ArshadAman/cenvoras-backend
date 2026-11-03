@@ -77,3 +77,19 @@ def rcm_payment_voucher_list(request):
 def _date_today():
     from billing.advances import today_ist
     return today_ist()
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def rcm_ledger_vs_3b_view(request):
+    """READ-ONLY: RCM tax payable ledger vs GSTR-3B 3.1(d) per month, with per-bill timing differences."""
+    from billing.rcm_documents import rcm_ledger_vs_3b
+    tenant = _tenant(request)
+    try:
+        start = _date(request.query_params.get('from'), None)
+        end = _date(request.query_params.get('to'), None)
+    except RcmDocumentError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    if not start or not end or start > end:
+        return Response({'error': 'Give ?from=YYYY-MM-DD&to=YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(rcm_ledger_vs_3b(tenant, start, end))

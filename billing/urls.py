@@ -30,6 +30,7 @@ urlpatterns = [
     path('purchase-bills/<uuid:pk>/rcm-self-invoice/', views_rcm.rcm_self_invoice_create, name='rcm_self_invoice_create'),
     path('rcm/self-invoices/', views_rcm.rcm_self_invoice_list, name='rcm_self_invoice_list'),
     path('rcm/payment-vouchers/', views_rcm.rcm_payment_voucher_list, name='rcm_payment_voucher_list'),
+    path('gst/rcm-ledger-vs-3b/', views_rcm.rcm_ledger_vs_3b_view, name='rcm_ledger_vs_3b'),
     path('vendor-products/', vendor_products, name='vendor_products'),
     path('vendor-payments/unpaid-bills/', vendor_payment_views.unpaid_purchase_bills, name='unpaid_purchase_bills'),
     path('vendor-payments/', vendor_payment_views.vendor_payment_create, name='vendor_payment_create'),

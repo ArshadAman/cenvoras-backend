@@ -149,6 +149,63 @@ class RcmDocumentTests(ItcRcmTests):
 
 
 
+    # ---- Rudra #219 round 2 -------------------------------------------------------------
+    def _mixed_bill(self):
+        # Billed 5 Aug, unpaid, received 5 Aug: goods line ToS 5 Aug (s.12(3)),
+        # service line ToS 5 Aug + 61 = 5 Oct (s.13(3)).
+        return self._post(self.unreg, [
+            self._line(price='10000', tax='5', is_rcm=True, hsn_sac_code='847130'),
+            self._line(price='2000', tax='18', is_rcm=True, hsn_sac_code='996511'),
+        ], bill_date='2026-08-05')
+
+    def test_mixed_bill_lines_split_across_months(self):
+        bill = self._mixed_bill()
+        self.assertEqual(self._31d('2026-08-01', '2026-08-31'), 250.0)   # goods line
+        self.assertEqual(self._31d('2026-10-01', '2026-10-31'), 180.0)   # service line
+        self.assertEqual(self._31d('2026-09-01', '2026-09-30'), 0.0)
+        # one self-invoice per bill
+        res = self.client.post(f'/api/billing/purchase-bills/{bill.id}/rcm-self-invoice/',
+                               {'date': '2026-08-20'}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(RcmSelfInvoice.objects.filter(purchase_bill=bill).count(), 1)
+
+    def _t4(self, start, end):
+        res = self.client.get(f'/api/billing/gst/gstr3b/?from={start}&to={end}')
+        self.assertEqual(res.status_code, 200, res.data)
+        return res.data['table_4_itc']
+
+    def test_4a3_same_3b_as_31d(self):
+        self._mixed_bill()
+        aug, octo = self._t4('2026-08-01', '2026-08-31'), self._t4('2026-10-01', '2026-10-31')
+        self.assertEqual(aug['itc_available']['inward_reverse_charge']['camt'], 250.0)
+        self.assertEqual(octo['itc_available']['inward_reverse_charge']['camt'], 180.0)
+
+    def test_blocked_rcm_never_in_4a3(self):
+        self._post(self.unreg, [self._line(price='10000', tax='5', is_rcm=True, hsn_sac_code='847130',
+                                           itc_blocked=True)], bill_date='2026-08-05')
+        self.assertEqual(self._31d('2026-08-01', '2026-08-31'), 250.0)   # tax still payable
+        t4 = self._t4('2026-08-01', '2026-08-31')
+        self.assertEqual(t4['itc_available']['inward_reverse_charge']['camt'], 0.0)
+        self.assertEqual(t4['itc_available']['all_other_itc']['camt'], 250.0)   # shown in 4A ...
+        self.assertEqual(t4['itc_reversed']['as_per_rules']['camt'], 250.0)     # ... reversed in 4B(1)
+        self.assertEqual(t4['net_itc_available']['camt'], 0.0)
+
+    def test_ledger_vs_3b_reconciliation(self):
+        self._mixed_bill()
+        res = self.client.get('/api/billing/gst/rcm-ledger-vs-3b/?from=2026-08-01&to=2026-10-31')
+        self.assertEqual(res.status_code, 200, res.data)
+        months = {m['month']: m for m in res.data['months']}
+        self.assertEqual(Decimal(months['2026-08']['ledger_rcm_payable']), Decimal('860.00'))  # books: bill date
+        self.assertEqual(Decimal(months['2026-08']['gstr3b_3_1_d_tax']), Decimal('500.00'))
+        self.assertEqual(Decimal(months['2026-10']['ledger_rcm_payable']), Decimal('0.00'))
+        self.assertEqual(Decimal(months['2026-10']['gstr3b_3_1_d_tax']), Decimal('360.00'))
+        rows = res.data['timing_differences']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['books_month'], rows[0]['gstr3b_month'], rows[0]['tax']),
+                         ('2026-08', '2026-10', '360.00'))
+        self.assertEqual(self.client.get('/api/billing/gst/rcm-ledger-vs-3b/').status_code, 400)
+
+
 # Reuse ItcRcmTests' fixtures only; don't re-run its tests here.
 for _name in [n for n in dir(ItcRcmTests) if n.startswith('test_')]:
     if _name not in RcmDocumentTests.__dict__:

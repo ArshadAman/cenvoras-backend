@@ -147,8 +147,12 @@ def bill_tax_classification(bill, buyer_state_code=None, only=None, item_ids=Non
     out = {'taxable': ZERO, 'vendor_payable': ZERO, 'itc_normal': _z(), 'itc_rcm': _z(),
            'rcm_payable': _z(), 'rcm_taxable': ZERO, 'blocked_tax': ZERO, 'ineligible_tax': ZERO,
            'is_interstate': inter, 'vendor_registered': registered,
-           'itc_4a_normal': _z(), 'itc_4a_rcm': _z(), 'blocked_split': _z(), 'lost_4d2': _z(),
-           'lost_tax': ZERO}
+           'itc_4a_normal': _z(), 'itc_4a_rcm': _z(), 'itc_4a_imps': _z(), 'blocked_split': _z(),
+           'lost_4d2': _z(), 'lost_tax': ZERO}
+    # Import of services (Rudra, #226): an RCM line with a SAC (chapter 99) on a bill whose GST
+    # treatment is 'overseas' (supplier outside India). Its ITC goes to 4A(2), not 4A(3); 4A(3) is
+    # domestic reverse charge only. The 3.1(d) tax is unchanged (import of services is in 3.1(d)).
+    overseas = (getattr(bill, 'gst_treatment', '') or '').strip().lower() == 'overseas'
     lost = registered and (itc_pos_lost(bill, buyer_state_code) or itc_time_barred(bill))
     for item in bill.items.all():
         taxable, tax, *_ = calculate_item_tax_breakup(item, is_interstate=False)
@@ -179,7 +183,8 @@ def bill_tax_classification(bill, buyer_state_code=None, only=None, item_ids=Non
             continue
         # Rudra (#219): s.17(5)-blocked RCM ITC never shows in 4A(3); like other blocked ITC it is
         # shown in 4A (all other ITC) and reversed in 4B(1).
-        gross = 'itc_4a_rcm' if (rcm and not blocked) else 'itc_4a_normal'
+        imps = rcm and overseas and (getattr(item, 'hsn_sac_code', '') or '').strip().startswith('99')
+        gross = ('itc_4a_imps' if imps else 'itc_4a_rcm') if (rcm and not blocked) else 'itc_4a_normal'
         for k, v in parts:
             out[gross][k] += v
         if blocked:
@@ -209,7 +214,7 @@ def itc_summary(tenant, date_from, date_to):
            'itc_rcm': {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO},
            'rcm_payable': {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO},
            'rcm_taxable': ZERO, 'blocked_tax': ZERO, 'ineligible_tax': ZERO, 'lost_tax': ZERO}
-    for b in ('itc_4a_normal', 'itc_4a_rcm', 'blocked_split', 'lost_4d2'):
+    for b in ('itc_4a_normal', 'itc_4a_rcm', 'itc_4a_imps', 'blocked_split', 'lost_4d2'):
         tot[b] = {'cgst': ZERO, 'sgst': ZERO, 'igst': ZERO}
     # PurchaseBill has no draft/cancelled status in Cenvora; every saved bill counts.
     def _bills():
@@ -235,7 +240,7 @@ def itc_summary(tenant, date_from, date_to):
 
     for b in _bills():
         for bucket in ('itc_normal', 'itc_rcm', 'rcm_payable', 'itc_4a_normal', 'itc_4a_rcm',
-                       'blocked_split', 'lost_4d2'):
+                       'itc_4a_imps', 'blocked_split', 'lost_4d2'):
             for k in ('cgst', 'sgst', 'igst'):
                 tot[bucket][k] += b[bucket][k]
         for k in ('rcm_taxable', 'blocked_tax', 'ineligible_tax', 'lost_tax'):

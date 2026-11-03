@@ -837,7 +837,9 @@ def gstr3b_summary(request):
         'table_4_itc': {
             'itc_available': {
                 'import_goods': {'iamt': 0.0, 'csamt': 0.0},
-                'import_services': {'iamt': 0.0, 'csamt': 0.0},
+                # 4A(2): RCM SAC lines on 'overseas' bills (see billing.itc). Same cash-paid RCM ITC,
+                # so it is inside itc_rcm and therefore inside 4C.
+                'import_services': {'iamt': float(_itc['itc_4a_imps']['igst']), 'csamt': 0.0},
                 'inward_reverse_charge': {'iamt': float(_4a_r['igst']), 'camt': float(_4a_r['cgst']),
                                           'samt': float(_4a_r['sgst']), 'csamt': 0.0},
                 'inward_isd': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
@@ -858,8 +860,12 @@ def gstr3b_summary(request):
                 'iamt': float(net_itc_igst), 'camt': float(net_itc_cgst), 'samt': float(net_itc_sgst), 'csamt': 0.0,
             },
             'ineligible_itc': {
-                # 4D(1): ITC reclaimed that was reversed under 4B(2) in an earlier period. Cenvora does
-                # not track reclaims yet, so 0. Blocked s.17(5) ITC is never here: it is in 4A and 4B(1).
+                # 4D is FOR INFORMATION ONLY (Rudra, #226): never part of 4C / net ITC. net_itc_* above
+                # is built from itc_normal + itc_rcm - 4B and never reads these rows.
+                # 4D(1): ITC reclaimed that was reversed under 4B(2) in an earlier period. Read-only at 0:
+                # Cenvora does not track reclaims yet. When reclaims are built, 4D(1) is the SAME amount
+                # that is re-added in 4A(5), reported here for information - not an extra amount on top.
+                # Blocked s.17(5) ITC is never here: it is in 4A and reversed in 4B(1).
                 'itc_reclaimed': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
                 # 4D(2): ineligible ITC u/s 16(4) and ITC restricted due to PoS rules.
                 'others': {'iamt': float(_4d2['igst']), 'camt': float(_4d2['cgst']),

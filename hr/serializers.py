@@ -842,7 +842,7 @@ class SalaryComponentSerializer(serializers.ModelSerializer):
         model = SalaryComponent
         fields = [
             'id', 'name', 'type', 'component_type', 'calculation_base',
-            'is_basic', 'value', 'percentage', 'is_taxable',
+            'is_basic', 'is_dearness_allowance', 'value', 'percentage', 'is_taxable',
             'pf_applicable', 'esi_applicable', 'pt_applicable', 'tds_applicable',
             'employee_contribution_pct', 'employer_contribution_pct',
             'is_active', 'order'

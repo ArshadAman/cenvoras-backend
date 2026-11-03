@@ -483,6 +483,12 @@ class SalaryComponent(models.Model):
         default=False,
         help_text='Designates this component as the Basic salary component.',
     )
+    # EPF Act s.6: PF wages = Basic + Dearness Allowance (+ retaining allowance). Off by default;
+    # never auto-set from the component's name.
+    is_dearness_allowance = models.BooleanField(
+        default=False,
+        help_text='Dearness Allowance: counted in PF wages together with Basic (capped at the PF wage ceiling).',
+    )
     # For fixed: INR amount. For pct_*: percentage value (e.g. 40.00 = 40%).
     value = models.DecimalField(max_digits=10, decimal_places=4, default=0)
     percentage = models.DecimalField(max_digits=7, decimal_places=4, default=0)

@@ -760,7 +760,8 @@ def compute_payslip_for_employee(employee, payroll_run):
                                f'(total deductions capped at {getattr(settings, "doj_recovery_cap_percent", 50)}% of wages).')
     if doj['warnings']:
         deduction_reasons['DOJ correction'] = {'amount': '0', 'reason': ' '.join(doj['warnings']),
-                                               'warnings': doj['warnings']}
+                                               'warnings': doj['warnings'],
+                                               'lines': doj.get('breakdown', [])}
 
     payslip = Payslip(
         tenant=tenant,

@@ -200,11 +200,12 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         """UAT P1 #10: admin-only DOJ correction. GET ?new_doj= previews; POST applies (reason required)."""
         from hr.services.doj_correction import (
             DOJCorrectionError, apply_doj_correction, compute_correction, next_open_month,
-            RECOVERY_PF_WARNING, ESIC_FLAG,
+            correction_warnings, recomputable_correction, target_run,
         )
 
-        def doj_warnings(amount):
-            return [RECOVERY_PF_WARNING] if amount < 0 else ([f'Arrears: {ESIC_FLAG}'] if amount > 0 else [])
+        def recalc_flag(amount, ty, tm):
+            run = target_run(employee.tenant, ty, tm)
+            return bool(amount != 0 and run is not None and run.status == 'calculated')
         import datetime as _dt
         if getattr(request.user, 'role', None) != 'admin':
             return Response({'error': 'Only an admin can correct a date of joining.'}, status=403)
@@ -215,20 +216,67 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             return Response({'new_doj': 'Give the corrected date of joining as YYYY-MM-DD.'}, status=400)
         if request.method == 'GET':
-            amount, lines = compute_correction(employee, new_doj)
             ty, tm = next_open_month(employee.tenant)
-            return Response({'old_doj': str(employee.date_of_joining), 'new_doj': str(new_doj),
+            old_doj = employee.date_of_joining
+            prior = recomputable_correction(employee) if new_doj == old_doj else None
+            if prior is not None:
+                old_doj = prior.old_doj  # preview recomputing a ₹0 correction saved before the fix
+            amount, lines = compute_correction(employee, new_doj, old_doj=old_doj, target=(ty, tm))
+            return Response({'old_doj': str(old_doj), 'new_doj': str(new_doj),
                              'amount': str(amount), 'kind': 'arrears' if amount >= 0 else 'recovery',
                              'target_month': tm, 'target_year': ty, 'lines': lines,
-                             'warnings': doj_warnings(amount)})
+                             'recompute_of': str(prior.id) if prior else None,
+                             'target_needs_recalculation': recalc_flag(amount, ty, tm),
+                             'warnings': correction_warnings(amount, lines, employee.tenant, (ty, tm))})
+        recompute = str(request.data.get('recompute', '')).lower() in ('1', 'true', 'yes')
         try:
-            corr = apply_doj_correction(employee, new_doj, request.data.get('reason'), request.user)
+            corr = apply_doj_correction(employee, new_doj, request.data.get('reason'), request.user,
+                                        recompute=recompute)
         except DOJCorrectionError as exc:
             return Response({'error': str(exc)}, status=400)
+        amount, ty, tm = corr.amount, corr.target_year, corr.target_month
         return Response({'id': str(corr.id), 'old_doj': str(corr.old_doj), 'new_doj': str(corr.new_doj),
-                         'amount': str(corr.amount), 'kind': corr.kind,
+                         'amount': str(amount), 'kind': corr.kind,
+                         'target_month': tm, 'target_year': ty, 'lines': corr.breakdown,
+                         'target_needs_recalculation': recalc_flag(amount, ty, tm),
+                         'warnings': correction_warnings(amount, corr.breakdown, employee.tenant, (ty, tm))},
+                        status=201)
+
+    @action(detail=True, methods=['get'], url_path='doj-corrections')
+    def doj_corrections(self, request, pk=None):
+        """List this employee's DOJ corrections with breakdown, history and whether they can still be edited."""
+        from hr.models import DOJCorrection
+        from hr.services.doj_correction import correction_is_editable
+        employee = self.get_object()
+        out = []
+        for c in DOJCorrection.objects.filter(employee=employee).select_related('applied_payslip__payroll_run'):
+            out.append({'id': str(c.id), 'old_doj': str(c.old_doj), 'new_doj': str(c.new_doj),
+                        'amount': str(c.amount), 'kind': c.kind, 'reason': c.reason,
+                        'target_month': c.target_month, 'target_year': c.target_year,
+                        'lines': c.breakdown, 'history': c.history, 'carried': bool(c.carried_from_id),
+                        'editable': correction_is_editable(c)})
+        return Response(out)
+
+    @action(detail=True, methods=['post'], url_path=r'doj-corrections/(?P<corr_id>[^/.]+)/adjust')
+    def doj_correction_adjust(self, request, pk=None, corr_id=None):
+        """Admin edit of per-month arrears amounts until the target run is approved. Body: {lines:[{year,month,amount}], reason}."""
+        from hr.models import DOJCorrection
+        from hr.services.doj_correction import DOJCorrectionError, adjust_correction_lines, correction_warnings
+        if getattr(request.user, 'role', None) != 'admin':
+            return Response({'error': 'Only an admin can edit a DOJ correction.'}, status=403)
+        employee = self.get_object()
+        corr = DOJCorrection.objects.filter(employee=employee, pk=corr_id).first()
+        if corr is None:
+            return Response({'error': 'DOJ correction not found.'}, status=404)
+        try:
+            corr = adjust_correction_lines(corr, request.data.get('lines'), request.data.get('reason'), request.user)
+        except DOJCorrectionError as exc:
+            return Response({'error': str(exc)}, status=400)
+        return Response({'id': str(corr.id), 'amount': str(corr.amount), 'kind': corr.kind,
                          'target_month': corr.target_month, 'target_year': corr.target_year,
-                         'lines': corr.breakdown, 'warnings': doj_warnings(corr.amount)}, status=201)
+                         'lines': corr.breakdown, 'history': corr.history,
+                         'warnings': correction_warnings(corr.amount, corr.breakdown, employee.tenant,
+                                                         (corr.target_year, corr.target_month))})
 
     def perform_create(self, serializer):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)

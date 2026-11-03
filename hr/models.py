@@ -1455,6 +1455,9 @@ class DOJCorrection(models.Model):
     carried_from = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True,
                                      related_name='carries',
                                      help_text='Excess recovery carried forward from this correction.')
+    # Rule 3(1) edit log: every recompute / admin amount edit appends
+    # {action, at, by, by_email, reason, old: {amount, breakdown, target_month, target_year}}.
+    history = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

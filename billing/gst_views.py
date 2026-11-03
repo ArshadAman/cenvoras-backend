@@ -50,13 +50,9 @@ def hsn_summary_report(request):
     hsn_dict = {}
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
 
         seller_state_code = get_seller_state_code(tenant)
         for inv in invoices:
@@ -245,13 +241,9 @@ def tax_register(request):
     }
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
         invoices = invoices.order_by('-invoice_date', '-created_at')
 
         for inv in invoices:
@@ -299,15 +291,8 @@ def tax_register(request):
             totals['total_tax'] += inv_tax
             totals['total'] += inv.total_amount
 
-        credit_notes = CreditNote.objects.filter(
-            created_by=tenant,
-            original_invoice__isnull=False,
-            original_invoice__status='final',
-        ).select_related('customer', 'original_invoice').prefetch_related('items')
-        if from_date:
-            credit_notes = credit_notes.filter(date__gte=from_date)
-        if to_date:
-            credit_notes = credit_notes.filter(date__lte=to_date)
+        credit_notes = sales_register_credit_notes(tenant, from_date, to_date
+                                                   ).select_related('customer', 'original_invoice').prefetch_related('items')
         for cn in credit_notes.order_by('-date', '-created_at'):
             brk = credit_note_tax_breakup(cn, seller_state_code)
             gstin = (cn.customer.gstin.strip().upper() if cn.customer and cn.customer.gstin else '')

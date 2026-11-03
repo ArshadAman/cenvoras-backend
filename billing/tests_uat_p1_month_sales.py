@@ -47,11 +47,11 @@ class MonthSalesTests(FourFixesBase):
 
     def test_sales_for_month_taxable_net_of_cns_and_boundaries(self):
         self._inv('I-SEP', '118.00', d=date(2026, 9, 30), taxable='100')
-        self._inv('I-OCT1', '1180.00', d=date(2026, 10, 1), taxable='1000')
+        oct1 = self._inv('I-OCT1', '1180.00', d=date(2026, 10, 1), taxable='1000')
         self._inv('I-OCT31', '590.00', d=date(2026, 10, 31), taxable='500')
         self._inv('I-NOV', '236.00', d=date(2026, 11, 1), taxable='200')
         self._inv('I-DRAFT', '1180.00', d=date(2026, 10, 15), status='draft', taxable='1000')
-        self._cn('CN-OCT', '118.00', d=date(2026, 10, 20), taxable='100')
+        self._cn('CN-OCT', '118.00', oct1, d=date(2026, 10, 20), taxable='100')
         r = sales_for_month(self.tenant, 2026, 10)
         self.assertEqual(r['invoice_taxable'], Decimal('1500.00'))
         self.assertEqual(r['credit_note_taxable'], Decimal('100.00'))
@@ -60,3 +60,32 @@ class MonthSalesTests(FourFixesBase):
         self.assertIn('October 2026', ans)
         self.assertIn('1,400.00', ans)
         self.assertIsNone(answer_month_sales_question('top product?', self.tenant, date(2026, 11, 3)))
+
+
+class MonthSalesMatchesRegisterTests(FourFixesBase):
+    _inv = MonthSalesTests._inv
+    _cn = MonthSalesTests._cn
+
+    def test_ai_month_sales_equals_tax_register(self):
+        from rest_framework.test import APIClient
+        oct_inv = self._inv('I-A', '1180.00', d=date(2026, 10, 5), taxable='1000')
+        sep_inv = self._inv('I-B', '590.00', d=date(2026, 9, 25), taxable='500')
+        draft = self._inv('I-D', '236.00', d=date(2026, 10, 6), status='draft', taxable='200')
+        self._cn('CN-L1', '118.00', oct_inv, d=date(2026, 10, 10), taxable='100')   # linked, same month
+        self._cn('CN-L2', '59.00', sep_inv, d=date(2026, 10, 12), taxable='50')     # linked to Sept invoice, dated Oct
+        self._cn('CN-L3', '23.60', oct_inv, d=date(2026, 11, 2), taxable='20')      # dated Nov: excluded
+        self._cn('CN-U', '236.00', None, d=date(2026, 10, 15), taxable='200')       # unlinked: not in register
+        self._cn('CN-DR', '23.60', draft, d=date(2026, 10, 16), taxable='20')       # on a draft invoice
+        r = sales_for_month(self.tenant, 2026, 10)
+        c = APIClient(); c.force_authenticate(self.tenant)
+        resp = c.get('/api/billing/gst/tax-register/', {'from': '2026-10-01', 'to': '2026-10-31', 'type': 'sales'})
+        if resp.status_code == 404:
+            from django.urls import reverse
+            resp = c.get(reverse('tax_register'), {'from': '2026-10-01', 'to': '2026-10-31', 'type': 'sales'})
+        self.assertEqual(resp.status_code, 200)
+        reg = resp.json()
+        self.assertEqual(Decimal(str(reg['totals']['taxable'])).quantize(Decimal('0.01')), r['sales'])
+        self.assertEqual(r['sales'], Decimal('850.00'))
+        cn_rows = [x for x in reg['results'] if x.get('doc_type') == 'credit_note']
+        self.assertEqual(len(cn_rows), r['credit_note_count'])
+        self.assertEqual(r['credit_note_count'], 2)

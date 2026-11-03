@@ -1033,7 +1033,12 @@ def get_ledger_stats(request):
         customers_query = customers_query.filter(id=customer_id)
         
     total_customers = customers_query.count()
-    outstanding_balance = customers_query.aggregate(total=Sum('current_balance'))['total'] or 0
+    # Retest item 2c: Dr - Cr over every GL entry is always ~0 (both legs of each voucher), so
+    # 'Net Balance' / outstanding use the shared customer ledger formula instead.
+    from billing.balance_sync import customer_balance_breakdown, invoice_outstanding_map
+    _brk = customer_balance_breakdown(user, customer_ids=list(customers_query.values_list('id', flat=True)))
+    outstanding_balance = sum((r['outstanding'] for r in _brk.values()), Decimal('0.00'))
+    net_balance = outstanding_balance
 
     # Overdue invoice stats
     overdue_query = SalesInvoice.objects.filter(
@@ -1056,9 +1061,9 @@ def get_ledger_stats(request):
     if customer_id:
         invoice_outstanding = invoice_outstanding.filter(customer_id=customer_id)
 
-    invoice_outstanding_total = invoice_outstanding.aggregate(
-        total=Sum(F('total_amount') - F('amount_paid'))
-    )['total'] or 0
+    invoice_outstanding = invoice_outstanding.exclude(status='draft')
+    invoice_outstanding_total = sum(invoice_outstanding_map(
+        invoice_outstanding.only('id', 'total_amount', 'amount_paid')).values(), Decimal('0.00'))
 
     unapplied_credits = max(float(invoice_outstanding_total) - float(outstanding_balance), 0.0)
     unmapped_outstanding = max(float(outstanding_balance) - float(invoice_outstanding_total), 0.0)

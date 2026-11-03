@@ -138,6 +138,17 @@ class DesignationViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
+# UAT item 1 (retest): approved/paid/finalised payslips (and their accrual postings) must not be
+# silently regenerated. Only draft/calculated/review runs are (re)computed; use Reopen first.
+CLOSED_PAYROLL_STATUSES = ('approved', 'paid', 'locked', 'finalised')
+
+
+def _block_recalc_of_closed_run(run):
+    if run.status in CLOSED_PAYROLL_STATUSES or getattr(run, 'finalised_at', None):
+        raise ValidationError(
+            f"Cannot recalculate a payroll run that is {run.status}. Reopen it first (admin only).")
+
+
 class EmployeeViewSet(viewsets.ModelViewSet):
     """
     CRUD ViewSet for Employee.
@@ -1367,6 +1378,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
 
         if PayrollRun.objects.filter(tenant=tenant, month=instance.month, year=instance.year, status='finalised').exists():
             raise ValidationError("payroll_already_finalised")
+        _block_recalc_of_closed_run(instance)
 
         instance.status = 'processing'
         instance.save(update_fields=['status'])
@@ -1396,6 +1408,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         if instance.status == 'locked':
             raise ValidationError("Cannot recalculate a locked payroll run. Please reopen first.")
+        _block_recalc_of_closed_run(instance)
 
         run_payroll(str(instance.id))
         instance.refresh_from_db()

@@ -371,6 +371,12 @@ class AIChatView(APIView):
                           "Try: *\"What is my top product?\"* or *\"How are sales today?\"*"
             })
 
+        # UAT P1 item 3: "October sales" etc. -> deterministic month figure (IST, taxable, net of CNs).
+        from billing.sales_metrics import answer_month_sales_question
+        month_answer = answer_month_sales_question(question, getattr(user, 'active_tenant', user))
+        if month_answer:
+            return Response({"answer": month_answer, "question": question, "mode": "sales_engine", "action": None})
+
         # Gather live data
         context = gather_business_context(user)
 

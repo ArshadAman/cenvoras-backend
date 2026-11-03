@@ -5,7 +5,7 @@ from decimal import Decimal
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.decorators import action
 from django.db import transaction
 from django.db.models import ProtectedError
@@ -143,7 +143,24 @@ class DesignationViewSet(viewsets.ModelViewSet):
 CLOSED_PAYROLL_STATUSES = ('approved', 'paid', 'locked', 'finalised')
 
 
+PAID_RUN_CORRECTION_MSG = (
+    "This payroll run has been paid, or its TDS, PF or ESI has been deposited or filed, so it "
+    "cannot be reopened and its payslips cannot be regenerated. Correct it through arrears or "
+    "recovery lines in the next open payroll run.")
+
+
+def _is_payroll_admin(user):
+    role = getattr(user, 'role', '')
+    if user.is_superuser or role == 'admin':
+        return True
+    # Account owner (no parent) is the business admin unless explicitly given a lesser role.
+    return getattr(user, 'parent', None) is None and role not in ('salesman', 'manager', 'accountant', 'hr')
+
+
 def _block_recalc_of_closed_run(run):
+    # Paid / remitted runs are final even if somehow reopened (Rudra).
+    if run.is_paid_or_remitted:
+        raise ValidationError(PAID_RUN_CORRECTION_MSG)
     if run.status in CLOSED_PAYROLL_STATUSES or getattr(run, 'finalised_at', None):
         raise ValidationError(
             f"Cannot recalculate a payroll run that is {run.status}. Reopen it first (admin only).")
@@ -1596,28 +1613,59 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         audit_service.log_update(request, instance, before=before, after={'status': 'locked'})
         return Response({'status': 'Payroll run locked successfully'}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='mark-statutory-deposited')
+    def mark_statutory_deposited(self, request, pk=None):
+        """Record that TDS / PF / ESI for this run was deposited or filed. Admin-only, logged.
+        Body: {"component": "tds"|"pf"|"esi", "deposited_at": optional ISO datetime}. Not reversible via API."""
+        instance = self.get_object()
+        if not _is_payroll_admin(request.user):
+            raise PermissionDenied("Only an admin can record a statutory deposit.")
+        component = str(request.data.get('component', '')).strip().lower()
+        if component not in ('tds', 'pf', 'esi'):
+            raise ValidationError("component must be one of: tds, pf, esi.")
+        if instance.status not in ('approved', 'paid', 'locked', 'finalised'):
+            raise ValidationError("Only an approved or paid payroll run can have statutory deposits recorded.")
+        field = f'{component}_deposited_at'
+        when = timezone.now()
+        raw = request.data.get('deposited_at')
+        if raw:
+            from django.utils.dateparse import parse_datetime, parse_date
+            dt = parse_datetime(str(raw))
+            if dt is None:
+                d = parse_date(str(raw))
+                if d is None:
+                    raise ValidationError("deposited_at must be an ISO date or datetime.")
+                import datetime as _dt
+                dt = _dt.datetime.combine(d, _dt.time(0, 0))
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt)
+            when = dt
+        before = {field: str(getattr(instance, field))}
+        setattr(instance, field, when)
+        instance.save(update_fields=[field])
+        audit_service.log_update(request, instance, before=before, after={field: when.isoformat()},
+                                 model_name="PayrollStatutoryDeposit")
+        return Response(self.get_serializer(instance).data, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'])
     def reopen(self, request, pk=None):
+        """Admin-only; reason required; logged (who/when/why). Only approved-but-UNPAID runs (Rudra)."""
         instance = self.get_object()
+        if not _is_payroll_admin(request.user):
+            raise PermissionDenied("Only an admin can reopen a payroll run.")
+
+        reason = str(request.data.get('reason', '') or '').strip()
+        if not reason:
+            raise ValidationError("A reason is required to reopen a payroll run.")
+
+        if instance.is_paid_or_remitted:
+            raise ValidationError(PAID_RUN_CORRECTION_MSG)
+
         if instance.status == 'draft':
             raise ValidationError("Payroll run is already in draft status.")
 
-        if instance.status not in ['calculated', 'review', 'approved', 'paid', 'locked'] and not getattr(instance, 'finalised_at', None):
-            raise ValidationError("Only processed, approved, paid, or locked payroll runs can be reopened.")
-
-        role = getattr(request.user, 'role', '')
-        is_owner_or_admin = (
-            request.user.is_superuser
-            or request.user.is_staff
-            or getattr(request.user, 'parent', None) is None
-            or role in ['admin', 'hr', 'accountant']
-        )
-        if not is_owner_or_admin:
-            raise ValidationError("Only HR, Admin, or authorized roles are authorized to reopen payroll.")
-
-        reason = request.data.get('reason', '').strip()
-        if not reason:
-            raise ValidationError("A mandatory reason must be provided to reopen payroll.")
+        if instance.status not in ['calculated', 'review', 'approved', 'locked', 'finalised'] and not getattr(instance, 'finalised_at', None):
+            raise ValidationError("Only processed or approved (unpaid) payroll runs can be reopened.")
 
         before = {'status': instance.status}
         # Reverse accounting entries and restore loans if previously approved/paid/locked
@@ -1641,25 +1689,22 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         instance.reopen_reason = reason
         instance.approved_at = None
         instance.approved_by = None
-        instance.paid_at = None
-        instance.paid_by = None
+        instance.finalised_at = None
         instance.locked_at = None
         instance.locked_by = None
         instance.save(update_fields=[
             'status', 'is_reopened', 'reopened_by', 'reopened_at', 'reopen_reason', 'reopen_history',
-            'approved_at', 'approved_by', 'paid_at', 'paid_by', 'locked_at', 'locked_by'
+            'approved_at', 'approved_by', 'finalised_at', 'locked_at', 'locked_by'
         ])
 
-        try:
-            audit_service.log_update(
-                request,
-                instance,
-                before=before,
-                after={'status': 'draft', 'reopened_reason': reason},
-                model_name="PayrollReopen"
-            )
-        except Exception:
-            pass
+        audit_service.log_update(
+            request,
+            instance,
+            before=before,
+            after={'status': 'draft', 'reopened_reason': reason,
+                   'reopened_by': request.user.username, 'reopened_at': now_dt.isoformat()},
+            model_name="PayrollReopen"
+        )
 
         return Response({'status': 'Payroll run reopened and accounting entries reversed for editing'}, status=status.HTTP_200_OK)
 

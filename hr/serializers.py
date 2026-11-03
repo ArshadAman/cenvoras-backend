@@ -1049,6 +1049,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'total_employer_contributions', 'approved_at', 'approved_by',
             'paid_at', 'paid_by', 'locked_at', 'locked_by', 'finalised_at',
             'is_reopened', 'reopened_at', 'reopened_by', 'reopen_history',
+            'tds_deposited_at', 'pf_deposited_at', 'esi_deposited_at',
             'created_at', 'updated_at'
         ]
 

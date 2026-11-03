@@ -1382,3 +1382,43 @@ class EmployeeNotification(models.Model):
         target = self.employee.full_name if self.employee else "ALL"
         return f"{self.title} to {target}"
 
+
+
+class DOJCorrection(models.Model):
+    """
+    UAT P1 #10: admin-only Date-of-Joining correction (mandatory reason).
+    Never rewrites locked/run months: the pay difference for months already in
+    payroll is carried as ONE arrears (+) or recovery (−) line into the next
+    open payroll (target_month/target_year). Additive table.
+    """
+    STATUS_CHOICES = [('pending', 'Pending'), ('applied', 'Applied')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name='hr_doj_corrections')
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='doj_corrections')
+    old_doj = models.DateField()
+    new_doj = models.DateField()
+    reason = models.TextField()
+    corrected_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                     related_name='+')
+    # Net amount: > 0 arrears payable, < 0 recovery.
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    breakdown = models.JSONField(default=list, blank=True,
+                                 help_text='Per-month lines: month, year, working_days, old/new payable days, gross, delta.')
+    target_month = models.PositiveSmallIntegerField()
+    target_year = models.PositiveIntegerField()
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    applied_payslip = models.ForeignKey('Payslip', on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def kind(self):
+        return 'arrears' if self.amount >= 0 else 'recovery'
+
+    def __str__(self):
+        return f"DOJ correction {self.employee} {self.old_doj}→{self.new_doj} ({self.amount})"

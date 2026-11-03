@@ -530,6 +530,13 @@ def compute_payslip_for_employee(employee, payroll_run):
         total_ab_amount += calc_amt
         ab_breakdown.append((label, calc_amt))
 
+    # UAT P1 #10: DOJ-correction arrears (+) / recovery (−) for months already run.
+    from hr.services.doj_correction import pending_lines_for
+    doj_lines = pending_lines_for(employee, month, year)
+    for label, amt, _c in doj_lines:
+        total_ab_amount += amt
+        ab_breakdown.append((label, amt))
+
     gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
 
     # Basic component lookup for PF — same fallback as salary card (50% CTC / computed Basic)

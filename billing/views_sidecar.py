@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -194,7 +195,7 @@ def convert_order_to_invoice(request, pk):
                         continue
 
                     try:
-                        qty = int(entry.get('quantity', 0))
+                        qty = to_qty(entry.get('quantity', 0))
                     except (ValueError, TypeError):
                         qty = 0
 
@@ -365,8 +366,8 @@ def convert_order_to_invoice(request, pk):
                     bonus_line = SalesInvoiceItem(
                         sales_invoice=invoice,
                         product=b_prod,
-                        quantity=int(b_item.get('quantity', 0) or 0),
-                        free_quantity=int(b_item.get('free_quantity', 0) or 0),
+                        quantity=to_qty(b_item.get('quantity', 0) or 0),
+                        free_quantity=to_qty(b_item.get('free_quantity', 0) or 0),
                         price=Decimal('0.00'),
                         amount=Decimal('0.00'),
                         unit=b_item.get('unit') or 'pcs',
@@ -618,13 +619,14 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
 
     # 3. Batch Revert SalesOrderItem dispatched_quantity (Single query using CASE/WHEN with Greatest())
     if so_item_deltas:
-        from django.db.models import PositiveIntegerField
+        from django.db.models import DecimalField as _QtyField, Value as _Val
         cases = [
-            When(id=item_id, then=Greatest(F('dispatched_quantity') - int(delta), 0))
+            When(id=item_id, then=Greatest(F('dispatched_quantity') - to_qty(delta),
+                                           _Val(Decimal('0'), output_field=_QtyField(max_digits=15, decimal_places=3))))
             for item_id, delta in so_item_deltas.items()
         ]
         SalesOrderItem.objects.filter(id__in=so_item_deltas.keys()).update(
-            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'), output_field=PositiveIntegerField())
+            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'), output_field=_QtyField(max_digits=15, decimal_places=3))
         )
 
     # 4. Batch Recalculate SalesOrder stages for all affected Sales Orders (Single aggregated query)
@@ -824,7 +826,7 @@ def convert_order_to_challan(request, pk):
                     continue
                 
                 try:
-                    qty = int(entry.get('quantity', 0))
+                    qty = to_qty(entry.get('quantity', 0))
                 except (ValueError, TypeError):
                     qty = 0
                 
@@ -982,7 +984,7 @@ def convert_challan_to_invoice(request, pk):
                         c_item.price if c_item.price is not None
                         else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
                     ))
-                    qty = int(c_item.quantity or 1)
+                    qty = to_qty(c_item.quantity or 1)
                     discount = Decimal(str(c_item.discount or 0))
                     tax = Decimal(str(c_item.tax or 0))
                     base_amount = qty * price
@@ -1175,7 +1177,7 @@ def bulk_convert_challans_to_invoice(request):
                             c_item.price if c_item.price is not None
                             else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
                         ))
-                        qty = int(c_item.quantity or 1)
+                        qty = to_qty(c_item.quantity or 1)
                         discount = Decimal(str(c_item.discount or 0))
                         tax = Decimal(str(c_item.tax or 0))
                         base_amount = qty * price

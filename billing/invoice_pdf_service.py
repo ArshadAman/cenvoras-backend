@@ -527,7 +527,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         # Item title + scheme badge if any
         desc_text = f"<b>{p_name}</b>"
         if free_qty > 0:
-            desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty)} Free (Promotional Offer)</b></font>"
+            desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty) if free_qty % 1 == 0 else Decimal(str(free_qty)).normalize()} Free (Promotional Offer)</b></font>"
 
         item_desc = getattr(item, 'description', '') or ''
         if not item_desc and hasattr(item, 'product') and item.product and getattr(item.product, 'description', ''):
@@ -544,7 +544,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             clean_mfr = escape(str(mfr).strip())
             desc_text += f"<br/><font color='#64748b' size=7><i>Mfr: {clean_mfr}</i></font>"
 
-        qty_display = f"{int(qty) if qty % 1 == 0 else qty}"
+        qty_display = f"{int(qty) if qty % 1 == 0 else Decimal(str(qty)).normalize()}"
         if getattr(item, 'unit', None):
             qty_display += f" {item.unit}"
 

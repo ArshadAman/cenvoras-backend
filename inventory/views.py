@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 import csv
 import hashlib
 import json
@@ -14,7 +15,8 @@ from django.http import HttpResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.db import transaction
-from django.db.models import Sum, F
+from decimal import Decimal
+from django.db.models import Sum, F, Value, DecimalField
 from django.db.models.functions import Coalesce
 from cenvoras.cache_utils import CACHE_TTL_MEDIUM, cache_get_or_set, tenant_cache_key
 from .models import Product, Warehouse, StockPoint, StockTransfer, ProductBatch
@@ -405,7 +407,7 @@ def stock_transfer_preview(request):
                 batch = ProductBatch.objects.filter(product=product).order_by('created_at').first()
             if batch is None:
                 return Response({'items': [f'{product.name}: no stock at the source location.']}, status=400)
-            lines.append((product, batch, int(it.get('quantity') or 0)))
+            lines.append((product, batch, to_qty(it.get('quantity') or 0)))
     except (ValueError, TypeError, Product.DoesNotExist):
         return Response({'error': 'Choose locations, products and quantities.'}, status=400)
     try:
@@ -643,7 +645,7 @@ def expiry_report(request):
             expiry_date__lte=cutoff,
             is_active=True,
         ).select_related('product').annotate(
-            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+            total_stock=Coalesce(Sum('stock_points__quantity'), Value(Decimal('0')), output_field=DecimalField(max_digits=15, decimal_places=3))
         ).order_by('expiry_date')
 
         results = []
@@ -653,7 +655,7 @@ def expiry_report(request):
             if total_qty <= 0:
                 sibling_count = batch.product.batches.filter(is_active=True).count()
                 if sibling_count == 1 and (batch.product.stock or 0) > 0:
-                    total_qty = int(batch.product.stock)
+                    total_qty = to_qty(batch.product.stock)
                 else:
                     continue
             days_left = (batch.expiry_date - today).days
@@ -738,7 +740,7 @@ def batch_split(request):
     new_batch_number = request.data.get('new_batch_number', '').strip()
     raw_split_qty = request.data.get('split_quantity', 0)
     try:
-        split_qty = int(raw_split_qty)
+        split_qty = to_qty(raw_split_qty)
     except (TypeError, ValueError):
         return Response({'error': 'split_quantity must be a valid integer.'}, status=status.HTTP_400_BAD_REQUEST)
     manufacturing_date = request.data.get('manufacturing_date')
@@ -974,7 +976,7 @@ def expiry_dashboard_summary(request):
             expiry_date__lte=cutoff,
             is_active=True,
         ).select_related('product').annotate(
-            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+            total_stock=Coalesce(Sum('stock_points__quantity'), Value(Decimal('0')), output_field=DecimalField(max_digits=15, decimal_places=3))
         )
 
         count = 0
@@ -985,7 +987,7 @@ def expiry_dashboard_summary(request):
             if total_qty <= 0:
                 sibling_count = batch.product.batches.filter(is_active=True).count()
                 if sibling_count == 1 and (batch.product.stock or 0) > 0:
-                    total_qty = int(batch.product.stock)
+                    total_qty = to_qty(batch.product.stock)
                 else:
                     continue
             days_left = (batch.expiry_date - today).days

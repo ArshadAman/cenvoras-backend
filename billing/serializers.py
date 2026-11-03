@@ -1,3 +1,4 @@
+from billing.uqc import UQCQuantityMixin
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment
@@ -124,7 +125,7 @@ class CustomerField(serializers.Field):
     def to_representation(self, value):
         return str(value)
 
-class PurchaseBillItemSerializer(serializers.ModelSerializer):
+class PurchaseBillItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product = ProductField()
     product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -562,7 +563,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         ret['subtotal'] = ret['taxable_amount']
         return ret
 
-class SalesInvoiceItemSerializer(serializers.ModelSerializer):
+class SalesInvoiceItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.UUIDField(required=False, allow_null=True)
     product = ProductField(required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -571,8 +572,8 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     remaining_qty = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    quantity = serializers.IntegerField(min_value=0, default=1)
-    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
+    quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, default=1)
+    free_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, required=False, default=0)
 
     def validate(self, data):
         if data.get('row_type') == 'note':

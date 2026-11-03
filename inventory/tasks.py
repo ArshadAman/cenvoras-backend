@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 import csv
 import logging
 import os
@@ -318,7 +319,7 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                                 diff_fields['sale_price'] = payload['sale_price']
 
                         if 'stock' in payload and payload['stock'] is not None:
-                            if int(payload['stock']) != int(existing_product.stock or 0):
+                            if to_qty(payload['stock']) != to_qty(existing_product.stock or 0):
                                 diff_fields['stock'] = payload['stock']
 
                         if 'tax' in payload and payload['tax'] is not None:

@@ -1,14 +1,16 @@
+from billing.uqc import QuantityAsNumberMixin, UQCQuantityMixin
+from billing.uqc import to_qty
 import re
 from rest_framework import serializers
 from .models import Product, Warehouse, StockPoint, StockTransfer, StockTransferItem, ProductBatch, ProductMeta, BillOfMaterial, StockJournal, StockJournalItem
 from .models_sidecar import ProductMeta, BillOfMaterial, StockJournal
 from .serializers_sidecar import ProductMetaSerializer, BillOfMaterialSerializer, StockJournalSerializer
 
-class ProductSerializer(serializers.ModelSerializer):
+class ProductSerializer(QuantityAsNumberMixin, serializers.ModelSerializer):
     unit = serializers.CharField(max_length=50, required=False, allow_blank=True, default='pcs')
     cost_price = serializers.DecimalField(source='price', max_digits=14, decimal_places=4, required=False, allow_null=True)
     sale_price = serializers.DecimalField(max_digits=14, decimal_places=4, required=False)
-    current_stock = serializers.IntegerField(source='stock', read_only=True)
+    current_stock = serializers.DecimalField(source='stock', max_digits=15, decimal_places=3, read_only=True)
     meta = ProductMetaSerializer(required=False)
     
     class Meta:
@@ -117,7 +119,7 @@ class ProductBatchSerializer(serializers.ModelSerializer):
             'is_active', 'notes'
         ]
 
-class StockPointSerializer(serializers.ModelSerializer):
+class StockPointSerializer(QuantityAsNumberMixin, serializers.ModelSerializer):
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
     expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
@@ -131,7 +133,7 @@ class StockPointSerializer(serializers.ModelSerializer):
             'expiry_date', 'quantity', 'product_name', 'product_id'
         ]
 
-class StockTransferItemSerializer(serializers.ModelSerializer):
+class StockTransferItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
 
@@ -215,11 +217,11 @@ class StockTransferSerializer(serializers.ModelSerializer):
                         batch=item.batch,
                         defaults={'quantity': 0},
                     )
-                    if int(source_stock.quantity or 0) < int(item.quantity):
+                    if to_qty(source_stock.quantity or 0) < to_qty(item.quantity):
                         raise serializers.ValidationError({'items': [
                             f"{item.product.name}: only {source_stock.quantity} in stock at "
                             f"{transfer.source_warehouse.name}."]})
-                    source_stock.quantity = int(source_stock.quantity or 0) - int(item.quantity)
+                    source_stock.quantity = to_qty(source_stock.quantity or 0) - to_qty(item.quantity)
                     source_stock.save(update_fields=['quantity', 'last_updated'])
 
                     dest_stock, _ = StockPoint.objects.select_for_update().get_or_create(
@@ -227,7 +229,7 @@ class StockTransferSerializer(serializers.ModelSerializer):
                         batch=item.batch,
                         defaults={'quantity': 0},
                     )
-                    dest_stock.quantity = int(dest_stock.quantity or 0) + int(item.quantity)
+                    dest_stock.quantity = to_qty(dest_stock.quantity or 0) + to_qty(item.quantity)
                     dest_stock.save(update_fields=['quantity', 'last_updated'])
                     reconcile_product_stock(item.product, save=True)
 

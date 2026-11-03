@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
 
@@ -304,7 +305,7 @@ class PurchaseOrderItem(models.Model):
     purchase_order = models.ForeignKey(PurchaseOrder, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey('inventory.Product', on_delete=models.PROTECT)
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -322,7 +323,7 @@ class PurchaseBillItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being purchased")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -334,7 +335,7 @@ class PurchaseBillItem(models.Model):
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     # Scheme Support (Phase 6)
-    free_quantity = models.PositiveIntegerField(default=0, help_text="Qty received free under scheme")
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Qty received free under scheme", validators=[MinValueValidator(0)])
 
     def __str__(self):
         bill_no = getattr(self.purchase_bill, 'bill_number', None) or '—'
@@ -482,7 +483,7 @@ class SalesInvoiceItem(models.Model):
     row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being sold")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField(default=1)
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=1, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -492,7 +493,7 @@ class SalesInvoiceItem(models.Model):
     source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source item in DeliveryChallan or SalesOrder")
     
     # Scheme Support (Phase 6)
-    free_quantity = models.PositiveIntegerField(default=0, help_text="Qty given free under scheme (Buy X Get Y)")
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Qty given free under scheme (Buy X Get Y)", validators=[MinValueValidator(0)])
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     sort_order = models.PositiveIntegerField(default=0)
 

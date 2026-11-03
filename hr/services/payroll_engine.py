@@ -346,7 +346,8 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
         return Decimal('0.00')
 
     amount = Decimal(str(slab.pt_amount))
-    if month == 2 and slab.february_amount is not None and amount > 0:
+    special_month = getattr(slab, 'special_month', None) or 2
+    if month == special_month and slab.february_amount is not None and amount > 0:
         return Decimal(str(slab.february_amount)).quantize(Decimal('0.01'))
     return amount.quantize(Decimal('0.01'))
 

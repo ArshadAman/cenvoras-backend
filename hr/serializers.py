@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
+from .models import LATEST_ASSIGNMENT_ORDER
 from .models import (
     Department, Designation, Employee, AttendanceRecord,
     LeaveType, LeaveBalance, LeaveApplication,
@@ -237,7 +238,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def get_current_ctc(self, obj):
         if obj.employment_type == 'contract':
             return str(obj.contract_fee or '0.00')
-        latest = obj.salary_assignments.order_by('-effective_from').first()
+        latest = obj.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         if latest:
             return str(latest.monthly_ctc)
         latest_hist = obj.salary_history.order_by('-effective_date', '-created_at').first()
@@ -268,7 +269,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 'employer_contributions': {'total_employer_cost': '0.00'},
                 'employer_estimates': {'total_employer_cost': '0.00'},
             }
-        latest = obj.salary_assignments.order_by('-effective_from', '-id').first()
+        latest = obj.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         if not latest or latest.monthly_ctc <= 0:
             return None
         ctc = latest.monthly_ctc
@@ -583,7 +584,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         custom_components = salary_data.get('components') or {}
         basic_pct_raw = salary_data.get('basic_pct')
         hra_pct_raw = salary_data.get('hra_pct')
-        latest_existing = employee.salary_assignments.order_by('-effective_from', '-id').first()
+        latest_existing = employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         prev_salary = latest_existing.monthly_ctc if latest_existing else Decimal('0.00')
 
         if latest_existing:
@@ -1205,7 +1206,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         if obj.lop_days > 0 and obj.total_working_days:
             working_days = Decimal(str(obj.total_working_days))
             lop_days = Decimal(str(obj.lop_days))
-            assignment = obj.employee.salary_assignments.order_by('-effective_from', '-id').first()
+            assignment = obj.employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
             if assignment and working_days > 0:
                 ctc = Decimal(str(assignment.monthly_ctc or 0))
                 return str((ctc * lop_days / working_days).quantize(Decimal('0.01')))

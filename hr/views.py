@@ -2029,7 +2029,7 @@ class HRDashboardView(APIView):
             tenant=tenant,
             severity='critical',
             is_resolved=False
-        ).select_related('employee')
+        ).select_related('employee', 'employee__department', 'employee__designation')
         critical_count = critical_exceptions_qs.count()
         if critical_count > 0:
             alerts.append({
@@ -2042,11 +2042,13 @@ class HRDashboardView(APIView):
                         "id": str(ex.id),
                         "exception_id": str(ex.id),
                         "employee_id": str(ex.employee.id) if ex.employee else None,
-                        "name": ex.employee.full_name if ex.employee else "General",
-                        "employee_name": ex.employee.full_name if ex.employee else "General",
+                        "name": (ex.employee.full_name.strip() if ex.employee and ex.employee.full_name else (ex.employee.employee_code if ex.employee else "General Exception")),
+                        "employee_name": (ex.employee.full_name.strip() if ex.employee and ex.employee.full_name else (ex.employee.employee_code if ex.employee else "General Exception")),
                         "employee_code": ex.employee.employee_code if ex.employee else "",
+                        "department": ex.employee.department.name if (ex.employee and ex.employee.department) else "",
+                        "designation": ex.employee.designation.name if (ex.employee and ex.employee.designation) else "",
                         "code": ex.code,
-                        "message": ex.message,
+                        "message": ex.message or f"Payroll exception: {ex.code}",
                     }
                     for ex in critical_exceptions_qs[:25]
                 ]

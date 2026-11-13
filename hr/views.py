@@ -21,7 +21,7 @@ from .models import (
     PayrollRun, Payslip, EmployeeSalaryHistory, OvertimeRecord,
     EmployeeAdvanceLoan, LoanRecoveryLog, PayrollException,
     HRDocument, HRMSSettings, EmployeeAllowanceBonus,
-    EmployeeTaxDeclaration
+    EmployeeTaxDeclaration, Holiday
 )
 from .serializers import (
     DepartmentSerializer, DesignationSerializer, EmployeeSerializer,
@@ -30,7 +30,7 @@ from .serializers import (
     PayrollRunSerializer, PayslipSerializer, EmployeeSalaryHistorySerializer,
     OvertimeRecordSerializer, EmployeeAdvanceLoanSerializer, LoanRecoveryLogSerializer,
     PayrollExceptionSerializer, HRDocumentSerializer, HRMSSettingsSerializer,
-    EmployeeAllowanceBonusSerializer, EmployeeTaxDeclarationSerializer
+    EmployeeAllowanceBonusSerializer, EmployeeTaxDeclarationSerializer, HolidaySerializer
 )
 from .permissions import HRPermission
 from .services import audit_service, leave_service
@@ -168,7 +168,25 @@ def _block_recalc_of_closed_run(run):
 
 
 def _block_critical_exceptions(run, verb='approve'):
-    """Unresolved critical exceptions (e.g. PAN_REQUIRED_FOR_TDS) block approve AND finalise."""
+    """Unresolved critical exceptions (e.g. PAN_REQUIRED_FOR_TDS, MISSING_BANK_INFO) block approve AND finalise."""
+    from hr.validators import is_valid_pan
+    import calendar, datetime
+    run_end = datetime.date(run.year, run.month, calendar.monthrange(run.year, run.month)[1])
+
+    # Re-verify any critical exceptions previously marked resolved without actual fix
+    for exc in run.exceptions.filter(severity='critical', is_resolved=True).select_related('employee'):
+        emp = exc.employee
+        still_broken = False
+        if exc.code == 'MISSING_BANK_INFO' and (not emp or not emp.bank_account_number or not emp.bank_ifsc):
+            still_broken = True
+        elif exc.code == 'PAN_REQUIRED_FOR_TDS' and (not emp or not is_valid_pan(emp.pan_number, individual=True)):
+            still_broken = True
+        elif exc.code == 'NO_SALARY_STRUCTURE' and (not emp or not EmployeeSalaryAssignment.objects.filter(employee=emp, effective_from__lte=run_end).exists()):
+            still_broken = True
+        if still_broken:
+            exc.is_resolved = False
+            exc.save(update_fields=['is_resolved'])
+
     critical_exceptions = run.exceptions.filter(severity='critical', is_resolved=False).select_related('employee')
     if critical_exceptions.exists():
         count = critical_exceptions.count()
@@ -939,6 +957,10 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         if end_date:
             qs = qs.filter(date__lte=end_date)
 
+        # Future attendance records must never be returned in history
+        today = timezone.now().date()
+        qs = qs.filter(date__lte=today)
+
         return qs.order_by('-date')
 
     @action(detail=False, methods=['get'])
@@ -1136,6 +1158,79 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         return self.create(request, *args, **kwargs)
 
+    @action(detail=False, methods=['get'], url_path='today-status')
+    def today_status(self, request):
+        user = request.user
+        tenant = getattr(user, 'active_tenant', user)
+        today = timezone.now().date()
+        emp = None
+        if user.role == 'employee':
+            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+        else:
+            emp_id = request.query_params.get('employee_id')
+            if emp_id:
+                emp = Employee.objects.filter(tenant=tenant, id=emp_id).first()
+        
+        if not emp:
+            return Response({'has_profile': False, 'date': str(today)}, status=200)
+
+        record = AttendanceRecord.objects.filter(employee=emp, date=today).first()
+        return Response({
+            'has_profile': True,
+            'employee_id': str(emp.id),
+            'employee_name': emp.full_name,
+            'date': str(today),
+            'is_marked': record is not None,
+            'status': record.status if record else None,
+            'status_display': record.get_status_display() if record else None,
+        }, status=200)
+
+    @action(detail=False, methods=['post'], url_path='check-in')
+    def check_in(self, request):
+        user = request.user
+        tenant = getattr(user, 'active_tenant', user)
+        today = timezone.now().date()
+        try:
+            emp = Employee.objects.get(tenant=tenant, user=user)
+        except Employee.DoesNotExist:
+            return Response({'error': 'No employee profile linked to your user account.'}, status=400)
+
+        record, created = AttendanceRecord.objects.get_or_create(
+            tenant=tenant, employee=emp, date=today,
+            defaults={'status': 'present'}
+        )
+        if not created and record.status not in ('present', 'half_day'):
+            record.status = 'present'
+            record.save(update_fields=['status'])
+
+        return Response({
+            'status': 'checked_in',
+            'date': str(today),
+            'attendance_status': record.status,
+            'message': f"Checked in successfully as 'Present' on {today:%d-%m-%Y}."
+        }, status=200)
+
+    @action(detail=False, methods=['post'], url_path='check-out')
+    def check_out(self, request):
+        user = request.user
+        tenant = getattr(user, 'active_tenant', user)
+        today = timezone.now().date()
+        try:
+            emp = Employee.objects.get(tenant=tenant, user=user)
+        except Employee.DoesNotExist:
+            return Response({'error': 'No employee profile linked to your user account.'}, status=400)
+
+        record, created = AttendanceRecord.objects.get_or_create(
+            tenant=tenant, employee=emp, date=today,
+            defaults={'status': 'present'}
+        )
+        return Response({
+            'status': 'checked_out',
+            'date': str(today),
+            'attendance_status': record.status,
+            'message': f"Checked out successfully for {today:%d-%m-%Y}."
+        }, status=200)
+
     def perform_destroy(self, instance):
         audit_service.log_delete(self.request, instance)
         instance.delete()
@@ -1202,6 +1297,15 @@ class LeaveTypeViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         tenant = getattr(self.request.user, 'active_tenant', self.request.user)
+        if LeaveType.objects.filter(tenant=tenant).count() <= 1:
+            default_leave_types = [
+                {"name": "Casual Leave",    "annual_entitlement": 12, "is_paid": True},
+                {"name": "Sick Leave",      "annual_entitlement": 12, "is_paid": True},
+                {"name": "Earned Leave",    "annual_entitlement": 15, "is_paid": True},
+                {"name": "Loss of Pay",     "annual_entitlement": 0, "is_paid": False},
+            ]
+            for lt_data in default_leave_types:
+                LeaveType.objects.get_or_create(tenant=tenant, name=lt_data['name'], defaults=lt_data)
         return LeaveType.objects.filter(tenant=tenant)
 
     def perform_create(self, serializer):
@@ -1245,9 +1349,27 @@ class LeaveBalanceViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         # Lazily seed missing balances so UI shows zero rows with leave type names
         user = request.user
-        if getattr(user, 'role', None) != 'employee':
-            tenant = getattr(user, 'active_tenant', user)
-            year = timezone.now().year
+        tenant = getattr(user, 'active_tenant', user)
+        year = timezone.now().year
+
+        if LeaveType.objects.filter(tenant=tenant).count() <= 1:
+            default_leave_types = [
+                {"name": "Casual Leave",    "annual_entitlement": 12, "is_paid": True},
+                {"name": "Sick Leave",      "annual_entitlement": 12, "is_paid": True},
+                {"name": "Earned Leave",    "annual_entitlement": 15, "is_paid": True},
+                {"name": "Loss of Pay",     "annual_entitlement": 0, "is_paid": False},
+            ]
+            for lt_data in default_leave_types:
+                LeaveType.objects.get_or_create(tenant=tenant, name=lt_data['name'], defaults=lt_data)
+
+        if getattr(user, 'role', None) == 'employee':
+            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            if emp:
+                try:
+                    leave_service.ensure_employee_leave_balances(emp, year=year)
+                except Exception:
+                    logger.exception('Failed to seed leave balances for employee %s', emp.id)
+        else:
             for emp in Employee.objects.filter(tenant=tenant, status='active'):
                 try:
                     leave_service.ensure_employee_leave_balances(emp, year=year)
@@ -1287,6 +1409,12 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role == 'employee':
+            tenant = getattr(user, 'active_tenant', user)
+            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+            if emp:
+                return LeaveApplication.objects.filter(employee=emp).select_related('employee', 'leave_type')
             return LeaveApplication.objects.filter(employee__user=user).select_related('employee', 'leave_type')
         tenant = getattr(user, 'active_tenant', user)
         return LeaveApplication.objects.filter(tenant=tenant).select_related('employee', 'leave_type')
@@ -1294,9 +1422,14 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
         tenant = getattr(user, 'active_tenant', user)
-        employee = serializer.validated_data['employee']
+        employee = serializer.validated_data.get('employee')
+        if not employee and user.role == 'employee':
+            employee = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not employee:
+                employee = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+            serializer.validated_data['employee'] = employee
         
-        if user.role == 'employee' and employee.user != user:
+        if user.role == 'employee' and employee and employee.user != user and employee.personal_email != user.email:
             raise ValidationError("You can only apply for leave for yourself.")
             
         start_date = serializer.validated_data['start_date']
@@ -2594,6 +2727,31 @@ class PayrollExceptionViewSet(viewsets.ReadOnlyModelViewSet):
         if exc.code == 'SALARY_EXCEEDS_CTC':
             return Response({'error': 'Fix the salary structure and recalculate, or use "Confirm scaled amounts" '
                                       '(admin, with a reason).'}, status=400)
+
+        # Validate that the underlying issue is genuinely resolved before allowing resolve
+        emp = exc.employee
+        run = exc.payroll_run
+        if exc.code == 'MISSING_BANK_INFO':
+            if not emp or not emp.bank_account_number or not emp.bank_ifsc:
+                return Response({'error': 'Cannot resolve: Bank account number and IFSC are still missing for this employee.'}, status=400)
+        elif exc.code == 'PAN_REQUIRED_FOR_TDS':
+            from hr.validators import is_valid_pan
+            if not emp or not is_valid_pan(emp.pan_number, individual=True):
+                return Response({'error': 'Cannot resolve: A valid PAN has not been provided for this employee.'}, status=400)
+        elif exc.code == 'NO_SALARY_STRUCTURE':
+            import calendar, datetime
+            if run and emp:
+                end_date = datetime.date(run.year, run.month, calendar.monthrange(run.year, run.month)[1])
+                has_assignment = EmployeeSalaryAssignment.objects.filter(employee=emp, effective_from__lte=end_date).exists()
+                if not has_assignment:
+                    return Response({'error': 'Cannot resolve: No active salary structure assigned to this employee for this period.'}, status=400)
+        elif exc.code == 'NEGATIVE_NET_SALARY':
+            from hr.models import Payslip
+            if run and emp:
+                ps = Payslip.objects.filter(payroll_run=run, employee=emp).first()
+                if ps and ps.net_salary < 0:
+                    return Response({'error': 'Cannot resolve: Net salary is still negative. Adjust deductions or recalculate.'}, status=400)
+
         exc.is_resolved = True
         exc.resolved_by = request.user
         exc.save()
@@ -3020,3 +3178,25 @@ class PFWageComponentsView(APIView):
             s.save(update_fields=['pf_wages_banner_dismissed'])
             return Response({'status': 'dismissed'})
         return Response({'error': "action must be 'flag' or 'dismiss'."}, status=400)
+
+
+class HolidayViewSet(viewsets.ModelViewSet):
+    """
+    CRUD ViewSet for Company Holidays.
+    - Scoped to active tenant.
+    - Employees can list and view holidays (read-only enforced in permissions).
+    - Admins/HR can create, update, delete.
+    """
+    serializer_class = HolidaySerializer
+    permission_classes = [permissions.IsAuthenticated, HRPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        return Holiday.objects.filter(tenant=tenant).order_by('date')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(user, 'active_tenant', user)
+        serializer.save(tenant=tenant)
+

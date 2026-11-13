@@ -11,7 +11,7 @@ from .models import (
     PayrollRun, Payslip, EmployeeTask, EmployeeQuery, EmployeeNotification,
     EmployeeSalaryHistory, OvertimeRecord, EmployeeAdvanceLoan, LoanRecoveryLog,
     PayrollException, HRDocument, HRMSSettings, EmployeeAllowanceBonus,
-    EmployeeTaxDeclaration
+    EmployeeTaxDeclaration, Holiday
 )
 
 
@@ -557,6 +557,17 @@ class EmployeeSerializer(serializers.ModelSerializer):
         from hr.services.work_state import resolve_work_state
         request = self.context.get('request')
         tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else instance.tenant
+
+        if request and getattr(request.user, 'role', None) == 'employee':
+            allowed_fields = {
+                'personal_phone', 'address', 'emergency_contact_name',
+                'emergency_contact_phone', 'bank_name', 'bank_account_number',
+                'bank_ifsc', 'account_holder_name', 'upi_id'
+            }
+            validated_data = {k: v for k, v in validated_data.items() if k in allowed_fields}
+            salary_data = None
+            declaration_data = None
+
         incoming = validated_data.get('work_state', instance.work_state)
         resolved = resolve_work_state(employee=instance, tenant=tenant, work_state=incoming)
         if resolved:
@@ -566,20 +577,22 @@ class EmployeeSerializer(serializers.ModelSerializer):
         employee = super().update(instance, validated_data)
         new_doj = employee.date_of_joining
 
-        if old_doj and new_doj and old_doj != new_doj:
+        if (old_doj and new_doj and old_doj != new_doj) or (new_doj and employee.salary_assignments.filter(effective_from__gt=timezone.now().date()).exists()):
             from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
             assignments = EmployeeSalaryAssignment.objects.filter(employee=employee).order_by('effective_from', 'created_at')
             if assignments.exists():
-                initial = assignments.first()
-                if initial.effective_from == old_doj or initial.effective_from > new_doj or assignments.count() == 1:
-                    initial.effective_from = new_doj
-                    initial.save(update_fields=['effective_from'])
                 EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
+                earliest = assignments.first()
+                if earliest.effective_from > new_doj or assignments.count() == 1:
+                    earliest.effective_from = new_doj
+                    earliest.save(update_fields=['effective_from'])
+                EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from__gt=timezone.now().date()).update(effective_from=new_doj)
             EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
+            EmployeeSalaryHistory.objects.filter(employee=employee, effective_date__gt=timezone.now().date()).update(effective_date=new_doj)
             histories = EmployeeSalaryHistory.objects.filter(employee=employee).order_by('effective_date', 'created_at')
             if histories.exists():
                 initial_hist = histories.first()
-                if initial_hist.effective_date == old_doj or initial_hist.effective_date > new_doj or histories.count() == 1:
+                if initial_hist.effective_date > new_doj or histories.count() == 1:
                     initial_hist.effective_date = new_doj
                     initial_hist.save(update_fields=['effective_date'])
 
@@ -943,6 +956,21 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
         start = data.get('start_date') or (self.instance.start_date if self.instance else None)
         end = data.get('end_date') or (self.instance.end_date if self.instance else None)
         employee = data.get('employee') or (self.instance.employee if self.instance else None)
+        request = self.context.get('request')
+        if not employee and request and getattr(request.user, 'role', None) == 'employee':
+            from hr.models import Employee
+            user = request.user
+            tenant = getattr(user, 'active_tenant', user)
+            employee = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not employee:
+                employee = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+            if employee:
+                data['employee'] = employee
+
+        reason = data.get('reason') if 'reason' in data else (self.instance.reason if self.instance else None)
+
+        if not reason or not str(reason).strip():
+            raise serializers.ValidationError({"reason": "A reason is required when applying for leave."})
 
         if start and end and start > end:
             raise serializers.ValidationError({"end_date": "End date must be on or after start date."})
@@ -956,7 +984,7 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
         if employee and start and end:
             overlap_qs = LeaveApplication.objects.filter(
                 employee=employee,
-                status='approved',
+                status__in=['approved', 'pending'],
                 start_date__lte=end,
                 end_date__gte=start,
             )
@@ -965,8 +993,9 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
             overlapping = overlap_qs.select_related('leave_type').first()
             if overlapping:
                 lt_name = overlapping.leave_type.name if overlapping.leave_type else 'Leave'
+                status_label = "approved" if overlapping.status == "approved" else "existing pending"
                 raise serializers.ValidationError({
-                    "start_date": f"This leave request overlaps with an already approved leave from {overlapping.start_date:%d-%m-%Y} to {overlapping.end_date:%d-%m-%Y} ({lt_name})."
+                    "start_date": f"This leave request overlaps with an {status_label} leave from {overlapping.start_date:%d-%m-%Y} to {overlapping.end_date:%d-%m-%Y} ({lt_name})."
                 })
 
         return data
@@ -1486,3 +1515,10 @@ class EmployeeAllowanceBonusSerializer(serializers.ModelSerializer):
         model = EmployeeAllowanceBonus
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class HolidaySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Holiday
+        fields = ['id', 'name', 'date', 'description', 'is_optional', 'created_at']
+        read_only_fields = ['id', 'created_at']

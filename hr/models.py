@@ -1265,6 +1265,7 @@ class HRMSSettings(models.Model):
     # UAT P1 items 8/9 (Rudra CA): company-level PF / ESI coverage and the company start date
     pf_enabled = models.BooleanField(default=True, help_text='Company is covered under EPF.')
     esi_enabled = models.BooleanField(default=True, help_text='Company is covered under ESI.')
+    pt_enabled = models.BooleanField(default=True, help_text='Company deducts state Professional Tax.')
     company_start_date = models.DateField(null=True, blank=True,
                                           help_text='No employee can have a joining date before this.')
 
@@ -1489,3 +1490,24 @@ class DOJCorrection(models.Model):
 
     def __str__(self):
         return f"DOJ correction {self.employee} {self.old_doj}→{self.new_doj} ({self.amount})"
+
+
+class Holiday(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='holidays'
+    )
+    name = models.CharField(max_length=150)
+    date = models.DateField()
+    description = models.TextField(blank=True, default='')
+    is_optional = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date']
+        unique_together = ('tenant', 'date')
+
+    def __str__(self):
+        return f"{self.name} ({self.date})"

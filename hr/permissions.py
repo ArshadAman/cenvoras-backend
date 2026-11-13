@@ -81,11 +81,14 @@ class HRPermission(permissions.BasePermission):
                 'EmployeeTaskViewSet', 'EmployeeQueryViewSet', 'LeaveTypeViewSet',
                 'EmployeeViewSet', 'EmployeeSalaryHistoryViewSet', 'OvertimeRecordViewSet',
                 'EmployeeAdvanceLoanViewSet', 'HRDocumentViewSet', 'PayslipViewSet',
-                'PayslipPDFView'
+                'PayslipPDFView', 'HolidayViewSet'
             ]
             if view.__class__.__name__ in allowed_views:
                 if request.method == 'DELETE':
                     self.message = "Employees cannot delete records."
+                    return False
+                if view.__class__.__name__ == 'HolidayViewSet' and request.method not in permissions.SAFE_METHODS:
+                    self.message = "Employees cannot create or edit holidays."
                     return False
                 return True
             self.message = "Employee role is not permitted to access this resource."

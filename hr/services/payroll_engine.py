@@ -368,6 +368,12 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
     ):
         return Decimal('0.00')
 
+    tenant_obj = tenant or (getattr(employee, 'tenant', None) if employee else None)
+    if tenant_obj:
+        settings_obj = getattr(tenant_obj, 'hrms_settings', None)
+        if settings_obj and not getattr(settings_obj, 'pt_enabled', True):
+            return Decimal('0.00')
+
     gross = Decimal(str(gross_salary))
     state = resolve_work_state(employee=employee, tenant=tenant, work_state=work_state)
     if not state:

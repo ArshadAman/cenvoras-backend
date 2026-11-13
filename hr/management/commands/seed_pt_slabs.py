@@ -83,5 +83,5 @@ class Command(BaseCommand):
             count += 1
 
         self.stdout.write(
-            self.style.SUCCESS(f'Successfully seeded {count} Professional Tax slabs (Odisha versioned: legacy to 31 Mar 2026, Rs 0 from 1 Apr 2026).')
+            self.style.SUCCESS(f'Successfully seeded {count} Professional Tax slabs (including Odisha Act 7 of 2000 schedule).')
         )

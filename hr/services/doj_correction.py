@@ -328,19 +328,22 @@ def apply_doj_correction(employee, new_doj, reason, user, recompute=False):
         )
     type(employee).objects.filter(pk=employee.pk).update(date_of_joining=new_doj)
     employee.date_of_joining = new_doj
+    from django.utils import timezone
     from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
     assignments = EmployeeSalaryAssignment.objects.filter(employee=employee).order_by('effective_from', 'created_at')
     if assignments.exists():
+        EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
         initial = assignments.first()
-        if initial.effective_from == old_doj or initial.effective_from > new_doj or assignments.count() == 1:
+        if initial.effective_from > new_doj or assignments.count() == 1:
             initial.effective_from = new_doj
             initial.save(update_fields=['effective_from'])
-        EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
+        EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from__gt=timezone.now().date()).update(effective_from=new_doj)
     EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
+    EmployeeSalaryHistory.objects.filter(employee=employee, effective_date__gt=timezone.now().date()).update(effective_date=new_doj)
     histories = EmployeeSalaryHistory.objects.filter(employee=employee).order_by('effective_date', 'created_at')
     if histories.exists():
         initial_hist = histories.first()
-        if initial_hist.effective_date == old_doj or initial_hist.effective_date > new_doj or histories.count() == 1:
+        if initial_hist.effective_date > new_doj or histories.count() == 1:
             initial_hist.effective_date = new_doj
             initial_hist.save(update_fields=['effective_date'])
     try:

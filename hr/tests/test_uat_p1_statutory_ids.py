@@ -82,12 +82,11 @@ class EmployeeIdsApiTests(APITestCase):
         self.assertEqual(self.client.post(self.url, self._payload(pf_member=True, esi_covered=True),
                                           format='json').status_code, 201)
 
-    def test_future_doj_upcoming_and_company_start(self):
+    def test_future_doj_rejected_and_company_start(self):
         future = (datetime.date.today() + datetime.timedelta(days=40)).isoformat()
         res = self.client.post(self.url, self._payload(date_of_joining=future), format='json')
-        self.assertEqual(res.status_code, 201, res.data)
-        self.assertTrue(res.data['is_upcoming'])
-        self.assertEqual(res.data['status_display'], 'Upcoming')
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertIn('Date of joining cannot be in the future', str(res.data))
         HRMSSettings.objects.create(tenant=self.tenant, company_start_date=datetime.date(2026, 4, 1))
         res = self.client.post(self.url, self._payload(date_of_joining='2026-03-31'), format='json')
         self.assertIn('company start date', str(res.data))

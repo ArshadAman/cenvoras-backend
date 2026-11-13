@@ -21,7 +21,7 @@ class ProductSerializer(QuantityAsNumberMixin, serializers.ModelSerializer):
             'cost_price', 'price', 'sale_price', 'warranty_months', 'low_stock_alert', 'is_active', 'created_by',
             'created_at', 'updated_at', 'meta'
         ]
-        read_only_fields = ['id', 'created_by', 'price', 'current_stock', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_by', 'current_stock', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         sale_price = attrs.get('sale_price')

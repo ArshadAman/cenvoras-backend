@@ -412,6 +412,16 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             item_data['amount'] = self._calculate_line_amount(item_data)
             # Ensure price is passed as 'price' to the model (serializer uses 'price' field)
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+            prod = item_data.get('product')
+            unit_price = item_data.get('price')
+            if prod and unit_price is not None:
+                try:
+                    p_val = Decimal(str(unit_price))
+                    if p_val > 0:
+                        prod_pk = prod.pk if hasattr(prod, 'pk') else prod
+                        Product.objects.filter(pk=prod_pk, created_by=user).update(price=p_val)
+                except Exception:
+                    pass
 
         # Refresh payment status in case amount_paid was provided
         purchase_bill.refresh_payment_status(save=True)
@@ -481,6 +491,16 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
+                prod = item_data.get('product')
+                unit_price = item_data.get('price')
+                if prod and unit_price is not None:
+                    try:
+                        p_val = Decimal(str(unit_price))
+                        if p_val > 0:
+                            prod_pk = prod.pk if hasattr(prod, 'pk') else prod
+                            Product.objects.filter(pk=prod_pk, created_by=user).update(price=p_val)
+                    except Exception:
+                        pass
 
             recalculated_total = sum(
                 (self._vendor_payable({

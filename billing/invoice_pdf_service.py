@@ -1,5 +1,6 @@
 import io
 import math
+import re
 from decimal import Decimal
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -97,6 +98,17 @@ def number_to_words(number):
     result_parts.append("Only")
     return " ".join(result_parts).strip()
 
+
+def sort_challan_string(val):
+    """Sort multi-challan sequence string in natural ascending order."""
+    if not val:
+        return ""
+    sep = ';' if ';' in val else (',' if ',' in val else None)
+    if not sep:
+        return val.strip()
+    parts = [p.strip() for p in val.split(sep) if p.strip()]
+    parts.sort(key=lambda s: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)])
+    return f" {sep} ".join(parts)
 
 
 import base64
@@ -283,6 +295,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     is_quotation = (document_type == 'quotation')
     is_challan = (document_type == 'delivery_challan')
     is_sales_order = (document_type in ('sales_order', 'proforma'))
+    is_draft = str(getattr(invoice_obj, 'status', '')).lower() == 'draft' or str(getattr(invoice_obj, 'invoice_number', '')).startswith('DFT-')
     if is_challan:
         doc_heading = "DELIVERY CHALLAN"
         doc_no_label = "Challan No"
@@ -292,9 +305,15 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     elif is_sales_order:
         doc_heading = "PROFORMA INVOICE"
         doc_no_label = "Order No"
+    elif is_draft:
+        doc_heading = "DRAFT INVOICE"
+        doc_no_label = "Draft No"
     else:
         doc_heading = "TAX INVOICE"
         doc_no_label = "Invoice No"
+
+    raw_challan = getattr(invoice_obj, 'challan_number', '') or ''
+    challan_display = sort_challan_string(raw_challan) if (raw_challan and not is_challan) else ''
 
     biz_name = getattr(tenant, 'business_name', '') or getattr(tenant, 'username', '') or 'Business'
     biz_addr = getattr(tenant, 'business_address', '') or ''
@@ -339,6 +358,8 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             banner_right += f"<font color='#f1f5f9'><b>Due Date:</b> {due_date}</font><br/>"
         if pos:
             banner_right += f"<font color='#f1f5f9'><b>Place of Supply:</b> {pos}</font><br/>"
+        if challan_display:
+            banner_right += f"<font color='#f1f5f9'><b>Challan No:</b> {challan_display}</font><br/>"
 
         banner_table_data = [[
             Paragraph(banner_left, body_style),
@@ -374,6 +395,8 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:
             invoice_meta_text += f"<b>Place of Supply:</b> {pos}<br/>"
+        if challan_display:
+            invoice_meta_text += f"<b>Challan No:</b> {challan_display}<br/>"
 
         col_left = [logo_img, Paragraph(company_info_text, body_style)] if logo_img else Paragraph(company_info_text, body_style)
         header_table = Table([[col_left, Paragraph(invoice_meta_text, body_style)]], colWidths=[115 * mm, 75 * mm])
@@ -413,6 +436,8 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:
             invoice_meta_text += f"<b>Place of Supply:</b> {pos}<br/>"
+        if challan_display:
+            invoice_meta_text += f"<b>Challan No:</b> {challan_display}<br/>"
 
         col_left = [logo_img, Paragraph(company_info_text, body_style)] if logo_img else Paragraph(company_info_text, body_style)
         header_table = Table([[col_left, Paragraph(invoice_meta_text, body_style)]], colWidths=[115 * mm, 75 * mm])

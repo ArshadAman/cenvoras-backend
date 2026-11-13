@@ -568,12 +568,20 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
         if old_doj and new_doj and old_doj != new_doj:
             from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
-            single_or_initial = EmployeeSalaryAssignment.objects.filter(employee=employee)
-            if single_or_initial.count() == 1:
-                single_or_initial.update(effective_from=new_doj)
-            else:
+            assignments = EmployeeSalaryAssignment.objects.filter(employee=employee).order_by('effective_from', 'created_at')
+            if assignments.exists():
+                initial = assignments.first()
+                if initial.effective_from == old_doj or initial.effective_from > new_doj or assignments.count() == 1:
+                    initial.effective_from = new_doj
+                    initial.save(update_fields=['effective_from'])
                 EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
             EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
+            histories = EmployeeSalaryHistory.objects.filter(employee=employee).order_by('effective_date', 'created_at')
+            if histories.exists():
+                initial_hist = histories.first()
+                if initial_hist.effective_date == old_doj or initial_hist.effective_date > new_doj or histories.count() == 1:
+                    initial_hist.effective_date = new_doj
+                    initial_hist.save(update_fields=['effective_date'])
 
         if employee.employment_type != 'contract':
             if salary_data is not None:

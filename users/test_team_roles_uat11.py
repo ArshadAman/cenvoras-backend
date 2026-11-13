@@ -69,7 +69,9 @@ class TeamRoleUAT11Tests(TestCase):
 
     def test_team_member_resolves_name_from_linked_employee(self):
         """Medium 11: TeamMemberSerializer resolves first/last/display name from linked Employee profile."""
-        from hr.models import Employee
+        from hr.models import Employee, Department, Designation
+        dept = Department.objects.create(tenant=self.admin, name='Sales')
+        desig = Designation.objects.create(tenant=self.admin, name='Rep')
         member = User.objects.create_user(
             username='emp_linked@x.in',
             email='emp_linked@x.in',
@@ -82,7 +84,10 @@ class TeamRoleUAT11Tests(TestCase):
             user=member,
             full_name='Vikramaditya Verma',
             personal_email='emp_linked@x.in',
+            date_of_birth='1990-01-01',
             date_of_joining='2023-01-01',
+            department=dept,
+            designation=desig,
             status='active'
         )
         s = TeamMemberSerializer(member, context={'request': self.req})

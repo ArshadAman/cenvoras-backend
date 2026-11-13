@@ -514,14 +514,22 @@ class TeamMemberSerializer(serializers.ModelSerializer):
     """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
     password = serializers.CharField(write_only=True, min_length=8, required=False, allow_blank=True)
     display_name = serializers.CharField(read_only=True, required=False)
+    is_portal_employee = serializers.SerializerMethodField()
     
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined', 'display_name')
-        read_only_fields = ('id', 'date_joined', 'display_name')
+        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined', 'display_name', 'is_portal_employee')
+        read_only_fields = ('id', 'date_joined', 'display_name', 'is_portal_employee')
+
+    def get_is_portal_employee(self, obj):
+        return (obj.role or '').lower() == 'employee' or obj.employee_profile.exists()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        is_portal = (instance.role or '').lower() == 'employee' or instance.employee_profile.exists()
+        if is_portal:
+            data['role'] = 'employee'
+            data['is_portal_employee'] = True
         first_name = (data.get('first_name') or '').strip()
         last_name = (data.get('last_name') or '').strip()
         display_name = f"{first_name} {last_name}".strip()

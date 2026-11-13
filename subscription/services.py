@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from datetime import timedelta
 
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from cenvoras.cache_utils import (
@@ -190,8 +190,8 @@ def get_current_usage(user: User) -> dict[str, int]:
     ).count()
 
     customers_total = Customer.objects.filter(created_by=tenant).count()
-    team_members_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).exclude(role='employee').count()
-    portal_employees_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).filter(role='employee').count()
+    team_members_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).exclude(role__iexact='employee').exclude(employee_profile__isnull=False).count()
+    portal_employees_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).filter(Q(role__iexact='employee') | Q(employee_profile__isnull=False)).distinct().count()
 
     return {
         'invoices_this_month': invoices_this_month,

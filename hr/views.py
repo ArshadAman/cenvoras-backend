@@ -727,8 +727,10 @@ class EmployeeViewSet(viewsets.ModelViewSet):
                     pass
 
         # Balancing Component: Special Allowance absorbs the remainder to equal 100% of Fixed Contracted CTC
+        exceeds_ctc = subtotal_fixed_earnings > ctc
+        excess_amount = (subtotal_fixed_earnings - ctc).quantize(Decimal('0.01')) if exceeds_ctc else Decimal('0.00')
         special_allowance = max(Decimal('0.00'), ctc - subtotal_fixed_earnings).quantize(Decimal('0.01'))
-        contracted_gross_salary = subtotal_fixed_earnings + special_allowance
+        contracted_gross_salary = min(ctc, subtotal_fixed_earnings + special_allowance)
 
         # Ad-hoc / Variable Additions (outside Fixed Contracted CTC: Spot Bonus, Retention Bonus, Overtime)
         ad_hoc_components = data.get('ad_hoc_earnings') or {}
@@ -827,6 +829,9 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             'monthly_gross': str(gross_salary),
             'annual_gross': str(annual_gross),
             'contracted_gross_monthly': str(contracted_gross_salary),
+            'exceeds_ctc': exceeds_ctc,
+            'excess_amount': str(excess_amount),
+            'allowance_error': f"Total fixed salary components (₹{subtotal_fixed_earnings:,.2f}) exceed monthly CTC (₹{ctc:,.2f}) by ₹{excess_amount:,.2f}." if exceeds_ctc else None,
             'ad_hoc_monthly_total': str(ad_hoc_monthly_total),
             'net_take_home_monthly': str(net_take_home),
             'monthly_net_take_home': str(net_take_home),
@@ -1114,6 +1119,9 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             if not allow_overwrite:
                 formatted_date = date.strftime('%d-%m-%Y') if hasattr(date, 'strftime') else str(date)
                 return Response({
+                    'error_code': 'ATTENDANCE_EXISTS',
+                    'existing_status': record.status,
+                    'existing_status_display': record.get_status_display(),
                     'date': [f"Attendance for {employee.full_name} has already been marked as '{record.get_status_display()}' on {formatted_date}. Confirm overwrite to replace."]
                 }, status=status.HTTP_400_BAD_REQUEST)
 

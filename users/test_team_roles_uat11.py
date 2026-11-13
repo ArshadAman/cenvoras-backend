@@ -67,6 +67,30 @@ class TeamRoleUAT11Tests(TestCase):
                 if (l.changes or {}).get('event') == 'role_change')
         self.assertEqual(n, 1)
 
+    def test_team_member_resolves_name_from_linked_employee(self):
+        """Medium 11: TeamMemberSerializer resolves first/last/display name from linked Employee profile."""
+        from hr.models import Employee
+        member = User.objects.create_user(
+            username='emp_linked@x.in',
+            email='emp_linked@x.in',
+            password='pw123456!',
+            role='employee',
+            parent=self.admin
+        )
+        Employee.objects.create(
+            tenant=self.admin,
+            user=member,
+            full_name='Vikramaditya Verma',
+            personal_email='emp_linked@x.in',
+            date_of_joining='2023-01-01',
+            status='active'
+        )
+        s = TeamMemberSerializer(member, context={'request': self.req})
+        data = s.data
+        self.assertEqual(data['first_name'], 'Vikramaditya')
+        self.assertEqual(data['last_name'], 'Verma')
+        self.assertEqual(data['display_name'], 'Vikramaditya Verma')
+
 
 class SalaryVisibilityUAT11Tests(TestCase):
     def _u(self, role, uid=1):

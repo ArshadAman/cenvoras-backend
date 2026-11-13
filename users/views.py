@@ -821,15 +821,17 @@ class TeamViewSet(viewsets.ModelViewSet):
         User = get_user_model()
         tenant = self.request.user.active_tenant
 
-        max_members = get_effective_limit(tenant, 'max_team_members', 0)
-        current_members = get_user_model().objects.filter(parent=tenant).exclude(id=tenant.id).count()
-        reason = get_limit_exceeded_reason(tenant, 'team')
-        if reason:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(reason)
-        if max_members >= 0 and current_members >= max_members:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(f"Your current plan limits you to {max_members} team members. Upgrade for more.")
+        target_role = serializer.validated_data.get('role', 'employee')
+        if target_role != 'employee':
+            max_members = get_effective_limit(tenant, 'max_team_members', 0)
+            current_members = get_user_model().objects.filter(parent=tenant).exclude(id=tenant.id).exclude(role='employee').count()
+            reason = get_limit_exceeded_reason(tenant, 'team')
+            if reason:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(reason)
+            if max_members >= 0 and current_members >= max_members:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(f"Your current plan limits you to {max_members} staff members. Upgrade for more.")
             
         serializer.save()
 

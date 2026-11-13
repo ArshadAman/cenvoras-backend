@@ -126,6 +126,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         for alias, field in self._ID_ALIASES.items():
             if alias in data and field not in data:
                 data[field] = data.get(alias)
+        if 'pf_member_id' in data and data['pf_member_id']:
+            from hr.validators import normalize_pf_number
+            data['pf_member_id'] = normalize_pf_number(data['pf_member_id'])
         return super().to_internal_value(data)
 
     @staticmethod
@@ -171,8 +174,42 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return self._id_or_none(value, esi_ip_error)
 
     def validate_pf_member_id(self, value):
-        from hr.validators import pf_member_error
-        return self._id_or_none(value, pf_member_error)
+        from hr.validators import normalize_pf_number, pf_member_error
+        v = normalize_pf_number(value)
+        if not v:
+            return None
+        err = pf_member_error(v)
+        if err:
+            raise serializers.ValidationError(err)
+        return v
+
+    def validate_personal_email(self, value):
+        if not value or not str(value).strip():
+            return value
+        v = str(value).strip().lower()
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        if tenant is None and self.instance is not None:
+            tenant = self.instance.tenant
+
+        if tenant:
+            qs = Employee.objects.filter(tenant=tenant, personal_email__iexact=v)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError("An employee with this personal email already exists in your organization.")
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user_qs = User.objects.filter(email__iexact=v)
+        if self.instance and self.instance.user_id:
+            user_qs = user_qs.exclude(pk=self.instance.user_id)
+        if tenant:
+            user_qs = user_qs.exclude(parent=tenant, pk=getattr(self.instance, 'user_id', None))
+        if user_qs.exists():
+            raise serializers.ValidationError("A user account with this email address already exists.")
+
+        return v
 
     def _hrms_settings(self):
         from hr.models import HRMSSettings
@@ -196,6 +233,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if esi_on and not is_contract and cur('esi_covered', False) and not cur('esi_ip_number'):
             errors['esi_ip_number'] = 'ESI IP number is mandatory for ESI-covered employees (10 digits).'
         doj = attrs.get('date_of_joining')
+        from billing.advances import today_ist
+        today = today_ist()
+        if doj and doj > today:
+            errors['date_of_joining'] = "Date of joining cannot be in the future."
         start = getattr(settings_obj, 'company_start_date', None)
         if doj and start and doj < start:
             errors['date_of_joining'] = (
@@ -469,6 +510,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return value
 
     def validate_date_of_joining(self, value):
+        from billing.advances import today_ist
+        if value and value > today_ist():
+            raise serializers.ValidationError("Date of joining cannot be in the future.")
         # UAT P1 #10: once payroll exists from min(old, new DOJ), a plain edit is blocked.
         inst = self.instance
         if inst is not None and value and inst.date_of_joining and value != inst.date_of_joining:
@@ -517,7 +561,20 @@ class EmployeeSerializer(serializers.ModelSerializer):
         resolved = resolve_work_state(employee=instance, tenant=tenant, work_state=incoming)
         if resolved:
             validated_data['work_state'] = resolved
+
+        old_doj = instance.date_of_joining
         employee = super().update(instance, validated_data)
+        new_doj = employee.date_of_joining
+
+        if old_doj and new_doj and old_doj != new_doj:
+            from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
+            single_or_initial = EmployeeSalaryAssignment.objects.filter(employee=employee)
+            if single_or_initial.count() == 1:
+                single_or_initial.update(effective_from=new_doj)
+            else:
+                EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
+            EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
+
         if employee.employment_type != 'contract':
             if salary_data is not None:
                 self._handle_salary_assignment(employee, salary_data)
@@ -613,7 +670,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 assignment = latest_existing
                 assignment.salary_structure = structure
                 assignment.monthly_ctc = ctc
-                assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
+                eff_target = salary_data.get('effective_from') or employee.date_of_joining
+                if eff_target:
+                    assignment.effective_from = eff_target
+                    assignment.save(update_fields=['salary_structure', 'monthly_ctc', 'effective_from'])
+                else:
+                    assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
         else:
             assignment = EmployeeSalaryAssignment.objects.create(
                 tenant=tenant,
@@ -658,7 +720,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
                         canon = 'Medical Allowance'
                     extras[canon] = str(val)
                     extra += val
-                special = max(Decimal('0.00'), ctc - basic_amt - hra_amt - da_val - extra).quantize(Decimal('0.01'))
+                total_fixed = (basic_amt + hra_amt + da_val + extra).quantize(Decimal('0.01'))
+                if total_fixed > ctc:
+                    raise serializers.ValidationError({
+                        'salary': f"Total fixed earnings and allowances (₹{total_fixed}) exceed monthly CTC (₹{ctc}). Fixed earnings cannot exceed monthly CTC."
+                    })
+                special = max(Decimal('0.00'), ctc - total_fixed).quantize(Decimal('0.01'))
                 computed_from_pct = {
                     'Basic': str(basic_amt),
                     'HRA': str(hra_amt),
@@ -670,6 +737,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 computed_from_pct['Special Allowance'] = str(special)
                 computed_from_pct['_basic_pct'] = str(basic_pct.quantize(Decimal('0.01')))
                 computed_from_pct['_hra_pct'] = str(hra_pct.quantize(Decimal('0.01')))
+            except serializers.ValidationError:
+                raise
             except Exception:
                 computed_from_pct = None
 
@@ -686,6 +755,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             assignment.save(update_fields=['computed_components'])
         elif custom_components:
             computed = {}
+            fixed_sum = Decimal('0.00')
             for k, v in custom_components.items():
                 if str(k).startswith('_'):
                     continue
@@ -701,9 +771,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     canonical_name = 'Special Allowance'
 
                 try:
-                    computed[canonical_name] = str(Decimal(str(v)).quantize(Decimal('0.01')))
+                    val_dec = Decimal(str(v)).quantize(Decimal('0.01'))
+                    computed[canonical_name] = str(val_dec)
+                    if canonical_name != 'Special Allowance' and val_dec > 0:
+                        fixed_sum += val_dec
                 except Exception:
                     computed[canonical_name] = str(v)
+            if fixed_sum > ctc:
+                raise serializers.ValidationError({
+                    'salary': f"Total fixed earnings and allowances (₹{fixed_sum}) exceed monthly CTC (₹{ctc}). Fixed earnings cannot exceed monthly CTC."
+                })
             # Derive % metadata for FE reload
             try:
                 b = Decimal(str(computed.get('Basic') or 0))
@@ -803,6 +880,12 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         employee = attrs.get('employee') or getattr(self.instance, 'employee', None)
         date = attrs.get('date') or getattr(self.instance, 'date', None)
+        if date:
+            from billing.advances import today_ist
+            if date > today_ist():
+                raise serializers.ValidationError({
+                    'date': "Attendance cannot be marked for future dates."
+                })
         if employee and date and employee.date_of_joining:
             if date < employee.date_of_joining:
                 raise serializers.ValidationError({
@@ -849,10 +932,35 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'computed_days', 'lwp_days', 'applied_at', 'updated_at', 'status']
 
     def validate(self, data):
-        start = data.get('start_date')
-        end = data.get('end_date')
+        start = data.get('start_date') or (self.instance.start_date if self.instance else None)
+        end = data.get('end_date') or (self.instance.end_date if self.instance else None)
+        employee = data.get('employee') or (self.instance.employee if self.instance else None)
+
         if start and end and start > end:
             raise serializers.ValidationError({"end_date": "End date must be on or after start date."})
+
+        if employee and employee.date_of_joining and start:
+            if start < employee.date_of_joining:
+                raise serializers.ValidationError({
+                    "start_date": f"Leave cannot be applied for dates before employee joining date ({employee.date_of_joining:%d-%m-%Y})."
+                })
+
+        if employee and start and end:
+            overlap_qs = LeaveApplication.objects.filter(
+                employee=employee,
+                status='approved',
+                start_date__lte=end,
+                end_date__gte=start,
+            )
+            if self.instance:
+                overlap_qs = overlap_qs.exclude(pk=self.instance.pk)
+            overlapping = overlap_qs.select_related('leave_type').first()
+            if overlapping:
+                lt_name = overlapping.leave_type.name if overlapping.leave_type else 'Leave'
+                raise serializers.ValidationError({
+                    "start_date": f"This leave request overlaps with an already approved leave from {overlapping.start_date:%d-%m-%Y} to {overlapping.end_date:%d-%m-%Y} ({lt_name})."
+                })
+
         return data
 
 

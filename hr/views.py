@@ -244,6 +244,9 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             new_doj = _dt.date.fromisoformat(str(raw))
         except (TypeError, ValueError):
             return Response({'new_doj': 'Give the corrected date of joining as YYYY-MM-DD.'}, status=400)
+        from billing.advances import today_ist
+        if new_doj > today_ist():
+            return Response({'new_doj': 'Date of joining cannot be in the future.'}, status=400)
         if request.method == 'GET':
             ty, tm = next_open_month(employee.tenant)
             old_doj = employee.date_of_joining
@@ -321,11 +324,16 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             import string
             User = get_user_model()
             username = instance.personal_email
+            parts = (instance.full_name or '').strip().split(maxsplit=1)
+            first_name = parts[0] if parts else ''
+            last_name = parts[1] if len(parts) > 1 else ''
             
             password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
             user = User.objects.create_user(
                 username=username,
                 email=instance.personal_email,
+                first_name=first_name,
+                last_name=last_name,
                 password=password,
                 role='employee',
                 parent=tenant
@@ -335,10 +343,13 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             
             from django.conf import settings
             use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-            if use_celery:
-                send_employee_account_creation_email.delay(instance.personal_email, instance.full_name, password, tenant.business_name or "Cenvoras")
-            else:
-                send_employee_account_creation_email(instance.personal_email, instance.full_name, password, tenant.business_name or "Cenvoras")
+            try:
+                if use_celery:
+                    send_employee_account_creation_email.delay(instance.personal_email, instance.full_name, password, tenant.business_name or "Cenvoras")
+                else:
+                    send_employee_account_creation_email(instance.personal_email, instance.full_name, password, tenant.business_name or "Cenvoras")
+            except Exception as e:
+                logger.warning(f"Failed to send employee account creation email: {e}")
 
         # Automatic branded offer letter dispatch if enabled in HRMSSettings
         settings_obj = getattr(tenant, 'hrms_settings', None)
@@ -346,10 +357,13 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             from hr.tasks import send_employee_offer_letter_email
             from django.conf import settings
             use_celery = bool(getattr(settings, 'CELERY_BROKER_URL', None)) and not getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-            if use_celery:
-                send_employee_offer_letter_email.delay(str(instance.id))
-            else:
-                send_employee_offer_letter_email(str(instance.id))
+            try:
+                if use_celery:
+                    send_employee_offer_letter_email.delay(str(instance.id))
+                else:
+                    send_employee_offer_letter_email(str(instance.id))
+            except Exception as e:
+                logger.warning(f"Failed to send employee offer letter email: {e}")
 
         audit_service.log_create(
             self.request,
@@ -390,6 +404,14 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             'designation_id': str(instance.designation_id) if instance.designation_id else None,
         }
         updated = serializer.save()
+        if updated.user and updated.full_name:
+            parts = updated.full_name.strip().split(maxsplit=1)
+            first_name = parts[0] if parts else ''
+            last_name = parts[1] if len(parts) > 1 else ''
+            if updated.user.first_name != first_name or updated.user.last_name != last_name:
+                updated.user.first_name = first_name
+                updated.user.last_name = last_name
+                updated.user.save(update_fields=['first_name', 'last_name'])
         after = {
             'full_name': updated.full_name,
             'status': updated.status,
@@ -1086,6 +1108,15 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             record = AttendanceRecord.objects.create(tenant=tenant, employee=employee, date=date, status=att_status)
             return Response(self.get_serializer(record).data, status=status.HTTP_201_CREATED)
         else:
+            is_update_action = kwargs.get('pk') is not None
+            overwrite = request.data.get('overwrite')
+            allow_overwrite = is_update_action or overwrite is True or str(overwrite).lower() in ('true', '1')
+            if not allow_overwrite:
+                formatted_date = date.strftime('%d-%m-%Y') if hasattr(date, 'strftime') else str(date)
+                return Response({
+                    'date': [f"Attendance for {employee.full_name} has already been marked as '{record.get_status_display()}' on {formatted_date}. Confirm overwrite to replace."]
+                }, status=status.HTTP_400_BAD_REQUEST)
+
             before = {'status': record.status}
             record.status = att_status
             record.save()
@@ -1129,11 +1160,13 @@ class BulkAttendanceView(APIView):
                 except Employee.DoesNotExist:
                     continue
 
-                if emp.date_of_joining:
-                    import datetime
-                    rec_date = datetime.date.fromisoformat(date) if isinstance(date, str) else date
-                    if rec_date < emp.date_of_joining:
-                        continue
+                import datetime
+                from billing.advances import today_ist
+                rec_date = datetime.date.fromisoformat(date) if isinstance(date, str) else date
+                if rec_date > today_ist():
+                    continue
+                if emp.date_of_joining and rec_date < emp.date_of_joining:
+                    continue
                 
                 record = AttendanceRecord.objects.filter(employee=emp, date=date).first()
                 if not record:

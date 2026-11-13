@@ -9,6 +9,7 @@ Requirements: 2.3, 2.4, 2.5, 2.7, 12.2
 """
 
 import datetime
+from unittest.mock import patch
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -20,6 +21,15 @@ from hr.models import Department, Designation, Employee
 class EmployeeAPITests(APITestCase):
 
     def setUp(self):
+        self.email_patcher1 = patch('hr.tasks.send_employee_account_creation_email.delay')
+        self.email_patcher2 = patch('hr.tasks.send_employee_offer_letter_email.delay')
+        self.email_patcher3 = patch('hr.tasks.send_employee_account_creation_email')
+        self.email_patcher4 = patch('hr.tasks.send_employee_offer_letter_email')
+        self.email_patcher1.start()
+        self.email_patcher2.start()
+        self.email_patcher3.start()
+        self.email_patcher4.start()
+
         # Create Tenant 1 and users
         self.tenant1 = User.objects.create_user(
             username='tenant1_owner',
@@ -61,6 +71,12 @@ class EmployeeAPITests(APITestCase):
         self.desig_t2 = Designation.objects.create(tenant=self.tenant2, name='Developer')
 
         self.list_url = reverse('employee-list')
+
+    def tearDown(self):
+        self.email_patcher1.stop()
+        self.email_patcher2.stop()
+        self.email_patcher3.stop()
+        self.email_patcher4.stop()
 
     def test_auto_generated_employee_codes_sequential_and_tenant_scoped(self):
         """Test EMP-{NNNN} codes are sequential and tenant-scoped."""
@@ -347,3 +363,180 @@ class EmployeeAPITests(APITestCase):
         self.assertNotIn('hra', earnings)
         self.assertIn('Special Allowance', earnings)
         self.assertNotIn('special_allowance', earnings)
+
+    def test_duplicate_personal_email_rejected(self):
+        """High 3: two employees cannot be given the same email address."""
+        self.client.force_authenticate(user=self.tenant1)
+        payload1 = {
+            'full_name': 'Employee One',
+            'personal_email': 'duplicate@example.com',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': '2023-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Employee One',
+        }
+        res1 = self.client.post(self.list_url, payload1, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+
+        payload2 = {
+            'full_name': 'Employee Two',
+            'personal_email': 'duplicate@example.com',
+            'personal_phone': '9876543211',
+            'date_of_birth': '1996-01-01',
+            'date_of_joining': '2023-02-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456780',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Employee Two',
+        }
+        res2 = self.client.post(self.list_url, payload2, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('personal_email', res2.data)
+
+    def test_changing_joining_date_moves_salary_effective_from(self):
+        """High 4: changing joining date moves salary effective_from date."""
+        self.client.force_authenticate(user=self.tenant1)
+        payload = {
+            'full_name': 'DOJ Move Test',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': '2024-05-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'DOJ Move Test',
+            'salary': {
+                'monthly_ctc': 50000,
+                'components': {'Basic': 25000, 'HRA': 12500, 'Special Allowance': 12500}
+            }
+        }
+        res = self.client.post(self.list_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        emp_id = res.data['id']
+        emp = Employee.objects.get(id=emp_id)
+        assign = emp.salary_assignments.first()
+        self.assertEqual(str(assign.effective_from), '2024-05-01')
+
+        # Now update DOJ to 2023-11-01
+        detail_url = reverse('employee-detail', args=[emp_id])
+        res_update = self.client.patch(detail_url, {'date_of_joining': '2023-11-01'}, format='json')
+        self.assertEqual(res_update.status_code, status.HTTP_200_OK)
+        assign.refresh_from_db()
+        self.assertEqual(str(assign.effective_from), '2023-11-01')
+
+    def test_future_date_of_joining_rejected(self):
+        """Medium 7: future joining date is rejected."""
+        self.client.force_authenticate(user=self.tenant1)
+        from billing.advances import today_ist
+        future_doj = (today_ist() + datetime.timedelta(days=10)).isoformat()
+        payload = {
+            'full_name': 'Future Joiner',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': future_doj,
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Future Joiner',
+        }
+        res = self.client.post(self.list_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('date_of_joining', res.data)
+        self.assertIn('cannot be in the future', str(res.data['date_of_joining']))
+
+    def test_allowances_exceeding_ctc_rejected(self):
+        """Medium 6: allowances exceeding CTC fail validation."""
+        self.client.force_authenticate(user=self.tenant1)
+        payload = {
+            'full_name': 'Allowances Test',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': '2023-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Allowances Test',
+            'salary': {
+                'monthly_ctc': 50000,
+                'basic_pct': 50,
+                'hra_pct': 50,
+                'components': {
+                    'Conveyance Allowance': 20000,
+                    'Medical Allowance': 20000,
+                }
+            }
+        }
+        # Basic=25000 + HRA=12500 + Conv=20000 + Med=20000 = 77500 > 50000 CTC
+        res = self.client.post(self.list_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('salary', res.data)
+
+    def test_pf_number_normalization_and_save(self):
+        """Medium 8: slash-formatted PF number normalizes and saves."""
+        self.client.force_authenticate(user=self.tenant1)
+        payload = {
+            'full_name': 'PF Test Employee',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': '2023-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'PF Test Employee',
+            'pf_number': 'MH/BAN/0012345/000/0001234'
+        }
+        res = self.client.post(self.list_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(res.data['pf_member_id'], 'MHBAN00123450000001234')
+        self.assertEqual(res.data['pf_number'], 'MHBAN00123450000001234')
+
+    def test_employee_user_first_and_last_name_split(self):
+        """Medium 11: full_name splits into first_name and last_name on created User account."""
+        self.client.force_authenticate(user=self.tenant1)
+        payload = {
+            'full_name': 'Rahul Sharma',
+            'personal_email': 'rahul.sharma@example.com',
+            'personal_phone': '9876543210',
+            'date_of_birth': '1995-01-01',
+            'date_of_joining': '2023-01-01',
+            'gender': 'M',
+            'employment_type': 'full_time',
+            'department': str(self.dept_t1.id),
+            'designation': str(self.desig_t1.id),
+            'bank_name': 'HDFC',
+            'bank_account_number': '123456789',
+            'bank_ifsc': 'HDFC0001234',
+            'account_holder_name': 'Rahul Sharma',
+        }
+        res = self.client.post(self.list_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        user = User.objects.get(email='rahul.sharma@example.com')
+        self.assertEqual(user.first_name, 'Rahul')
+        self.assertEqual(user.last_name, 'Sharma')

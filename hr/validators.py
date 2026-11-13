@@ -19,7 +19,26 @@ PF_MEMBER_RE = re.compile(r'^[A-Z]{5}[0-9]{17}$')
 
 
 def clean(value):
-    return re.sub(r'\s+', '', str(value or '')).upper()
+    return re.sub(r'[\s\/\-]+', '', str(value or '')).upper()
+
+
+def normalize_pf_number(value):
+    if not value:
+        return ''
+    s = str(value).strip().upper()
+    parts = [p for p in re.split(r'[\/\-]+', s) if p]
+    if len(parts) == 5:
+        state, office, est, ext, mem = parts
+        if len(state) == 2 and len(office) == 3 and est.isdigit() and ext.isdigit() and mem.isdigit():
+            return f"{state}{office}{est.zfill(7)}{ext.zfill(3)}{mem.zfill(7)}"
+    elif len(parts) == 4:
+        if len(parts[0]) == 5 and parts[1].isdigit() and parts[2].isdigit() and parts[3].isdigit():
+            return f"{parts[0]}{parts[1].zfill(7)}{parts[2].zfill(3)}{parts[3].zfill(7)}"
+    elif len(parts) == 3:
+        state, office, num = parts
+        if len(state) == 2 and len(office) == 3 and num.isdigit():
+            return f"{state}{office}{num.zfill(17)}"
+    return clean(value)
 
 
 def pan_error(value, individual=False):
@@ -51,5 +70,6 @@ def esi_ip_error(value):
 
 
 def pf_member_error(value):
-    return None if PF_MEMBER_RE.fullmatch(clean(value)) else (
-        'PF member ID must be 22 characters: 5 letters then 17 digits (e.g. MHBAN00123450000012345).')
+    v = normalize_pf_number(value)
+    return None if PF_MEMBER_RE.fullmatch(v) else (
+        'PF member ID must be 22 characters: 5 letters then 17 digits (e.g. MHBAN00123450000001234 or MH/BAN/0012345/000/0001234).')

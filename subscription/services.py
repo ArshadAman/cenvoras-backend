@@ -190,12 +190,14 @@ def get_current_usage(user: User) -> dict[str, int]:
     ).count()
 
     customers_total = Customer.objects.filter(created_by=tenant).count()
-    team_members_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).count()
+    team_members_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).exclude(role='employee').count()
+    portal_employees_total = User.objects.filter(parent=tenant).exclude(id=tenant.id).filter(role='employee').count()
 
     return {
         'invoices_this_month': invoices_this_month,
         'customers_total': customers_total,
         'team_members_total': team_members_total,
+        'portal_employees_total': portal_employees_total,
     }
 
 

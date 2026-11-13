@@ -298,6 +298,9 @@ def apply_doj_correction(employee, new_doj, reason, user, recompute=False):
         raise DOJCorrectionError('A reason is required for a DOJ correction.')
     if isinstance(new_doj, str):
         new_doj = datetime.date.fromisoformat(new_doj)
+    from billing.advances import today_ist
+    if new_doj > today_ist():
+        raise DOJCorrectionError('Date of joining cannot be in the future.')
     old_doj = employee.date_of_joining
     superseded = None
     if new_doj == old_doj:
@@ -325,6 +328,13 @@ def apply_doj_correction(employee, new_doj, reason, user, recompute=False):
         )
     type(employee).objects.filter(pk=employee.pk).update(date_of_joining=new_doj)
     employee.date_of_joining = new_doj
+    from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
+    single_or_initial = EmployeeSalaryAssignment.objects.filter(employee=employee)
+    if single_or_initial.count() == 1:
+        single_or_initial.update(effective_from=new_doj)
+    else:
+        EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
+    EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
     try:
         from audit_log.models import AuditLog
         AuditLog.objects.create(

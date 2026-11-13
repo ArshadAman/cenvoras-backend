@@ -513,11 +513,31 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 class TeamMemberSerializer(serializers.ModelSerializer):
     """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
     password = serializers.CharField(write_only=True, min_length=8, required=False, allow_blank=True)
+    display_name = serializers.CharField(read_only=True, required=False)
     
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined')
-        read_only_fields = ('id', 'date_joined')
+        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined', 'display_name')
+        read_only_fields = ('id', 'date_joined', 'display_name')
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        first_name = (data.get('first_name') or '').strip()
+        last_name = (data.get('last_name') or '').strip()
+        display_name = f"{first_name} {last_name}".strip()
+        if not display_name:
+            emp = getattr(instance, 'employee_profile', None)
+            if emp is not None:
+                emp_obj = emp.first() if hasattr(emp, 'first') else emp
+                if emp_obj and getattr(emp_obj, 'full_name', None):
+                    display_name = emp_obj.full_name.strip()
+                    parts = display_name.split(maxsplit=1)
+                    if not first_name:
+                        data['first_name'] = parts[0]
+                    if not last_name and len(parts) > 1:
+                        data['last_name'] = parts[1]
+        data['display_name'] = display_name or instance.email
+        return data
         
     def validate_email(self, value):
         qs = User.objects.filter(email=value)

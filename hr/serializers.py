@@ -634,10 +634,21 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if employee.employment_type == 'contract':
             return
         if not salary_data or not isinstance(salary_data, dict):
-            return
+            # When creating a regular employee without explicit salary payload, assign standard structure from DOJ
+            has_existing = employee.salary_assignments.exists()
+            if not has_existing:
+                salary_data = {
+                    'monthly_ctc': Decimal('50000.00'),
+                    'effective_from': employee.date_of_joining or timezone.now().date(),
+                }
+            else:
+                return
         monthly_ctc = salary_data.get('monthly_ctc')
         if not monthly_ctc or float(monthly_ctc) <= 0:
-            return
+            if not employee.salary_assignments.exists():
+                monthly_ctc = Decimal('50000.00')
+            else:
+                return
 
         ctc = Decimal(str(monthly_ctc)).quantize(Decimal('0.01'))
         effective_from = salary_data.get('effective_from') or employee.date_of_joining or timezone.now().date()
@@ -1265,6 +1276,15 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             month = data.get('month', getattr(self.instance, 'month', None))
             year = data.get('year', getattr(self.instance, 'year', None))
 
+            if month and year:
+                from billing.advances import today_ist
+                today = today_ist()
+                if (year > today.year) or (year == today.year and month > today.month):
+                    raise serializers.ValidationError(
+                        f"Cannot create payroll cycle for {month}/{year}. "
+                        f"Payroll cycles cannot be created ahead of time for future months (current period: {today.month}/{today.year})."
+                    )
+
             # Disallow duplicate payroll runs for the same period
             qs = PayrollRun.objects.filter(tenant=tenant, month=month, year=year)
             if self.instance:
@@ -1316,18 +1336,24 @@ class PayslipSerializer(serializers.ModelSerializer):
             db['Provident Fund (PF)'] = str(obj.employee_pf)
         if obj.employee_esi > 0 and 'ESI' not in db:
             db['ESI'] = str(obj.employee_esi)
-        if obj.tds > 0 and 'TDS' not in db and 'Income Tax (TDS)' not in db:
-            db['Income Tax (TDS)'] = str(obj.tds)
-        if obj.professional_tax > 0 and 'PT' not in db and 'Professional Tax (PT)' not in db:
-            db['Professional Tax (PT)'] = str(obj.professional_tax)
+        # Always display Professional Tax (PT) line
+        if 'PT' not in db and 'Professional Tax (PT)' not in db:
+            db['Professional Tax (PT)'] = str(obj.professional_tax or '0.00')
+        # Always display Income Tax (TDS) line
+        if 'TDS' not in db and 'Income Tax (TDS)' not in db:
+            db['Income Tax (TDS)'] = str(obj.tds or '0.00')
         if obj.advance_recovery > 0 and 'Salary Advance Recovery' not in db:
             db['Salary Advance Recovery'] = str(obj.advance_recovery)
         if obj.loan_recovery > 0 and 'Loan Recovery' not in db:
             db['Loan Recovery'] = str(obj.loan_recovery)
 
-        # LOP is applied via gross proration — do not inject a synthetic deduction line
-        db.pop('Loss of Pay (LOP)', None)
-        db.pop('LOP', None)
+        # Show Loss of Pay (LOP) line when unpaid leaves exist
+        lop_amt = self.get_lop_amount(obj)
+        if obj.lop_days > 0 or (lop_amt and float(lop_amt) > 0):
+            db['Loss of Pay (LOP)'] = str(lop_amt or '0.00')
+        else:
+            db.pop('Loss of Pay (LOP)', None)
+            db.pop('LOP', None)
 
         # Fallback if total_deductions > 0 but db is still empty
         if not db and obj.total_deductions > 0:
@@ -1350,10 +1376,10 @@ class PayslipSerializer(serializers.ModelSerializer):
             reasons.setdefault('Provident Fund (PF)', "Employee statutory 12.00% Provident Fund contribution on Basic salary")
         if obj.employee_esi > 0:
             reasons.setdefault('ESI', "Employee statutory 0.75% State Insurance contribution on gross earnings")
-        if obj.tds > 0:
+        if obj.tds >= 0:
             reasons.setdefault('TDS', "Monthly income tax withholding deducted under Section 192")
             reasons.setdefault('Income Tax (TDS)', "Monthly income tax withholding deducted under Section 192")
-        if obj.professional_tax > 0:
+        if obj.professional_tax >= 0:
             reasons.setdefault('PT', "State statutory Professional Tax slab deduction")
             reasons.setdefault('Professional Tax (PT)', "State statutory Professional Tax slab deduction")
         if obj.advance_recovery > 0:

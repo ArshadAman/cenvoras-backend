@@ -295,15 +295,19 @@ def compute_esi(gross_salary, hrms_settings=None):
     """
     Computes Employee and Employer ESI.
     Applies only if gross monthly salary is <= ₹21,000 (statutory threshold).
+    Under Rule 52 of ESI (Central) Rules, 1950, all fractions of a rupee are rounded off
+    to the next higher rupee (ROUND_CEILING).
     """
+    from decimal import ROUND_CEILING
+
     gross = Decimal(str(gross_salary))
     ceiling = Decimal(str(hrms_settings.esi_wage_ceiling if hrms_settings else 21000.0))
 
     if gross <= ceiling:
         emp_rate = Decimal(str(hrms_settings.esi_employee_rate if hrms_settings else 0.75)) / Decimal('100')
         empr_rate = Decimal(str(hrms_settings.esi_employer_rate if hrms_settings else 3.25)) / Decimal('100')
-        emp_esi = (gross * emp_rate).quantize(Decimal('0.01'))
-        employer_esi = (gross * empr_rate).quantize(Decimal('0.01'))
+        emp_esi = (gross * emp_rate).quantize(Decimal('1'), rounding=ROUND_CEILING).quantize(Decimal('0.01'))
+        employer_esi = (gross * empr_rate).quantize(Decimal('1'), rounding=ROUND_CEILING).quantize(Decimal('0.01'))
     else:
         emp_esi = Decimal('0.00')
         employer_esi = Decimal('0.00')

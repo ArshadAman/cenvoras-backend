@@ -181,8 +181,12 @@ def _block_critical_exceptions(run, verb='approve'):
             still_broken = True
         elif exc.code == 'PAN_REQUIRED_FOR_TDS' and (not emp or not is_valid_pan(emp.pan_number, individual=True)):
             still_broken = True
-        elif exc.code == 'NO_SALARY_STRUCTURE' and (not emp or not EmployeeSalaryAssignment.objects.filter(employee=emp, effective_from__lte=run_end).exists()):
-            still_broken = True
+        elif exc.code == 'NO_SALARY_STRUCTURE':
+            # NO_SALARY_STRUCTURE must not be marked resolved without a recalculation that produces a payslip
+            has_ps = run.payslips.filter(employee=emp).exists()
+            has_assignment = bool(emp and EmployeeSalaryAssignment.objects.filter(employee=emp, effective_from__lte=run_end).exists())
+            if not has_assignment or not has_ps:
+                still_broken = True
         if still_broken:
             exc.is_resolved = False
             exc.save(update_fields=['is_resolved'])
@@ -198,6 +202,19 @@ def _block_critical_exceptions(run, verb='approve'):
         raise ValidationError(
             f"Cannot {verb} payroll ({count} unresolved critical issue{'s' if count > 1 else ''}): {issues_text}. "
             f"Please review and resolve in the Exceptions panel before {'approving' if verb == 'approve' else 'finalising'}.")
+
+    # Headcount parity guard: verify all eligible active employees have generated payslips in this run
+    from hr.services.payroll_engine import eligible_employees
+    eligible = eligible_employees(run)
+    payslip_emp_ids = set(run.payslips.values_list('employee_id', flat=True))
+    missing_emps = [e for e in eligible if e.id not in payslip_emp_ids]
+    if missing_emps:
+        names = ", ".join(f"{e.full_name} ({e.employee_code})" for e in missing_emps[:3])
+        more = f" and {len(missing_emps) - 3} more" if len(missing_emps) > 3 else ""
+        raise ValidationError(
+            f"Cannot {verb} payroll: {len(missing_emps)} eligible employee(s) have no generated payslips ({names}{more}). "
+            f"Ensure all employees have active salary structures and recalculate payroll."
+        )
 
 
 def _block_unconfirmed_ctc_scaling(run, verb='approve'):
@@ -2743,14 +2760,20 @@ class PayrollExceptionViewSet(viewsets.ReadOnlyModelViewSet):
             if run and emp:
                 end_date = datetime.date(run.year, run.month, calendar.monthrange(run.year, run.month)[1])
                 has_assignment = EmployeeSalaryAssignment.objects.filter(employee=emp, effective_from__lte=end_date).exists()
-                if not has_assignment:
-                    return Response({'error': 'Cannot resolve: No active salary structure assigned to this employee for this period.'}, status=400)
+                has_ps = run.payslips.filter(employee=emp).exists()
+                if not has_assignment or not has_ps:
+                    return Response({
+                        'error': 'Cannot manually resolve: Employee lacks an active salary structure or payslip in this run. '
+                                 'Assign salary and recalculate payroll.'
+                    }, status=400)
         elif exc.code == 'NEGATIVE_NET_SALARY':
             from hr.models import Payslip
             if run and emp:
                 ps = Payslip.objects.filter(payroll_run=run, employee=emp).first()
-                if ps and ps.net_salary < 0:
-                    return Response({'error': 'Cannot resolve: Net salary is still negative. Adjust deductions or recalculate.'}, status=400)
+                if not ps or ps.net_salary < 0:
+                    return Response({
+                        'error': 'Cannot manually resolve: Net salary is negative. Adjust deductions or salary and recalculate payroll.'
+                    }, status=400)
 
         exc.is_resolved = True
         exc.resolved_by = request.user
@@ -3030,6 +3053,30 @@ class HRReportsView(APIView):
                 'lines': lines,
                 'count': len(lines),
             }, status=status.HTTP_200_OK)
+
+        elif report_type == 'pf_ecr':
+            from hr.services.statutory_reports import generate_pf_ecr
+            data = generate_pf_ecr(tenant, year, month)
+            return Response(data, status=status.HTTP_200_OK)
+
+        elif report_type == 'esi_return':
+            from hr.services.statutory_reports import generate_esi_return
+            data = generate_esi_return(tenant, year, month)
+            return Response(data, status=status.HTTP_200_OK)
+
+        elif report_type == 'tds_24q':
+            from hr.services.statutory_reports import generate_form_24q
+            quarter = request.query_params.get('quarter', 'Q3')
+            fy = request.query_params.get('financial_year') or f"{year}-{str(year+1)[-2:]}"
+            data = generate_form_24q(tenant, fy, quarter)
+            return Response(data, status=status.HTTP_200_OK)
+
+        elif report_type == 'form_16':
+            from hr.services.statutory_reports import generate_form_16
+            fy = request.query_params.get('financial_year') or f"{year}-{str(year+1)[-2:]}"
+            emp_id = request.query_params.get('employee_id')
+            data = generate_form_16(tenant, fy, employee_id=emp_id)
+            return Response(data, status=status.HTTP_200_OK)
 
         return Response({"error": "Unknown report type."}, status=status.HTTP_400_BAD_REQUEST)
 

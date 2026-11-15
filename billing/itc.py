@@ -43,6 +43,25 @@ def vendor_registered(bill):
         return False
 
 
+def is_import_of_services_line(hsn_sac_code):
+    """SAC (chapter 99) code: a service. On an Overseas bill this is import of services."""
+    return (str(hsn_sac_code or '')).strip().startswith('99')
+
+
+def import_of_services_warning(bill):
+    """Warn when a bill looks like import of services but isn't marked Overseas: no supplier GSTIN,
+    SAC (chapter 99) lines and a vendor country other than India."""
+    if (getattr(bill, 'gst_treatment', '') or '').strip().lower() == 'overseas' or bill_vendor_gstin(bill):
+        return None
+    vendor = getattr(bill, 'vendor', None)
+    country = (getattr(vendor, 'country', '') or '').strip().lower() if vendor else ''
+    overseas_vendor = getattr(vendor, 'gst_type', '') == 'overseas' or (country and country not in ('india', 'in'))
+    if overseas_vendor and any(is_import_of_services_line(i.hsn_sac_code) for i in bill.items.all()):
+        return ('This supplier has no GSTIN, is outside India and the bill has SAC (chapter 99) lines: '
+                'set GST treatment to Overseas (import of services, IGST under reverse charge).')
+    return None
+
+
 def line_is_rcm(bill, item):
     return bool(getattr(item, 'is_rcm', False) or getattr(bill, 'is_reverse_charge', False))
 
@@ -183,7 +202,7 @@ def bill_tax_classification(bill, buyer_state_code=None, only=None, item_ids=Non
             continue
         # Rudra (#219): s.17(5)-blocked RCM ITC never shows in 4A(3); like other blocked ITC it is
         # shown in 4A (all other ITC) and reversed in 4B(1).
-        imps = rcm and overseas and (getattr(item, 'hsn_sac_code', '') or '').strip().startswith('99')
+        imps = rcm and overseas and is_import_of_services_line(getattr(item, 'hsn_sac_code', ''))
         gross = ('itc_4a_imps' if imps else 'itc_4a_rcm') if (rcm and not blocked) else 'itc_4a_normal'
         for k, v in parts:
             out[gross][k] += v

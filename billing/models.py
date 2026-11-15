@@ -163,6 +163,12 @@ class Vendor(models.Model):
         help_text="Vendor's State/Region (Determines Tax Treatment)"
     )
 
+    GST_TYPE_CHOICES = [('registered', 'Registered'), ('unregistered', 'Unregistered'),
+                        ('composite', 'Composition'), ('overseas', 'Overseas')]
+    gst_type = models.CharField(max_length=20, choices=GST_TYPE_CHOICES, blank=True, default='',
+                                help_text="Vendor GST type. 'overseas' = supplier outside India (import).")
+    country = models.CharField(max_length=60, blank=True, default='India')
+
     # Compliance & GST Shield fields
     compliance_score = models.IntegerField(default=100, help_text="Vendor GST Compliance Score (0-100)")
     risk_tier = models.CharField(

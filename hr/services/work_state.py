@@ -17,6 +17,11 @@ def resolve_work_state(employee=None, tenant=None, work_state=None):
             t = getattr(employee, 'tenant', None)
         if t is not None:
             raw = (getattr(t, 'state', None) or '').strip()
+            if not raw:
+                # Fallback to tenant.gstin prefix (e.g. 23... -> Madhya Pradesh)
+                gstin = (getattr(t, 'gstin', None) or '').strip()
+                if len(gstin) >= 2 and gstin[:2].isdigit():
+                    raw = gstin[:2]
 
     if not raw:
         return ''

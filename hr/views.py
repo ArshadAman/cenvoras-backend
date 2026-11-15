@@ -3032,8 +3032,9 @@ class HRReportsView(APIView):
             by_state = {}
             lines = []
             total_pt = Decimal('0.00')
+            from hr.services.work_state import resolve_work_state
             for p in payslips:
-                state = p.employee.work_state or 'Unspecified'
+                state = resolve_work_state(employee=p.employee, tenant=tenant) or p.employee.work_state or 'Unspecified'
                 pt = p.professional_tax or Decimal('0.00')
                 total_pt += pt
                 by_state.setdefault(state, Decimal('0.00'))

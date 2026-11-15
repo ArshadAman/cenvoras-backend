@@ -352,7 +352,7 @@ def _normalize_pt_state_name(work_state):
     return state
 
 
-def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None):
+def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None, hrms_settings=None):
     """
     State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
 
@@ -373,10 +373,14 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
         return Decimal('0.00')
 
     tenant_obj = tenant or (getattr(employee, 'tenant', None) if employee else None)
-    if tenant_obj:
-        settings_obj = getattr(tenant_obj, 'hrms_settings', None)
-        if settings_obj and not getattr(settings_obj, 'pt_enabled', True):
-            return Decimal('0.00')
+    settings_obj = hrms_settings
+    if settings_obj is None and tenant_obj is not None:
+        try:
+            settings_obj = getattr(tenant_obj, 'hrms_settings', None)
+        except Exception:
+            settings_obj = None
+    if settings_obj is not None and getattr(settings_obj, 'pt_enabled', True) is False:
+        return Decimal('0.00')
 
     gross = Decimal(str(gross_salary))
     state = resolve_work_state(employee=employee, tenant=tenant, work_state=work_state)
@@ -739,6 +743,7 @@ def compute_payslip_for_employee(employee, payroll_run):
         on_date=_dt.date(int(year), int(month), pt_day),
         employee=employee,
         tenant=tenant,
+        hrms_settings=settings,
     )
 
     pt_val = (pt_val + doj['pt_arrears']).quantize(Decimal('0.01'))

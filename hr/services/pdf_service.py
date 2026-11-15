@@ -219,17 +219,24 @@ def generate_payslip_pdf(payslip):
         raw_deductions['Statutory & Other Deductions'] = str(payslip.total_deductions)
 
     for cname, amt in raw_deductions.items():
-        reason_info = reasons_map.get(cname, {})
+        reason_info = (
+            reasons_map.get(cname)
+            or (reasons_map.get('PT') if 'PT' in cname or 'Professional' in cname else None)
+            or (reasons_map.get('TDS') if 'TDS' in cname or 'Income Tax' in cname else None)
+            or (reasons_map.get('PF') if 'PF' in cname or 'Provident' in cname else None)
+            or (reasons_map.get('ESI') if 'ESI' in cname or 'Insurance' in cname else None)
+            or {}
+        )
         reason_text = reason_info.get('reason', '') if isinstance(reason_info, dict) else str(reason_info or '')
         if not reason_text:
-            if 'PF' in cname or 'Provident' in cname:
+            if 'PT' in cname or 'Professional' in cname:
+                reason_text = "State statutory Professional Tax slab deduction"
+            elif 'PF' in cname or 'Provident' in cname:
                 reason_text = "Employee statutory 12.00% Provident Fund contribution on Basic salary"
             elif 'ESI' in cname:
                 reason_text = "Employee statutory 0.75% State Insurance contribution on gross earnings"
-            elif 'TDS' in cname or 'Tax' in cname:
+            elif 'TDS' in cname or 'Income Tax' in cname or 'Tax' in cname:
                 reason_text = "Monthly income tax withholding deducted under Section 192"
-            elif 'PT' in cname or 'Professional' in cname:
-                reason_text = "State statutory Professional Tax slab deduction"
             elif 'Advance' in cname:
                 reason_text = "Monthly installment recovered against active salary advance"
             elif 'Loan' in cname:

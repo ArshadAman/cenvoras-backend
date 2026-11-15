@@ -39,8 +39,12 @@ def generate_pf_ecr(tenant, year, month):
         payroll_run__month=month,
     ).select_related('employee', 'payroll_run').order_by('employee__employee_code')
 
-    hrms_settings = getattr(tenant, 'hrms_settings', None)
-    apply_ceiling = getattr(hrms_settings, 'pf_apply_ceiling', True)
+    try:
+        from hr.services.payroll_engine import get_hrms_settings
+        hrms_settings = get_hrms_settings(tenant)
+    except Exception:
+        hrms_settings = None
+    apply_ceiling = getattr(hrms_settings, 'pf_apply_ceiling', True) if hrms_settings else True
     statutory_ceiling = Decimal('15000.00')
 
     records = []
@@ -54,22 +58,34 @@ def generate_pf_ecr(tenant, year, month):
 
     for p in payslips:
         emp = p.employee
-        if not emp.pf_applicable:
+        is_pf = (
+            (p.employee_pf and p.employee_pf > 0)
+            or getattr(emp, 'pf_applicable', False)
+            or (getattr(emp, 'pf_member', None) is True)
+        )
+        if not is_pf:
             continue
 
         uan = emp.uan or ''
         name = emp.full_name.strip()
-        gross = p.gross_salary
+        gross = p.gross_salary or Decimal('0.00')
 
         # Statutory PF base: deductions['PF']['pf_wage'] or basic
-        pf_data = (p.deduction_reasons or {}).get('PF', {})
+        raw_reasons = p.deduction_reasons or {}
+        if isinstance(raw_reasons, str):
+            try:
+                import json
+                raw_reasons = json.loads(raw_reasons)
+            except Exception:
+                raw_reasons = {}
+        pf_data = raw_reasons.get('PF') or raw_reasons.get('Provident Fund') or raw_reasons.get('Provident Fund (PF)') or {}
         if isinstance(pf_data, dict) and pf_data.get('pf_wage'):
             try:
                 pf_wage = Decimal(str(pf_data['pf_wage']))
             except Exception:
-                pf_wage = p.gross_salary
+                pf_wage = gross
         else:
-            pf_wage = p.gross_salary
+            pf_wage = gross
 
         if apply_ceiling and pf_wage > statutory_ceiling:
             epf_wages = statutory_ceiling
@@ -79,10 +95,13 @@ def generate_pf_ecr(tenant, year, month):
         eps_wages = min(epf_wages, statutory_ceiling)
         edli_wages = min(epf_wages, statutory_ceiling)
 
-        ee_pf = p.employee_pf
-        eps_share = p.employer_eps
-        er_share = p.employer_epf
-        lop_days = int(p.lop_days or 0)
+        ee_pf = p.employee_pf or Decimal('0.00')
+        eps_share = p.employer_eps or Decimal('0.00')
+        er_share = p.employer_epf or Decimal('0.00')
+        try:
+            lop_days = int(float(p.lop_days or 0))
+        except Exception:
+            lop_days = 0
 
         arrear_epf_wages = getattr(p, 'arrear_pf_wages', Decimal('0.00')) or Decimal('0.00')
         arrear_ee = getattr(p, 'arrear_employee_pf', Decimal('0.00')) or Decimal('0.00')
@@ -165,16 +184,16 @@ def generate_esi_return(tenant, year, month):
     for p in payslips:
         emp = p.employee
         # Include if employee had ESI deducted or gross is <= 21,000
-        is_covered = (p.employee_esi > 0) or (emp.esi_covered and p.gross_salary <= Decimal('21000.00'))
+        is_covered = bool((p.employee_esi and p.employee_esi > 0) or (getattr(emp, 'esi_covered', False) and (p.gross_salary or Decimal('0.00')) <= Decimal('21000.00')))
         if not is_covered:
             continue
 
         ip_num = emp.esi_ip_number or ''
         ip_name = emp.full_name.strip()
-        days_worked = p.present_days
-        wages = p.gross_salary
-        ip_contrib = p.employee_esi
-        er_contrib = p.employer_esi
+        days_worked = p.present_days or Decimal('0.00')
+        wages = p.gross_salary or Decimal('0.00')
+        ip_contrib = p.employee_esi or Decimal('0.00')
+        er_contrib = p.employer_esi or Decimal('0.00')
         total_contrib = ip_contrib + er_contrib
 
         reason = "0"

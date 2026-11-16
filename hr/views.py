@@ -1178,20 +1178,45 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='today-status')
     def today_status(self, request):
         user = request.user
-        tenant = getattr(user, 'active_tenant', user)
         today = timezone.now().date()
         emp = None
         if user.role == 'employee':
-            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            emp = Employee.objects.filter(user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(personal_email=user.email).first()
         else:
+            tenant = getattr(user, 'active_tenant', user)
             emp_id = request.query_params.get('employee_id')
             if emp_id:
                 emp = Employee.objects.filter(tenant=tenant, id=emp_id).first()
+            if not emp:
+                emp = Employee.objects.filter(tenant=tenant, user=user).first()
+                if not emp:
+                    emp = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
         
         if not emp:
-            return Response({'has_profile': False, 'date': str(today)}, status=200)
+            return Response({
+                'has_profile': False,
+                'date': str(today),
+                'checked_in': False,
+                'checked_out': False,
+                'check_in_time': None,
+                'check_out_time': None,
+            }, status=200)
 
         record = AttendanceRecord.objects.filter(employee=emp, date=today).first()
+        checked_in = bool(record and (record.check_in_time is not None or record.status in ('present', 'half_day')))
+        checked_out = bool(record and record.check_out_time is not None)
+
+        check_in_str = None
+        if record:
+            if record.check_in_time:
+                check_in_str = record.check_in_time.strftime('%I:%M %p')
+            elif record.status in ('present', 'half_day'):
+                check_in_str = timezone.localtime(record.created_at).strftime('%I:%M %p') if record.created_at else 'Present'
+
+        check_out_str = record.check_out_time.strftime('%I:%M %p') if (record and record.check_out_time) else None
+
         return Response({
             'has_profile': True,
             'employee_id': str(emp.id),
@@ -1200,28 +1225,56 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             'is_marked': record is not None,
             'status': record.status if record else None,
             'status_display': record.get_status_display() if record else None,
+            'checked_in': checked_in,
+            'checked_out': checked_out,
+            'check_in_time': check_in_str,
+            'check_out_time': check_out_str,
         }, status=200)
 
     @action(detail=False, methods=['post'], url_path='check-in')
     def check_in(self, request):
         user = request.user
-        tenant = getattr(user, 'active_tenant', user)
         today = timezone.now().date()
-        try:
-            emp = Employee.objects.get(tenant=tenant, user=user)
-        except Employee.DoesNotExist:
+        emp = None
+        if user.role == 'employee':
+            emp = Employee.objects.filter(user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(personal_email=user.email).first()
+        else:
+            tenant = getattr(user, 'active_tenant', user)
+            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+
+        if not emp:
             return Response({'error': 'No employee profile linked to your user account.'}, status=400)
 
+        tenant = emp.tenant
+        now_time = timezone.localtime().time()
         record, created = AttendanceRecord.objects.get_or_create(
             tenant=tenant, employee=emp, date=today,
-            defaults={'status': 'present'}
+            defaults={'status': 'present', 'check_in_time': now_time}
         )
-        if not created and record.status not in ('present', 'half_day'):
-            record.status = 'present'
-            record.save(update_fields=['status'])
+        if not created:
+            update_fields = []
+            if record.status not in ('present', 'half_day'):
+                record.status = 'present'
+                update_fields.append('status')
+            if not record.check_in_time:
+                record.check_in_time = now_time
+                update_fields.append('check_in_time')
+            if update_fields:
+                record.save(update_fields=update_fields)
+
+        check_in_str = record.check_in_time.strftime('%I:%M %p') if record.check_in_time else now_time.strftime('%I:%M %p')
+        check_out_str = record.check_out_time.strftime('%I:%M %p') if record.check_out_time else None
 
         return Response({
             'status': 'checked_in',
+            'checked_in': True,
+            'checked_out': bool(record.check_out_time),
+            'check_in_time': check_in_str,
+            'check_out_time': check_out_str,
             'date': str(today),
             'attendance_status': record.status,
             'message': f"Checked in successfully as 'Present' on {today:%d-%m-%Y}."
@@ -1230,19 +1283,44 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='check-out')
     def check_out(self, request):
         user = request.user
-        tenant = getattr(user, 'active_tenant', user)
         today = timezone.now().date()
-        try:
-            emp = Employee.objects.get(tenant=tenant, user=user)
-        except Employee.DoesNotExist:
+        emp = None
+        if user.role == 'employee':
+            emp = Employee.objects.filter(user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(personal_email=user.email).first()
+        else:
+            tenant = getattr(user, 'active_tenant', user)
+            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+
+        if not emp:
             return Response({'error': 'No employee profile linked to your user account.'}, status=400)
 
+        tenant = emp.tenant
+        now_time = timezone.localtime().time()
         record, created = AttendanceRecord.objects.get_or_create(
             tenant=tenant, employee=emp, date=today,
-            defaults={'status': 'present'}
+            defaults={'status': 'present', 'check_in_time': now_time, 'check_out_time': now_time}
         )
+        if not created:
+            record.check_out_time = now_time
+            update_fields = ['check_out_time']
+            if not record.check_in_time:
+                record.check_in_time = timezone.localtime(record.created_at).time() if record.created_at else now_time
+                update_fields.append('check_in_time')
+            record.save(update_fields=update_fields)
+
+        check_in_str = record.check_in_time.strftime('%I:%M %p') if record.check_in_time else None
+        check_out_str = record.check_out_time.strftime('%I:%M %p') if record.check_out_time else now_time.strftime('%I:%M %p')
+
         return Response({
             'status': 'checked_out',
+            'checked_in': True,
+            'checked_out': True,
+            'check_in_time': check_in_str,
+            'check_out_time': check_out_str,
             'date': str(today),
             'attendance_status': record.status,
             'message': f"Checked out successfully for {today:%d-%m-%Y}."
@@ -1359,9 +1437,14 @@ class LeaveBalanceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role == 'employee':
-            return LeaveBalance.objects.filter(employee__user=user)
+            emp = Employee.objects.filter(user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(personal_email=user.email).first()
+            if emp:
+                return LeaveBalance.objects.filter(employee=emp).select_related('employee', 'leave_type').order_by('leave_type__name')
+            return LeaveBalance.objects.filter(employee__user=user).select_related('employee', 'leave_type').order_by('leave_type__name')
         tenant = getattr(user, 'active_tenant', user)
-        return LeaveBalance.objects.filter(employee__tenant=tenant)
+        return LeaveBalance.objects.filter(employee__tenant=tenant).select_related('employee', 'leave_type').order_by('leave_type__name')
 
     def list(self, request, *args, **kwargs):
         # Lazily seed missing balances so UI shows zero rows with leave type names
@@ -1380,7 +1463,9 @@ class LeaveBalanceViewSet(viewsets.ModelViewSet):
                 LeaveType.objects.get_or_create(tenant=tenant, name=lt_data['name'], defaults=lt_data)
 
         if getattr(user, 'role', None) == 'employee':
-            emp = Employee.objects.filter(tenant=tenant, user=user).first()
+            emp = Employee.objects.filter(user=user).first()
+            if not emp:
+                emp = Employee.objects.filter(personal_email=user.email).first()
             if emp:
                 try:
                     leave_service.ensure_employee_leave_balances(emp, year=year)

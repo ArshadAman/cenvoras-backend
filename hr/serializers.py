@@ -947,11 +947,36 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
 class LeaveBalanceSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.full_name', read_only=True)
     leave_type_name = serializers.CharField(source='leave_type.name', read_only=True)
+    allocated = serializers.SerializerMethodField()
+    used = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveBalance
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_allocated(self, obj):
+        if obj.leave_type and obj.leave_type.annual_entitlement is not None:
+            val = float(obj.leave_type.annual_entitlement)
+            return int(val) if val.is_integer() else val
+        val = float(obj.balance or 0.0)
+        return int(val) if val.is_integer() else val
+
+    def get_used(self, obj):
+        from django.db.models import Sum
+        approved_sum = LeaveApplication.objects.filter(
+            employee=obj.employee,
+            leave_type=obj.leave_type,
+            start_date__year=obj.year,
+            status='approved'
+        ).aggregate(total=Sum('computed_days'))['total']
+
+        entitlement_diff = 0.0
+        if obj.leave_type and obj.leave_type.annual_entitlement is not None and obj.balance is not None:
+            entitlement_diff = max(0.0, float(obj.leave_type.annual_entitlement) - float(obj.balance))
+
+        val = max(float(approved_sum or 0.0), entitlement_diff)
+        return int(val) if val.is_integer() else val
 
 
 class LeaveApplicationSerializer(serializers.ModelSerializer):

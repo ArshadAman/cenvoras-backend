@@ -254,6 +254,8 @@ class AttendanceRecord(models.Model):
     )
     date = models.DateField()
     status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    check_in_time = models.TimeField(null=True, blank=True)
+    check_out_time = models.TimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

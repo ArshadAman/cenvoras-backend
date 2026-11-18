@@ -299,18 +299,23 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     if is_challan:
         doc_heading = "DELIVERY CHALLAN"
         doc_no_label = "Challan No"
+        doc_date_label = "Challan Date"
     elif is_quotation:
         doc_heading = "QUOTATION"
-        doc_no_label = "Quotation No"
+        doc_no_label = "Quotation #"
+        doc_date_label = "Quotation Date"
     elif is_sales_order:
         doc_heading = "PROFORMA INVOICE"
-        doc_no_label = "Order No"
+        doc_no_label = "Proforma Invoice #"
+        doc_date_label = "Proforma Invoice Date"
     elif is_draft:
         doc_heading = "DRAFT INVOICE"
         doc_no_label = "Draft No"
+        doc_date_label = "Date"
     else:
         doc_heading = "TAX INVOICE"
         doc_no_label = "Invoice No"
+        doc_date_label = "Date"
 
     raw_challan = getattr(invoice_obj, 'challan_number', '') or ''
     challan_display = sort_challan_string(raw_challan) if (raw_challan and not is_challan) else ''
@@ -352,7 +357,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         banner_right = (
             f"<font size=14 color='#ffffff'><b>{doc_heading}</b></font><br/>"
             f"<font color='#ffffff'><b>{doc_no_label}:</b> {inv_num}</font><br/>"
-            f"<font color='#f1f5f9'><b>Date:</b> {inv_date}</font><br/>"
+            f"<font color='#f1f5f9'><b>{doc_date_label}:</b> {inv_date}</font><br/>"
         )
         if due_date:
             banner_right += f"<font color='#f1f5f9'><b>Due Date:</b> {due_date}</font><br/>"
@@ -389,7 +394,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         invoice_meta_text = (
             f"<font size=13 color='{secondary_color.hexval()}'><b>{doc_heading}</b></font><br/>"
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
-            f"<b>Date:</b> {inv_date}<br/>"
+            f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
         if due_date:
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
@@ -426,7 +431,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         invoice_meta_text = (
             f"<font size=13 color='{primary_color.hexval()}'><b>{doc_heading}</b></font><br/>"
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
-            f"<b>Date:</b> {inv_date}<br/>"
+            f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
         if so_ref:
             invoice_meta_text += f"<b>Sales Order:</b> {so_ref}<br/>"

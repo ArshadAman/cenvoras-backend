@@ -547,8 +547,9 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         discount = Decimal(str(getattr(item, 'discount', 0) or 0))
         tax_pct = Decimal(str(getattr(item, 'tax', 0) or 0))
 
-        line_taxable = max(Decimal('0.00'), (qty * price) - discount)
-        line_tax = (line_taxable * tax_pct) / Decimal('100.00')
+        from billing.sync_service import DocumentSyncService
+        line_taxable = DocumentSyncService.calculate_line_amount(qty, price, discount)
+        line_tax = DocumentSyncService.calculate_line_tax(qty, price, discount, tax_pct)
         line_amount = Decimal(str(getattr(item, 'amount', None) or (line_taxable + line_tax)))
 
         subtotal += line_taxable
@@ -616,8 +617,19 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     story.append(Spacer(1, 4 * mm))
 
     # 4. Summary and Tax Block (Kept together to avoid splitting)
-    round_off = Decimal(str(getattr(invoice_obj, 'round_off', 0) or 0))
-    grand_total = Decimal(str(getattr(invoice_obj, 'total_amount', subtotal + total_tax + round_off)))
+    subtotal = subtotal.quantize(Decimal('0.01'))
+    total_tax = total_tax.quantize(Decimal('0.01'))
+    unrounded_total = (subtotal + total_tax).quantize(Decimal('0.01'))
+    round_off = Decimal(str(getattr(invoice_obj, 'round_off', 0) or 0)).quantize(Decimal('0.01'))
+    if round_off != 0:
+        from billing.round_off import compute_round_off
+        base_amount = unrounded_total if len(items_data) > 1 else Decimal(str(getattr(invoice_obj, 'total_amount', 0) or 0))
+        grand_total, computed_ro = compute_round_off(base_amount, apply=True)
+        if len(items_data) > 1:
+            round_off = computed_ro
+    else:
+        raw_total = getattr(invoice_obj, 'total_amount', None)
+        grand_total = Decimal(str(raw_total)).quantize(Decimal('0.01')) if raw_total is not None else unrounded_total
 
     # Determine Intra-state vs Inter-state (CA Audit: state extracted from seller GSTIN)
     from billing.gst_utils import get_seller_state_code, get_pos_state_code
@@ -633,12 +645,15 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         if is_interstate:
             summary_rows.append([Paragraph("Output IGST:", body_style), Paragraph(f"Rs. {total_tax:,.2f}", td_style_right)])
         else:
-            half_tax = total_tax / Decimal('2.0')
-            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
-            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
+            total_tax_paise = int((total_tax * Decimal('100')).to_integral_value())
+            cgst_amt = Decimal(total_tax_paise // 2) / Decimal('100')
+            sgst_amt = (total_tax - cgst_amt).quantize(Decimal('0.01'))
+            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"Rs. {cgst_amt:,.2f}", td_style_right)])
+            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"Rs. {sgst_amt:,.2f}", td_style_right)])
 
     if round_off != 0:
-        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"Rs. {round_off:,.2f}", td_style_right)])
+        sign = '+' if round_off > 0 else '-'
+        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"{sign}Rs. {abs(round_off):,.2f}", td_style_right)])
 
     summary_rows.append([
         Paragraph(f"<b><font size=10 color='{total_text_color.hexval()}'>TOTAL AMOUNT:</font></b>", body_bold),

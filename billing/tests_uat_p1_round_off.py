@@ -39,6 +39,93 @@ class RoundOffMathTests(SimpleTestCase):
         T.auto_round_off = True
         self.assertTrue(resolve_apply_round_off(T()))
 
+    def test_recalculate_document_total_recomputes_round_off_without_drift(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from billing.sync_service import DocumentSyncService
+
+        class FakeItems:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+        class FakeQS:
+            def __init__(self):
+                self.updated = None
+
+            def update(self, **kwargs):
+                self.updated = kwargs
+
+        class FakeDoc:
+            objects = MagicMock()
+
+            def __init__(self):
+                self.pk = 1
+                self.round_off = Decimal('0.47')  # stale round-off that would cause 107822.01 if blindly added
+                self.total_amount = Decimal('107822.01')
+                self.saved_fields = None
+                self.items = FakeItems([
+                    SimpleNamespace(
+                        row_type='item',
+                        quantity=Decimal('1'),
+                        price=Decimal('98219.60'),
+                        discount=Decimal('3'),
+                        tax=Decimal('13.1711048'),
+                    )
+                ])
+
+            def save(self, update_fields=None):
+                self.saved_fields = update_fields
+
+        qs = FakeQS()
+        FakeDoc.objects.filter.return_value = qs
+        doc = FakeDoc()
+
+        result = DocumentSyncService.recalculate_document_total(doc)
+        self.assertEqual(result, Decimal('107822.00'))
+        self.assertEqual(doc.total_amount, Decimal('107822.00'))
+        self.assertEqual(doc.round_off, Decimal('0.48'))
+        self.assertEqual(qs.updated, {'total_amount': Decimal('107822.00'), 'round_off': Decimal('0.48')})
+
+    def test_recalculate_document_total_keeps_unrounded_when_round_off_zero(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from billing.sync_service import DocumentSyncService
+
+        class FakeItems:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+        class FakeDoc:
+            objects = MagicMock()
+
+            def __init__(self):
+                self.pk = 2
+                self.round_off = Decimal('0.00')
+                self.total_amount = Decimal('0.00')
+                self.items = FakeItems([
+                    SimpleNamespace(
+                        row_type='item',
+                        quantity=Decimal('1'),
+                        price=Decimal('980.93'),
+                        discount=Decimal('0'),
+                        tax=Decimal('18'),
+                    )
+                ])
+
+            def save(self, update_fields=None):
+                pass
+
+        doc = FakeDoc()
+        result = DocumentSyncService.recalculate_document_total(doc)
+        self.assertEqual(result, Decimal('1157.50'))
+        self.assertEqual(doc.round_off, Decimal('0.00'))
+
 
 class InvoiceRoundOffApiTests(FourFixesBase):
     def _post(self, **extra):

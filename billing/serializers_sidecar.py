@@ -383,6 +383,23 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             item_data.pop('id', None)
             item_data['sort_order'] = i
             SalesOrderItem.objects.create(order=order, **item_data)
+
+        if items_data:
+            from billing.sync_service import DocumentSyncService
+            from billing.round_off import compute_round_off
+            total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in order.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0.00'),
+            )
+            existing_ro = Decimal(str(order.round_off or 0))
+            order.total_amount, order.round_off = compute_round_off(total, apply=(existing_ro != 0))
+            order.save(update_fields=['total_amount', 'round_off'])
             
         return order
 
@@ -749,8 +766,11 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             total += self._calculate_line_gross(item_data)
             processed_items.append(item_data)
 
-        round_off = validated_data.get('round_off', Decimal('0.00')) or Decimal('0.00')
-        validated_data['total_amount'] = total + round_off
+        round_off = Decimal(str(validated_data.get('round_off', Decimal('0.00')) or 0))
+        from billing.round_off import compute_round_off
+        validated_data['total_amount'], validated_data['round_off'] = compute_round_off(
+            total, apply=(round_off != 0)
+        )
 
         challan = DeliveryChallan.objects.create(**validated_data)
 
@@ -1216,8 +1236,12 @@ class QuotationSerializer(serializers.ModelSerializer):
                 ),
                 Decimal('0.00'),
             )
-            quotation.total_amount = total + Decimal(str(quotation.round_off or 0))
-            quotation.save(update_fields=['total_amount'])
+            from billing.round_off import compute_round_off
+            existing_ro = Decimal(str(quotation.round_off or 0))
+            quotation.total_amount, quotation.round_off = compute_round_off(
+                total, apply=(existing_ro != 0)
+            )
+            quotation.save(update_fields=['total_amount', 'round_off'])
 
         return quotation
 

@@ -382,6 +382,28 @@ def convert_order_to_invoice(request, pk):
 
             invoice.refresh_from_db()
 
+            from billing.round_off import compute_round_off
+            from billing.sync_service import DocumentSyncService
+            unrounded_total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in invoice.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0.00'),
+            )
+            order_had_unrounded_total = (
+                Decimal(str(order.round_off or 0)) == 0
+                and Decimal(str(order.total_amount or 0)) % Decimal('1') != 0
+            )
+            apply_ro = False if order_had_unrounded_total else (
+                Decimal(str(order.round_off or 0)) != 0 or bool(getattr(tenant, 'auto_round_off', True))
+            )
+            invoice.total_amount, invoice.round_off = compute_round_off(unrounded_total, apply=apply_ro)
+            invoice.save(update_fields=['total_amount', 'round_off'])
+
             # Persist bank/template on TransactionMeta (not on SalesInvoice)
             meta, _ = TransactionMeta.objects.get_or_create(invoice=invoice)
             meta_updates = []
@@ -987,12 +1009,9 @@ def convert_challan_to_invoice(request, pk):
                     qty = to_qty(c_item.quantity or 1)
                     discount = Decimal(str(c_item.discount or 0))
                     tax = Decimal(str(c_item.tax or 0))
-                    base_amount = qty * price
-                    discount_amount = (base_amount * discount) / Decimal('100')
-                    taxable_amount = base_amount - discount_amount
-                    tax_amount = (taxable_amount * tax) / Decimal('100')
-                    line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
-                    total_items_amount += line_amount
+                    from billing.sync_service import DocumentSyncService
+                    line_amount = DocumentSyncService.calculate_line_amount(qty, price, discount)
+                    total_items_amount += DocumentSyncService.calculate_line_gross(qty, price, discount, tax)
                     unit = c_item.unit or getattr(prod, 'unit', 'pcs') or 'pcs'
                     hsn_sac_code = c_item.hsn_sac_code or getattr(prod, 'hsn_sac_code', '') or ''
 
@@ -1016,9 +1035,16 @@ def convert_challan_to_invoice(request, pk):
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
 
-            final_total = (total_items_amount + (challan.round_off or Decimal('0.00'))).quantize(Decimal('0.01'))
-            invoice.total_amount = final_total
-            invoice.save(update_fields=['total_amount'])
+            from billing.round_off import compute_round_off
+            challan_had_unrounded_total = (
+                Decimal(str(challan.round_off or 0)) == 0
+                and Decimal(str(challan.total_amount or 0)) % Decimal('1') != 0
+            )
+            apply_ro = False if challan_had_unrounded_total else (
+                Decimal(str(challan.round_off or 0)) != 0 or bool(getattr(tenant, 'auto_round_off', True))
+            )
+            invoice.total_amount, invoice.round_off = compute_round_off(total_items_amount, apply=apply_ro)
+            invoice.save(update_fields=['total_amount', 'round_off'])
 
             persist_linked_challans(invoice, [challan])
             invoice.save(update_fields=['challan_number', 'challan_date'])

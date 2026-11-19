@@ -1658,10 +1658,20 @@ def quotation_convert_to_sales_order(request, pk):
                 qty = item.quantity
 
             raw_disc = override.get('discount')
-            discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else (getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'))
-
             raw_price = override.get('price')
-            price = Decimal(str(raw_price)) if raw_price is not None and str(raw_price).strip() != '' else item.price
+
+            if raw_price is not None and str(raw_price).strip() != '':
+                price = Decimal(str(raw_price))
+                discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else Decimal('0.00')
+            else:
+                quote_disc = getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00')
+                base_price = item.price or Decimal('0.00')
+                if quote_disc > 0 and raw_disc is None:
+                    price = (base_price * (Decimal('100.00') - quote_disc) / Decimal('100.00')).quantize(Decimal('0.01'))
+                    discount = Decimal('0.00')
+                else:
+                    price = base_price
+                    discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else quote_disc
 
             tax = getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00')
 

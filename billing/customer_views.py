@@ -106,6 +106,12 @@ def customer_list_create(request):
         if ordering:
             customers = customers.order_by(ordering)
         
+        if request.query_params.get('all', '').lower() in ['1', 'true', 'yes']:
+            customers_list = list(customers)
+            recompute_customer_balances_for_customers(customers_list, tenant)
+            serializer = CustomerSerializer(customers_list, many=True)
+            return Response(serializer.data)
+
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(customers, request)
         if page is not None:

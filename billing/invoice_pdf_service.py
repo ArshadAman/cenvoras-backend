@@ -343,6 +343,20 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
 
     logo_img = get_logo_flowable(template)
 
+    so_ref = ""
+    if hasattr(invoice_obj, 'sales_order') and invoice_obj.sales_order:
+        so_ref = getattr(invoice_obj.sales_order, 'order_number', '') or str(invoice_obj.sales_order_id or '')
+    elif getattr(invoice_obj, 'sales_order_number', None):
+        so_ref = str(invoice_obj.sales_order_number)
+
+    po_number = getattr(invoice_obj, 'po_number', '') or ''
+    po_date = getattr(invoice_obj, 'po_date', None)
+    sections = template.get('sections', {}) if isinstance(template, dict) else {}
+    show_po = sections.get('showPONumber', True)
+    po_date_str = ''
+    if po_date:
+        po_date_str = po_date.strftime('%d/%m/%Y') if hasattr(po_date, 'strftime') else str(po_date)
+
     if layout_type == 'professional':
         # Professional Full-Width Banner
         banner_left = f"<b><font size=14 color='#ffffff'>{biz_name}</font></b><br/>"
@@ -359,6 +373,10 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             f"<font color='#ffffff'><b>{doc_no_label}:</b> {inv_num}</font><br/>"
             f"<font color='#f1f5f9'><b>{doc_date_label}:</b> {inv_date}</font><br/>"
         )
+        if show_po and (po_number or so_ref):
+            banner_right += f"<font color='#f1f5f9'><b>PO / Order:</b> {po_number or so_ref}</font><br/>"
+        if show_po and po_date_str:
+            banner_right += f"<font color='#f1f5f9'><b>PO Date:</b> {po_date_str}</font><br/>"
         if due_date:
             banner_right += f"<font color='#f1f5f9'><b>Due Date:</b> {due_date}</font><br/>"
         if pos:
@@ -396,6 +414,10 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
             f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
+        if show_po and (po_number or so_ref):
+            invoice_meta_text += f"<b>PO / Order:</b> {po_number or so_ref}<br/>"
+        if show_po and po_date_str:
+            invoice_meta_text += f"<b>PO Date:</b> {po_date_str}<br/>"
         if due_date:
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:
@@ -433,10 +455,12 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
             f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
-        if so_ref:
-            invoice_meta_text += f"<b>Sales Order:</b> {so_ref}<br/>"
         if vehicle_no:
             invoice_meta_text += f"<b>Vehicle No:</b> {vehicle_no}<br/>"
+        if show_po and (po_number or so_ref):
+            invoice_meta_text += f"<b>PO / Order:</b> {po_number or so_ref}<br/>"
+        if show_po and po_date_str:
+            invoice_meta_text += f"<b>PO Date:</b> {po_date_str}<br/>"
         if due_date:
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:

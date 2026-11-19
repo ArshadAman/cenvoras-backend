@@ -518,7 +518,10 @@ def delivery_challan_list_create(request):
             from billing.models import Customer
             cust_obj = Customer.objects.filter(id=customer_filter).first()
             if cust_obj and cust_obj.name:
-                challans = challans.filter(Q(customer_id=customer_filter) | Q(customer__id=customer_filter) | Q(customer_name__iexact=cust_obj.name))
+                challans = challans.filter(
+                    Q(customer_id=customer_filter) | Q(customer__id=customer_filter) |
+                    (Q(customer__isnull=True) & Q(customer_name__iexact=cust_obj.name))
+                )
             else:
                 challans = challans.filter(Q(customer_id=customer_filter) | Q(customer__id=customer_filter))
 

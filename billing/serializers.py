@@ -1777,9 +1777,29 @@ class CustomerSerializer(serializers.ModelSerializer):
     def validate_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value, legacy=getattr(self.instance, 'gstin', None)) or None
+            norm_value = validate_gstin_format(value, legacy=getattr(self.instance, 'gstin', None)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+
+        if norm_value:
+            norm_value = norm_value.strip().upper()
+            request = self.context.get('request')
+            user = None
+            if request and hasattr(request, 'user') and request.user.is_authenticated:
+                user = getattr(request.user, 'active_tenant', request.user)
+            elif self.instance and getattr(self.instance, 'created_by', None):
+                user = self.instance.created_by
+
+            if user:
+                qs = Customer.objects.filter(created_by=user, gstin__iexact=norm_value)
+                if self.instance and self.instance.pk:
+                    qs = qs.exclude(pk=self.instance.pk)
+                existing = qs.first()
+                if existing:
+                    raise serializers.ValidationError(
+                        f"A customer with GSTIN '{norm_value}' already exists: '{existing.name}'."
+                    )
+        return norm_value
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)

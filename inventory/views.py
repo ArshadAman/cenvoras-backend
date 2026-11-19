@@ -101,7 +101,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['name', 'item_code', 'internal_reference', 'description', 'hsn_sac_code', 'manufacturer']
+    search_fields = ['name', 'item_code', 'internal_reference', 'description', 'manufacturer']
     idempotency_ttl = 600
     idempotency_lock_ttl = 300
 

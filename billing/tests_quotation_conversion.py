@@ -99,6 +99,47 @@ class QuotationConversionEnhancementTests(TestCase):
         self.assertEqual(dc.po_number, 'PO-CUST-8832')
         self.assertEqual(str(dc.po_date), '2026-10-04')
 
+    def test_convert_with_discounted_quoted_rate(self):
+        quotation = Quotation.objects.create(
+            quotation_number='QUOT-DISC-001',
+            customer=self.customer,
+            quotation_date=date(2026, 11, 18),
+            status='approved',
+            created_by=self.user,
+        )
+        # Quoted with 10% discount: 8510 * 0.9 = 7659.00
+        q_item = QuotationItem.objects.create(
+            quotation=quotation,
+            product=self.product,
+            quantity=1,
+            price=Decimal('8510.00'),
+            discount=Decimal('10.00'),
+            amount=Decimal('7659.00'),
+            approval_status='approved',
+        )
+
+        # 1. Conversion sending discounted quoted rate as price with 0% extra discount
+        res = self.client.post(
+            f'/api/billing/quotations/{quotation.id}/convert-to-sales-order/',
+            {
+                'items': [
+                    {
+                        'id': str(q_item.id),
+                        'quantity': 1,
+                        'price': '7659.00',
+                        'discount': 0.0,
+                    }
+                ]
+            },
+            format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        order = SalesOrder.objects.get(id=res.data['sales_order_id'])
+        so_item = order.items.first()
+        self.assertEqual(so_item.price, Decimal('7659.00'))
+        self.assertEqual(so_item.discount, Decimal('0.00'))
+        self.assertEqual(so_item.amount, Decimal('7659.00'))
+
     def _create_quotation(self, status='approved', quantity=10):
         quotation = Quotation.objects.create(
             quotation_number=f'QUOT-{status[:3].upper()}-{quantity}',

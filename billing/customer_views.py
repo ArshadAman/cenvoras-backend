@@ -280,3 +280,54 @@ def customer_ensure_vendor(request, pk):
         "vendor": VendorSerializer(vendor).data,
         "customer_id": str(customer.id),
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_duplicates(request):
+    """List duplicate customer clusters (matching GSTIN or name) for current tenant."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    from .services_customer_merge import find_duplicate_customers
+    clusters = find_duplicate_customers(tenant)
+    return Response({
+        "success": True,
+        "count": len(clusters),
+        "clusters": clusters
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customer_merge(request):
+    """
+    Merge duplicate customer into primary customer.
+    Body: { "primary_id": "...", "duplicate_id": "..." }
+    """
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    primary_id = request.data.get('primary_id') or request.data.get('primary_customer_id')
+    duplicate_id = request.data.get('duplicate_id') or request.data.get('duplicate_customer_id')
+
+    if not primary_id or not duplicate_id:
+        return Response({
+            "success": False,
+            "message": "Both primary_id and duplicate_id are required."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    from .services_customer_merge import merge_customers
+    try:
+        result = merge_customers(tenant, primary_id, duplicate_id, actor=request.user)
+        return Response({
+            "success": True,
+            "message": "Customers merged successfully.",
+            "data": result
+        }, status=status.HTTP_200_OK)
+    except ValueError as e:
+        return Response({
+            "success": False,
+            "message": str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({
+            "success": False,
+            "message": f"An error occurred while merging customers: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -1219,13 +1219,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
-        # Link an existing Customer when the typed name/email already exists.
-        # Never create a master record from document text — that only happens
-        # via Add Customer (POST /customers/).
+        from .models_sidecar import PartyMeta
+        # Link an existing Customer (GSTIN -> Email -> Name), or auto-create globally.
         customer_obj = None
-        if customer_email and str(customer_email).strip():
+        if customer_gstin and str(customer_gstin).strip():
+            customer_obj = Customer.objects.filter(gstin__iexact=str(customer_gstin).strip(), created_by=user).first()
+
+        if not customer_obj and customer_email and str(customer_email).strip():
             print("DEBUG SalesInvoiceSerializer: Email provided, matching existing customer")
-            customer_obj = Customer.objects.filter(email=customer_email, created_by=user).first()
+            customer_obj = Customer.objects.filter(email__iexact=customer_email.strip(), created_by=user).first()
             if customer_obj:
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
 
@@ -1262,9 +1264,23 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 print("DEBUG SalesInvoiceSerializer: Updated customer details")
             PartyMeta.objects.get_or_create(customer=customer_obj)
         elif customer_name and customer_name.strip():
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before billing or quoting them.'
-            })
+            derived_state = None
+            if customer_gstin and len(customer_gstin) >= 2:
+                derived_state = normalize_indian_state_choice(customer_gstin[:2])
+            elif data.get('place_of_supply'):
+                derived_state = normalize_indian_state_choice(data.get('place_of_supply'))
+
+            customer_obj = Customer.objects.create(
+                name=customer_name.strip(),
+                email=customer_email or None,
+                phone=customer_phone or None,
+                address=customer_address or None,
+                gstin=customer_gstin or None,
+                state=derived_state,
+                created_by=user,
+            )
+            PartyMeta.objects.get_or_create(customer=customer_obj)
+            print("DEBUG SalesInvoiceSerializer: Auto-created global customer:", customer_obj.name)
         else:
             print("DEBUG SalesInvoiceSerializer: No saved customer match; storing name on document only")
 

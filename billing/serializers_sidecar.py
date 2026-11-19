@@ -30,6 +30,90 @@ def _raise_number_conflict(exc):
     raise error
 
 
+def resolve_or_create_customer(user, customer_name, customer_email=None, customer_phone=None,
+                               customer_address=None, customer_gstin=None, place_of_supply=None):
+    """
+    Resolves an existing Customer by GSTIN -> Email -> Name (for this tenant),
+    updating any newly provided contact/address fields.
+    If not found, creates a new Customer globally and ensures PartyMeta exists.
+    """
+    from billing.models import Customer
+    from billing.models_sidecar import PartyMeta
+    from billing.serializers import normalize_indian_state_choice
+
+    customer_name = (customer_name or '').strip()
+    customer_email = (customer_email or '').strip()
+    customer_phone = (customer_phone or '').strip()
+    customer_address = (customer_address or '').strip()
+    customer_gstin = (customer_gstin or '').strip().upper()
+
+    if not customer_name and not customer_gstin:
+        return None
+
+    customer = None
+    # 1. Match by GSTIN first if provided
+    if customer_gstin:
+        customer = Customer.objects.filter(gstin__iexact=customer_gstin, created_by=user).first()
+
+    # 2. Match by email second if provided
+    if not customer and customer_email:
+        customer = Customer.objects.filter(email__iexact=customer_email, created_by=user).first()
+
+    # 3. Match by name third
+    if not customer and customer_name:
+        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+
+    if customer:
+        update_fields = []
+        if customer_name and customer.name != customer_name:
+            customer.name = customer_name
+            update_fields.append('name')
+        if customer_address and not customer.address:
+            customer.address = customer_address
+            update_fields.append('address')
+        if customer_gstin and not customer.gstin:
+            customer.gstin = customer_gstin
+            update_fields.append('gstin')
+        if customer_phone and not customer.phone:
+            customer.phone = customer_phone
+            update_fields.append('phone')
+        if customer_email and not customer.email:
+            customer.email = customer_email
+            update_fields.append('email')
+        if not customer.state:
+            st = None
+            if customer_gstin and len(customer_gstin) >= 2:
+                st = normalize_indian_state_choice(customer_gstin[:2])
+            elif place_of_supply:
+                st = normalize_indian_state_choice(place_of_supply)
+            if st:
+                customer.state = st
+                update_fields.append('state')
+        if update_fields:
+            customer.save(update_fields=update_fields)
+        PartyMeta.objects.get_or_create(customer=customer)
+        return customer
+
+    # Not found -> Create global Customer record
+    derived_state = None
+    if customer_gstin and len(customer_gstin) >= 2:
+        derived_state = normalize_indian_state_choice(customer_gstin[:2])
+    elif place_of_supply:
+        derived_state = normalize_indian_state_choice(place_of_supply)
+
+    customer = Customer.objects.create(
+        name=customer_name or customer_gstin,
+        email=customer_email or None,
+        phone=customer_phone or None,
+        address=customer_address or None,
+        gstin=customer_gstin or None,
+        state=derived_state,
+        created_by=user,
+    )
+    PartyMeta.objects.get_or_create(customer=customer)
+    return customer
+
+
 
 def _legacy_customer_gstins(serializer):
     """GSTINs already on record for this document/customer (accepted on format alone, item 14)."""
@@ -292,60 +376,32 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         customer_name = (attrs.get('customer_name') or '').strip()
-        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
-        customer_email = attrs.get('customer_email') or ''
-        customer = None
-        if customer_email:
-            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
-        if not customer and customer_name:
-            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if customer:
-            return attrs
-        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
-            return attrs
-        raise serializers.ValidationError({
-            'customer_name': 'Save this customer first before creating a sales order.'
-        })
+        customer_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not customer_name and not customer_gstin and not attrs.get('customer') and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
+        return attrs
 
     def _resolve_customer(self, validated_data):
-        """Find an existing Customer from typed document fields. Do not create one."""
-        from .models import Customer
+        """Resolves existing Customer (GSTIN -> Email -> Name) or creates a global record."""
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None) or ''
         customer_phone = validated_data.pop('customer_phone', None) or ''
         customer_address = validated_data.get('customer_address') or ''
         customer_gstin = validated_data.get('customer_gstin') or ''
+        place_of_supply = validated_data.get('place_of_supply')
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
-        if not customer_name:
-            return None
-
-        customer = None
-        if customer_email:
-            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
-        if not customer:
-            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if not customer:
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before creating a sales order.'
-            })
-
-        update_fields = []
-        if customer_address and not customer.address:
-            customer.address = customer_address
-            update_fields.append('address')
-        if customer_gstin and not customer.gstin:
-            customer.gstin = customer_gstin
-            update_fields.append('gstin')
-        if customer_phone and not customer.phone:
-            customer.phone = customer_phone
-            update_fields.append('phone')
-        if customer_email and not customer.email:
-            customer.email = customer_email
-            update_fields.append('email')
-        if update_fields:
-            customer.save(update_fields=update_fields)
-        return customer
+        return resolve_or_create_customer(
+            user=user,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            customer_gstin=customer_gstin,
+            place_of_supply=place_of_supply,
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -613,19 +669,12 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         customer = attrs.get('customer')
         cust_name = (attrs.get('customer_name') or '').strip()
-        if customer:
-            return attrs
-        request = self.context.get('request')
-        user = getattr(request.user, 'active_tenant', request.user) if request else None
-        if cust_name and user:
-            existing = Customer.objects.filter(name__iexact=cust_name, created_by=user).first()
-            if existing:
-                return attrs
-        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
-            return attrs
-        raise serializers.ValidationError({
-            'customer_name': 'Save this customer first before creating a delivery challan.'
-        })
+        cust_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not cust_name and not cust_gstin and not customer and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
+        return attrs
 
     class Meta:
         model = DeliveryChallan
@@ -746,16 +795,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             _raise_number_conflict(exc)
 
 
-        # Link an existing customer by name; typed text must not create a master record.
+        # Link or create customer globally
         cust_name = validated_data.get('customer_name')
-        if not validated_data.get('customer') and cust_name:
-            existing_cust = Customer.objects.filter(name__iexact=cust_name.strip(), created_by=user).first()
-            if existing_cust:
-                validated_data['customer'] = existing_cust
-            else:
-                raise serializers.ValidationError({
-                    'customer_name': 'Save this customer first before creating a delivery challan.'
-                })
+        if not validated_data.get('customer') and (cust_name or validated_data.get('customer_gstin')):
+            customer = resolve_or_create_customer(
+                user=user,
+                customer_name=cust_name,
+                customer_address=validated_data.get('customer_address'),
+                customer_gstin=validated_data.get('customer_gstin'),
+                place_of_supply=validated_data.get('place_of_supply'),
+            )
+            validated_data['customer'] = customer
 
         # Calculate line amounts and total (gross = amount after disc + tax)
         total = Decimal('0.00')
@@ -820,6 +870,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             except DuplicateDocumentNumber as exc:
                 _raise_number_conflict(exc)
             validated_data.pop('challan_number', None)
+
+        if 'customer_name' in validated_data or 'customer_gstin' in validated_data:
+            customer = resolve_or_create_customer(
+                user=instance.created_by,
+                customer_name=validated_data.get('customer_name', instance.customer_name),
+                customer_address=validated_data.get('customer_address', instance.customer_address),
+                customer_gstin=validated_data.get('customer_gstin', instance.customer_gstin),
+            )
+            if customer:
+                instance.customer = customer
+                validated_data['customer'] = customer
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -1139,53 +1200,32 @@ class QuotationSerializer(serializers.ModelSerializer):
 
         customer = attrs.get('customer')
         customer_name = (attrs.get('customer_name') or '').strip()
-        if not customer:
-            request = self.context.get('request')
-            user = getattr(request.user, 'active_tenant', request.user) if request else None
-            if customer_name and user:
-                customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-            if not customer:
-                if not (self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data):
-                    raise serializers.ValidationError({
-                        'customer_name': 'Save this customer first before creating a quotation.'
-                    })
+        customer_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not customer and not customer_name and not customer_gstin and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
 
         return attrs
 
     def _resolve_customer(self, validated_data):
-        from .models import Customer
-
-        user = self.context['request'].user.active_tenant
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None)
         customer_phone = validated_data.pop('customer_phone', None)
         customer_gstin = validated_data.pop('customer_gstin', None)
+        customer_address = validated_data.get('customer_address')
+        place_of_supply = validated_data.get('place_of_supply')
 
-        if not customer_name:
-            return None
-
-        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if not customer:
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before creating a quotation.'
-            })
-
-        updated = False
-        if customer_email and not customer.email:
-            customer.email = customer_email
-            updated = True
-        if customer_phone and not customer.phone:
-            customer.phone = customer_phone
-            updated = True
-        if validated_data.get('customer_address') and not customer.address:
-            customer.address = validated_data.get('customer_address')
-            updated = True
-        if customer_gstin and not customer.gstin:
-            customer.gstin = customer_gstin
-            updated = True
-        if updated:
-            customer.save()
-        return customer
+        return resolve_or_create_customer(
+            user=user,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            customer_gstin=customer_gstin,
+            place_of_supply=place_of_supply,
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])

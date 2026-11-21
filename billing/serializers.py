@@ -296,6 +296,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 exclude_pk = self.instance.pk if self.instance else None
                 if number_taken(tenant, 'purchase_bill', bill_number, exclude_pk=exclude_pk):
                     _raise_number_conflict(DuplicateDocumentNumber(bill_number, 'purchase_bill'))
+        vendor_gstin = data.get('vendor_gstin') or (self.instance.vendor_gstin if self.instance else None)
+        if not vendor_gstin and data.get('gst_treatment') in (None, '', 'registered'):
+            data['gst_treatment'] = 'unregistered'
+
         # UAT P1 item 7 (Rudra CA): an unregistered vendor can't charge GST. Tax is locked at 0
         # on every line that isn't flagged "RCM applicable".
         if items is not None:
@@ -375,6 +379,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             if updated:
                 vendor.save()
             validated_data['vendor'] = vendor
+        
+        # Default GST treatment to 'unregistered' if vendor has no valid GSTIN
+        if not vendor_gstin and validated_data.get('gst_treatment') in (None, '', 'registered'):
+            validated_data['gst_treatment'] = 'unregistered'
         
         # Recalculate total amount from items to ensure integrity (line amount + tax)
         _bill_rcm = bool(validated_data.get('is_reverse_charge'))
@@ -466,6 +474,10 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             if updated:
                 vendor.save()
             validated_data['vendor'] = vendor
+
+        # Default GST treatment to 'unregistered' if vendor has no valid GSTIN
+        if not vendor_gstin and validated_data.get('gst_treatment') in (None, '', 'registered'):
+            validated_data['gst_treatment'] = 'unregistered'
 
         from billing.sequence_service import assign_document_number, DuplicateDocumentNumber, document_status_from
         try:
@@ -581,6 +593,8 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         ret['tax_amount'] = str(tax_total.quantize(Decimal('0.01')))
         ret['is_interstate'] = is_interstate
         ret['subtotal'] = ret['taxable_amount']
+        if not instance.vendor_gstin and ret.get('gst_treatment') in (None, '', 'registered'):
+            ret['gst_treatment'] = 'unregistered'
         return ret
 
 class SalesInvoiceItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):

@@ -74,7 +74,8 @@ def get_tenant_catalog_version(tenant_id):
     """
     if not tenant_id:
         return 1
-    version_key = f'inventory:tenant:{tenant_id}:catalog_version'
+    tenant_id_str = str(getattr(tenant_id, 'id', tenant_id))
+    version_key = f'inventory:tenant:{tenant_id_str}:catalog_version'
     ver = cache.get(version_key)
     if ver is None:
         ver = 1
@@ -90,7 +91,8 @@ def invalidate_tenant_catalog(tenant_id):
     """
     if not tenant_id:
         return
-    version_key = f'inventory:tenant:{tenant_id}:catalog_version'
+    tenant_id_str = str(getattr(tenant_id, 'id', tenant_id))
+    version_key = f'inventory:tenant:{tenant_id_str}:catalog_version'
     try:
         cache.incr(version_key)
     except Exception:
@@ -149,6 +151,8 @@ class ProductListCreateView(generics.ListCreateAPIView):
         ordering = self.request.query_params.get('ordering')
         if ordering:
             field_map = {
+                'status': 'stock',
+                '-status': '-stock',
                 'current_stock': 'stock',
                 '-current_stock': '-stock',
                 'unit_price': 'price',
@@ -160,6 +164,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
             valid_fields = [
                 'name', '-name',
                 'stock', '-stock',
+                'status', '-status',
                 'sale_price', '-sale_price',
                 'price', '-price',
                 'created_at', '-created_at',

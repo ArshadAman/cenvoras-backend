@@ -47,14 +47,14 @@ class R21TypedProductTests(FourFixesBase):
         if confirm:
             item["confirm_create_product"] = True
         return self.client.post("/api/billing/sales-invoices/", {
-            "customer_name": self.customer.name, "invoice_date": str(date.today()), "status": "final",
+            "customer_name": self.customer.name, "customer_address": "1 Test Road, Bhubaneswar", "invoice_date": str(date.today()), "status": "final",
             "total_amount": "118.00", "items": [item]}, format="json")
 
     def test_typed_product_needs_confirm_and_says_so(self):
         res = self._inv(confirm=False)
         self.assertEqual(res.status_code, 400)
         self.assertIn("confirm_create_product", str(res.data))   # message the UI now shows / pre-empts
-        self.assertEqual(self._inv(confirm=True).status_code, 201)
+        r = self._inv(confirm=True); self.assertEqual(r.status_code, 201, r.data)
 
     def test_save_as_new_product_requires_hsn_with_message(self):
         body = {"name": "Typed Thing", "sale_price": 100, "cost_price": 100, "unit": "pcs", "tax": 18, "stock": 0}
@@ -132,15 +132,16 @@ class R21CreditNoteDateQtyTests(FourFixesBase):
         self.assertIn("GSTR-1 is filed", str(res.data))
 
     def test_decimal_quantity_for_discount_but_whole_units_for_returns(self):
+        # Superseded by UAT P1 item 5 (Rudra CA): precision follows the UQC, not the reason.
+        # Widget is in pcs (count unit) -> whole numbers only, for every reason, never rounded.
         self.product.refresh_from_db()
         stock0 = self.product.stock
-        self.assertIn('whole units', str(self._post(qty="0.5").data))
-        res = self._post(qty="0.5", reason="discount")
+        self.assertIn('whole number', str(self._post(qty="0.5").data))
+        self.assertIn('whole number', str(self._post(qty="1.5", reason="discount").data))
+        res = self._post(qty="1", reason="discount")
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(Decimal(str(res.data['items'][0]['quantity'])), Decimal("0.50"))
         self.product.refresh_from_db()
-        self.assertEqual(self.product.stock, stock0)  # part-quantity credit does not move stock
-        self.assertIn('2 decimal', str(self._post(qty="0.555", reason="discount").data))
+        self.assertEqual(self.product.stock, stock0)  # value credit does not move stock
 
 
 class R21CnStockAndBackdateTests(R21CreditNoteDateQtyTests):

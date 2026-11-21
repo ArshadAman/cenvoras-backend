@@ -19,6 +19,14 @@ class PayrollEngineTests(TestCase):
         
         self.assertEqual(esi_details['employee_esi'], Decimal('150.00')) # 0.75%
         self.assertEqual(esi_details['employer_esi'], Decimal('650.00')) # 3.25%
+
+    def test_compute_esi_rounds_up_to_next_rupee_rule_52(self):
+        # 17,280 * 0.75% = 129.60 -> rounds up to 130.00 under Rule 52
+        # 17,280 * 3.25% = 561.60 -> rounds up to 562.00
+        gross = Decimal('17280.00')
+        esi_details = compute_esi(gross)
+        self.assertEqual(esi_details['employee_esi'], Decimal('130.00'))
+        self.assertEqual(esi_details['employer_esi'], Decimal('562.00'))
         
     def test_compute_esi_over_threshold(self):
         gross = Decimal('25000.00') # > 21000

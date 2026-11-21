@@ -1,5 +1,6 @@
 import io
 import math
+import re
 from decimal import Decimal
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -97,6 +98,17 @@ def number_to_words(number):
     result_parts.append("Only")
     return " ".join(result_parts).strip()
 
+
+def sort_challan_string(val):
+    """Sort multi-challan sequence string in natural ascending order."""
+    if not val:
+        return ""
+    sep = ';' if ';' in val else (',' if ',' in val else None)
+    if not sep:
+        return val.strip()
+    parts = [p.strip() for p in val.split(sep) if p.strip()]
+    parts.sort(key=lambda s: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)])
+    return f" {sep} ".join(parts)
 
 
 import base64
@@ -283,18 +295,30 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     is_quotation = (document_type == 'quotation')
     is_challan = (document_type == 'delivery_challan')
     is_sales_order = (document_type in ('sales_order', 'proforma'))
+    is_draft = str(getattr(invoice_obj, 'status', '')).lower() == 'draft' or str(getattr(invoice_obj, 'invoice_number', '')).startswith('DFT-')
     if is_challan:
         doc_heading = "DELIVERY CHALLAN"
         doc_no_label = "Challan No"
+        doc_date_label = "Challan Date"
     elif is_quotation:
         doc_heading = "QUOTATION"
-        doc_no_label = "Quotation No"
+        doc_no_label = "Quotation #"
+        doc_date_label = "Quotation Date"
     elif is_sales_order:
         doc_heading = "PROFORMA INVOICE"
-        doc_no_label = "Order No"
+        doc_no_label = "Proforma Invoice #"
+        doc_date_label = "Proforma Invoice Date"
+    elif is_draft:
+        doc_heading = "DRAFT INVOICE"
+        doc_no_label = "Draft No"
+        doc_date_label = "Date"
     else:
         doc_heading = "TAX INVOICE"
         doc_no_label = "Invoice No"
+        doc_date_label = "Date"
+
+    raw_challan = getattr(invoice_obj, 'challan_number', '') or ''
+    challan_display = sort_challan_string(raw_challan) if (raw_challan and not is_challan) else ''
 
     biz_name = getattr(tenant, 'business_name', '') or getattr(tenant, 'username', '') or 'Business'
     biz_addr = getattr(tenant, 'business_address', '') or ''
@@ -319,6 +343,20 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
 
     logo_img = get_logo_flowable(template)
 
+    so_ref = ""
+    if hasattr(invoice_obj, 'sales_order') and invoice_obj.sales_order:
+        so_ref = getattr(invoice_obj.sales_order, 'order_number', '') or str(invoice_obj.sales_order_id or '')
+    elif getattr(invoice_obj, 'sales_order_number', None):
+        so_ref = str(invoice_obj.sales_order_number)
+
+    po_number = getattr(invoice_obj, 'po_number', '') or ''
+    po_date = getattr(invoice_obj, 'po_date', None)
+    sections = template.get('sections', {}) if isinstance(template, dict) else {}
+    show_po = sections.get('showPONumber', True)
+    po_date_str = ''
+    if po_date:
+        po_date_str = po_date.strftime('%d/%m/%Y') if hasattr(po_date, 'strftime') else str(po_date)
+
     if layout_type == 'professional':
         # Professional Full-Width Banner
         banner_left = f"<b><font size=14 color='#ffffff'>{biz_name}</font></b><br/>"
@@ -333,12 +371,18 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         banner_right = (
             f"<font size=14 color='#ffffff'><b>{doc_heading}</b></font><br/>"
             f"<font color='#ffffff'><b>{doc_no_label}:</b> {inv_num}</font><br/>"
-            f"<font color='#f1f5f9'><b>Date:</b> {inv_date}</font><br/>"
+            f"<font color='#f1f5f9'><b>{doc_date_label}:</b> {inv_date}</font><br/>"
         )
+        if show_po and (po_number or so_ref):
+            banner_right += f"<font color='#f1f5f9'><b>PO / Order:</b> {po_number or so_ref}</font><br/>"
+        if show_po and po_date_str:
+            banner_right += f"<font color='#f1f5f9'><b>PO Date:</b> {po_date_str}</font><br/>"
         if due_date:
             banner_right += f"<font color='#f1f5f9'><b>Due Date:</b> {due_date}</font><br/>"
         if pos:
             banner_right += f"<font color='#f1f5f9'><b>Place of Supply:</b> {pos}</font><br/>"
+        if challan_display:
+            banner_right += f"<font color='#f1f5f9'><b>Challan No:</b> {challan_display}</font><br/>"
 
         banner_table_data = [[
             Paragraph(banner_left, body_style),
@@ -368,12 +412,18 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         invoice_meta_text = (
             f"<font size=13 color='{secondary_color.hexval()}'><b>{doc_heading}</b></font><br/>"
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
-            f"<b>Date:</b> {inv_date}<br/>"
+            f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
+        if show_po and (po_number or so_ref):
+            invoice_meta_text += f"<b>PO / Order:</b> {po_number or so_ref}<br/>"
+        if show_po and po_date_str:
+            invoice_meta_text += f"<b>PO Date:</b> {po_date_str}<br/>"
         if due_date:
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:
             invoice_meta_text += f"<b>Place of Supply:</b> {pos}<br/>"
+        if challan_display:
+            invoice_meta_text += f"<b>Challan No:</b> {challan_display}<br/>"
 
         col_left = [logo_img, Paragraph(company_info_text, body_style)] if logo_img else Paragraph(company_info_text, body_style)
         header_table = Table([[col_left, Paragraph(invoice_meta_text, body_style)]], colWidths=[115 * mm, 75 * mm])
@@ -403,16 +453,20 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         invoice_meta_text = (
             f"<font size=13 color='{primary_color.hexval()}'><b>{doc_heading}</b></font><br/>"
             f"<b>{doc_no_label}:</b> {inv_num}<br/>"
-            f"<b>Date:</b> {inv_date}<br/>"
+            f"<b>{doc_date_label}:</b> {inv_date}<br/>"
         )
-        if so_ref:
-            invoice_meta_text += f"<b>Sales Order:</b> {so_ref}<br/>"
         if vehicle_no:
             invoice_meta_text += f"<b>Vehicle No:</b> {vehicle_no}<br/>"
+        if show_po and (po_number or so_ref):
+            invoice_meta_text += f"<b>PO / Order:</b> {po_number or so_ref}<br/>"
+        if show_po and po_date_str:
+            invoice_meta_text += f"<b>PO Date:</b> {po_date_str}<br/>"
         if due_date:
             invoice_meta_text += f"<b>Due Date:</b> {due_date}<br/>"
         if pos:
             invoice_meta_text += f"<b>Place of Supply:</b> {pos}<br/>"
+        if challan_display:
+            invoice_meta_text += f"<b>Challan No:</b> {challan_display}<br/>"
 
         col_left = [logo_img, Paragraph(company_info_text, body_style)] if logo_img else Paragraph(company_info_text, body_style)
         header_table = Table([[col_left, Paragraph(invoice_meta_text, body_style)]], colWidths=[115 * mm, 75 * mm])
@@ -517,8 +571,9 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         discount = Decimal(str(getattr(item, 'discount', 0) or 0))
         tax_pct = Decimal(str(getattr(item, 'tax', 0) or 0))
 
-        line_taxable = max(Decimal('0.00'), (qty * price) - discount)
-        line_tax = (line_taxable * tax_pct) / Decimal('100.00')
+        from billing.sync_service import DocumentSyncService
+        line_taxable = DocumentSyncService.calculate_line_amount(qty, price, discount)
+        line_tax = DocumentSyncService.calculate_line_tax(qty, price, discount, tax_pct)
         line_amount = Decimal(str(getattr(item, 'amount', None) or (line_taxable + line_tax)))
 
         subtotal += line_taxable
@@ -527,7 +582,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         # Item title + scheme badge if any
         desc_text = f"<b>{p_name}</b>"
         if free_qty > 0:
-            desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty)} Free (Promotional Offer)</b></font>"
+            desc_text += f"<br/><font color='#16a34a' size=7.5><b>+ {int(free_qty) if free_qty % 1 == 0 else Decimal(str(free_qty)).normalize()} Free (Promotional Offer)</b></font>"
 
         item_desc = getattr(item, 'description', '') or ''
         if not item_desc and hasattr(item, 'product') and item.product and getattr(item.product, 'description', ''):
@@ -544,7 +599,7 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
             clean_mfr = escape(str(mfr).strip())
             desc_text += f"<br/><font color='#64748b' size=7><i>Mfr: {clean_mfr}</i></font>"
 
-        qty_display = f"{int(qty) if qty % 1 == 0 else qty}"
+        qty_display = f"{int(qty) if qty % 1 == 0 else Decimal(str(qty)).normalize()}"
         if getattr(item, 'unit', None):
             qty_display += f" {item.unit}"
 
@@ -586,8 +641,19 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     story.append(Spacer(1, 4 * mm))
 
     # 4. Summary and Tax Block (Kept together to avoid splitting)
-    round_off = Decimal(str(getattr(invoice_obj, 'round_off', 0) or 0))
-    grand_total = Decimal(str(getattr(invoice_obj, 'total_amount', subtotal + total_tax + round_off)))
+    subtotal = subtotal.quantize(Decimal('0.01'))
+    total_tax = total_tax.quantize(Decimal('0.01'))
+    unrounded_total = (subtotal + total_tax).quantize(Decimal('0.01'))
+    round_off = Decimal(str(getattr(invoice_obj, 'round_off', 0) or 0)).quantize(Decimal('0.01'))
+    if round_off != 0:
+        from billing.round_off import compute_round_off
+        base_amount = unrounded_total if len(items_data) > 1 else Decimal(str(getattr(invoice_obj, 'total_amount', 0) or 0))
+        grand_total, computed_ro = compute_round_off(base_amount, apply=True)
+        if len(items_data) > 1:
+            round_off = computed_ro
+    else:
+        raw_total = getattr(invoice_obj, 'total_amount', None)
+        grand_total = Decimal(str(raw_total)).quantize(Decimal('0.01')) if raw_total is not None else unrounded_total
 
     # Determine Intra-state vs Inter-state (CA Audit: state extracted from seller GSTIN)
     from billing.gst_utils import get_seller_state_code, get_pos_state_code
@@ -603,12 +669,15 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
         if is_interstate:
             summary_rows.append([Paragraph("Output IGST:", body_style), Paragraph(f"Rs. {total_tax:,.2f}", td_style_right)])
         else:
-            half_tax = total_tax / Decimal('2.0')
-            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
-            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"Rs. {half_tax:,.2f}", td_style_right)])
+            total_tax_paise = int((total_tax * Decimal('100')).to_integral_value())
+            cgst_amt = Decimal(total_tax_paise // 2) / Decimal('100')
+            sgst_amt = (total_tax - cgst_amt).quantize(Decimal('0.01'))
+            summary_rows.append([Paragraph("Output CGST:", body_style), Paragraph(f"Rs. {cgst_amt:,.2f}", td_style_right)])
+            summary_rows.append([Paragraph("Output SGST:", body_style), Paragraph(f"Rs. {sgst_amt:,.2f}", td_style_right)])
 
     if round_off != 0:
-        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"Rs. {round_off:,.2f}", td_style_right)])
+        sign = '+' if round_off > 0 else '-'
+        summary_rows.append([Paragraph("Round Off:", body_style), Paragraph(f"{sign}Rs. {abs(round_off):,.2f}", td_style_right)])
 
     summary_rows.append([
         Paragraph(f"<b><font size=10 color='{total_text_color.hexval()}'>TOTAL AMOUNT:</font></b>", body_bold),

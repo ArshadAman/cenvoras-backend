@@ -101,7 +101,7 @@ def generate_payslip_pdf(payslip):
     story = []
 
     # 1. Header
-    company_name = getattr(payslip.tenant, 'business_name', None) or "Cenvoras Enterprise"
+    company_name = getattr(payslip.tenant, 'business_name', None) or "Cenvora Enterprise"
     month_name = calendar.month_name[payslip.payroll_run.month]
     year = payslip.payroll_run.year
 
@@ -187,36 +187,56 @@ def generate_payslip_pdf(payslip):
     reasons_map = dict(payslip.deduction_reasons or {})
 
     # Ensure statutory items are displayed even if not pre-populated in deductions json
-    if float(payslip.employee_pf or 0) > 0 and 'PF' not in raw_deductions and 'Provident Fund (PF)' not in raw_deductions:
-        raw_deductions['Provident Fund (PF)'] = payslip.employee_pf
+    if 'PF' not in raw_deductions and 'Provident Fund (PF)' not in raw_deductions:
+        raw_deductions['Provident Fund (PF)'] = payslip.employee_pf or 0
     if float(payslip.employee_esi or 0) > 0 and 'ESI' not in raw_deductions:
         raw_deductions['State Insurance (ESI)'] = payslip.employee_esi
-    if float(payslip.tds or 0) > 0 and 'TDS' not in raw_deductions and 'Income Tax (TDS)' not in raw_deductions:
-        raw_deductions['Income Tax (TDS)'] = payslip.tds
-    if float(payslip.professional_tax or 0) > 0 and 'PT' not in raw_deductions and 'Professional Tax (PT)' not in raw_deductions:
-        raw_deductions['Professional Tax (PT)'] = payslip.professional_tax
+    # Always display TDS line
+    if 'TDS' not in raw_deductions and 'Income Tax (TDS)' not in raw_deductions:
+        raw_deductions['Income Tax (TDS)'] = payslip.tds or 0
+    # Always display PT line
+    if 'PT' not in raw_deductions and 'Professional Tax (PT)' not in raw_deductions:
+        raw_deductions['Professional Tax (PT)'] = payslip.professional_tax or 0
     if float(payslip.advance_recovery or 0) > 0 and 'Salary Advance Recovery' not in raw_deductions:
         raw_deductions['Salary Advance Recovery'] = payslip.advance_recovery
     if float(payslip.loan_recovery or 0) > 0 and 'Loan Recovery' not in raw_deductions:
         raw_deductions['Loan Recovery'] = payslip.loan_recovery
-    # LOP is via gross proration — never inject synthetic LOP into deductions
-    raw_deductions.pop('Loss of Pay (LOP)', None)
-    raw_deductions.pop('LOP', None)
+
+    # Display Loss of Pay (LOP) amount as a line if unpaid leaves exist
+    if float(payslip.lop_days or 0) > 0:
+        lop_info = reasons_map.get('Loss of Pay (LOP)', {})
+        lop_amt = lop_info.get('amount') if isinstance(lop_info, dict) else None
+        if not lop_amt and payslip.total_working_days and payslip.gross_salary:
+            # Estimate docked amount if not stored
+            ctc_val = getattr(getattr(payslip.employee, 'salary_assignments', None), 'first', lambda: None)()
+            base_ctc = float(getattr(ctc_val, 'monthly_ctc', 0) or payslip.gross_salary)
+            lop_amt = round(base_ctc * float(payslip.lop_days) / float(payslip.total_working_days), 2)
+        raw_deductions['Loss of Pay (LOP)'] = float(lop_amt or 0)
+    else:
+        raw_deductions.pop('Loss of Pay (LOP)', None)
+        raw_deductions.pop('LOP', None)
     if not raw_deductions and float(payslip.total_deductions or 0) > 0:
         raw_deductions['Statutory & Other Deductions'] = str(payslip.total_deductions)
 
     for cname, amt in raw_deductions.items():
-        reason_info = reasons_map.get(cname, {})
+        reason_info = (
+            reasons_map.get(cname)
+            or (reasons_map.get('PT') if 'PT' in cname or 'Professional' in cname else None)
+            or (reasons_map.get('TDS') if 'TDS' in cname or 'Income Tax' in cname else None)
+            or (reasons_map.get('PF') if 'PF' in cname or 'Provident' in cname else None)
+            or (reasons_map.get('ESI') if 'ESI' in cname or 'Insurance' in cname else None)
+            or {}
+        )
         reason_text = reason_info.get('reason', '') if isinstance(reason_info, dict) else str(reason_info or '')
         if not reason_text:
-            if 'PF' in cname or 'Provident' in cname:
+            if 'PT' in cname or 'Professional' in cname:
+                reason_text = "State statutory Professional Tax slab deduction"
+            elif 'PF' in cname or 'Provident' in cname:
                 reason_text = "Employee statutory 12.00% Provident Fund contribution on Basic salary"
             elif 'ESI' in cname:
                 reason_text = "Employee statutory 0.75% State Insurance contribution on gross earnings"
-            elif 'TDS' in cname or 'Tax' in cname:
+            elif 'TDS' in cname or 'Income Tax' in cname or 'Tax' in cname:
                 reason_text = "Monthly income tax withholding deducted under Section 192"
-            elif 'PT' in cname or 'Professional' in cname:
-                reason_text = "State statutory Professional Tax slab deduction"
             elif 'Advance' in cname:
                 reason_text = "Monthly installment recovered against active salary advance"
             elif 'Loan' in cname:
@@ -234,6 +254,13 @@ def generate_payslip_pdf(payslip):
         deductions_rows.append([
             comp_cell_content,
             Paragraph(f"Rs. {float(amt):,.2f}", tbl_cell),
+        ])
+    if float(getattr(payslip, 'doj_recovery_balance', 0) or 0) > 0:
+        deductions_rows.append([
+            [Paragraph("Recovery balance (carried forward)", tbl_cell),
+             Paragraph("Earlier-FY DOJ correction recovery still to be recovered; not deducted this month.",
+                       reason_subtext)],
+            Paragraph(f"Rs. {float(payslip.doj_recovery_balance):,.2f}", tbl_cell),
         ])
     deductions_rows.append([
         Paragraph("Total Deductions", tbl_cell_bold),
@@ -312,7 +339,7 @@ def generate_payslip_pdf(payslip):
 
     # Footer note
     footer_text = ParagraphStyle('Footer', parent=styles['Normal'], fontName='Helvetica-Oblique', fontSize=8, leading=10, textColor=colors.HexColor('#94A3B8'), alignment=1)
-    story.append(Paragraph("This is a system-generated payslip from Cenvoras ERP and does not require a physical signature.", footer_text))
+    story.append(Paragraph("This is a system-generated payslip from Cenvora ERP and does not require a physical signature.", footer_text))
 
     doc.build(story)
     buffer.seek(0)

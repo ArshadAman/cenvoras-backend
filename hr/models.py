@@ -146,6 +146,13 @@ class Employee(models.Model):
     upi_id = models.CharField(max_length=100, blank=True, null=True)
     uan = models.CharField(max_length=12, blank=True, null=True)
     esi_ip_number = models.CharField(max_length=20, blank=True, null=True)
+    # UAT P1 item 9: PF member ID (22 chars) and per-employee PF / ESI coverage.
+    pf_member_id = models.CharField(max_length=22, blank=True, null=True)
+    # None = not stated (legacy rows; PF still computed as before). True = PF member, UAN required.
+    # False = not a PF member, no PF deducted.
+    pf_member = models.BooleanField(null=True, blank=True, default=None,
+                                    help_text='Employee is a PF member (UAN required).')
+    esi_covered = models.BooleanField(default=False, help_text='Employee is covered under ESI (IP number required).')
     contract_fee = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -247,6 +254,8 @@ class AttendanceRecord(models.Model):
     )
     date = models.DateField()
     status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    check_in_time = models.TimeField(null=True, blank=True)
+    check_out_time = models.TimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -476,6 +485,13 @@ class SalaryComponent(models.Model):
         default=False,
         help_text='Designates this component as the Basic salary component.',
     )
+    # EPF Act s.6: PF wages = Basic + Dearness Allowance + retaining allowance. Off by default;
+    # never auto-set from the component's name (admins flag it, e.g. via the PF-wages banner).
+    counts_as_pf_wages = models.BooleanField(
+        default=False,
+        help_text='Counts as PF wages (DA / retaining allowance): added to Basic for PF, capped at the PF wage ceiling. '
+                  'Also used for DOJ-correction PF arrears.',
+    )
     # For fixed: INR amount. For pct_*: percentage value (e.g. 40.00 = 40%).
     value = models.DecimalField(max_digits=10, decimal_places=4, default=0)
     percentage = models.DecimalField(max_digits=7, decimal_places=4, default=0)
@@ -502,6 +518,11 @@ class SalaryComponent(models.Model):
 
     def __str__(self):
         return f'{self.salary_structure.name} — {self.name} ({self.type})'
+
+
+# Latest salary assignment: effective date, then most recently created (ties on the same date).
+# Used by the Employees list (current_ctc), salary details and the save path so they agree.
+LATEST_ASSIGNMENT_ORDER = ('-effective_from', '-created_at', '-id')
 
 
 class EmployeeSalaryAssignment(models.Model):
@@ -534,6 +555,9 @@ class EmployeeSalaryAssignment(models.Model):
         decimal_places=2,
         help_text='Monthly Cost to Company (INR) used as the basis for percentage components.',
     )
+    # Rudra CA: admin confirmation that components exceeding monthly CTC may be scaled down to CTC.
+    # {at, by, by_email, reason, monthly_ctc, components} — valid only while CTC/components are unchanged.
+    ctc_scaling_confirmation = models.JSONField(null=True, blank=True, default=None)
     # JSON snapshot: {component_name: computed_inr_amount, ...}
     # Stored at assignment time so historical payroll runs remain accurate.
     computed_components = models.JSONField(
@@ -680,7 +704,7 @@ class OvertimeRecord(models.Model):
         if self.hours:
             rate = self.hourly_rate
             if not rate or rate == Decimal('0.00'):
-                active_assign = self.employee.salary_assignments.order_by('-effective_from').first()
+                active_assign = self.employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
                 if active_assign and active_assign.monthly_ctc:
                     # 26 working days * 8 hours = 208 hours standard
                     rate = (active_assign.monthly_ctc / Decimal('208.0')).quantize(Decimal('0.01'))
@@ -907,6 +931,20 @@ class PayrollRun(models.Model):
     reopened_at = models.DateTimeField(null=True, blank=True)
     reopen_reason = models.TextField(blank=True)
     reopen_history = models.JSONField(default=list, blank=True, help_text="Audit log of all reopen events with user, timestamp, and reason.")
+    # Statutory remittance flags (Rudra): once TDS, PF or ESI for this run is deposited or filed,
+    # the run can no longer be reopened and its payslips must never be regenerated.
+    tds_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When TDS for this run was deposited/filed.')
+    pf_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When PF (ECR) for this run was deposited/filed.')
+    esi_deposited_at = models.DateTimeField(null=True, blank=True, help_text='When ESI for this run was deposited/filed.')
+
+    @property
+    def statutory_deposited(self):
+        return bool(self.tds_deposited_at or self.pf_deposited_at or self.esi_deposited_at)
+
+    @property
+    def is_paid_or_remitted(self):
+        """Paid to employees, or any of TDS/PF/ESI deposited or filed: payslips are final."""
+        return self.status == 'paid' or bool(self.paid_at) or self.statutory_deposited
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -988,6 +1026,16 @@ class Payslip(models.Model):
     employer_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # UAT P1 #10: PF on arrears, kept apart from current wages for the ECR arrears columns.
+    # Rudra CA (#234): any future revised-ECR / PF-difference builder must recompute PF wages from the stored
+    # components (assignment.computed_components + compute_pf), NEVER from a base derived from employee_pf
+    # (payroll_engine._payslip_pf_wage source='derived', which is preview-only).
+    arrear_pf_wages = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employee_pf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employer_epf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    arrear_employer_eps = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Earlier-FY DOJ recovery still to be recovered after this payslip (carried to the next run).
+    doj_recovery_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_esi = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     employer_total_contribution = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
@@ -1168,6 +1216,8 @@ class HRMSSettings(models.Model):
     payroll_frequency = models.CharField(max_length=20, default='monthly')
     payroll_cutoff_day = models.PositiveSmallIntegerField(default=25)
     default_working_days = models.PositiveSmallIntegerField(default=26)
+    # One-time admin banner: component ids an admin chose not to flag as PF wages.
+    pf_wages_banner_dismissed = models.JSONField(default=list, blank=True)
     lop_calculation_rule = models.CharField(
         max_length=30,
         choices=[
@@ -1188,6 +1238,14 @@ class HRMSSettings(models.Model):
     )
     overtime_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.5)
     allow_negative_salary = models.BooleanField(default=False)
+    # VERIFY limit/applicability: default 50% of the month's wages per Code on Wages s.18
+    # on TOTAL deductions in the wage period; which deductions count toward it also needs verifying.
+    doj_recovery_cap_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('50.00'),
+        help_text='Max % of a month\'s wages deducted to recover earlier-FY DOJ excess pay; the rest carries '
+                  'forward. Applies to total deductions: recovery = cap - other deductions. Default 50% (Code on Wages '
+                  's.18), VERIFY limit/applicability and which deductions count.',
+    )
     salary_rounding = models.CharField(
         max_length=20,
         choices=[('nearest_one', 'Nearest ₹1'), ('nearest_ten', 'Nearest ₹10'), ('exact', 'Exact 2 Decimals')],
@@ -1206,6 +1264,12 @@ class HRMSSettings(models.Model):
     esi_employee_rate = models.DecimalField(max_digits=5, decimal_places=3, default=0.75)
     esi_employer_rate = models.DecimalField(max_digits=5, decimal_places=3, default=3.25)
     esi_wage_ceiling = models.DecimalField(max_digits=10, decimal_places=2, default=21000.0)
+    # UAT P1 items 8/9 (Rudra CA): company-level PF / ESI coverage and the company start date
+    pf_enabled = models.BooleanField(default=True, help_text='Company is covered under EPF.')
+    esi_enabled = models.BooleanField(default=True, help_text='Company is covered under ESI.')
+    pt_enabled = models.BooleanField(default=True, help_text='Company deducts state Professional Tax.')
+    company_start_date = models.DateField(null=True, blank=True,
+                                          help_text='No employee can have a joining date before this.')
 
     allow_cash_salary_disbursement = models.BooleanField(
         default=False,
@@ -1261,6 +1325,22 @@ class ProfessionalTaxSlab(models.Model):
         null=True,
         blank=True,
         help_text='Optional February override (e.g. Karnataka ₹300 in Feb). Null = use pt_amount.',
+    )
+    special_month = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text='Month (1-12) in which february_amount applies; null = February. '
+                  'E.g. Odisha legacy ₹300 in March (last month of the FY).',
+    )
+    lower_exclusive = models.BooleanField(
+        default=False,
+        help_text='True = slab applies when gross > lower_bound (strict); False = gross >= lower_bound.',
+    )
+    source_note = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Legal source / verification status of this slab.',
     )
     # Date-versioned slabs (null = open-ended). Additive — do not delete historical rows.
     effective_from = models.DateField(
@@ -1366,3 +1446,70 @@ class EmployeeNotification(models.Model):
         target = self.employee.full_name if self.employee else "ALL"
         return f"{self.title} to {target}"
 
+
+
+class DOJCorrection(models.Model):
+    """
+    UAT P1 #10: admin-only Date-of-Joining correction (mandatory reason).
+    Never rewrites locked/run months: the pay difference for months already in
+    payroll is carried as ONE arrears (+) or recovery (−) line into the next
+    open payroll (target_month/target_year). Additive table.
+    """
+    STATUS_CHOICES = [('pending', 'Pending'), ('applied', 'Applied')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name='hr_doj_corrections')
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='doj_corrections')
+    old_doj = models.DateField()
+    new_doj = models.DateField()
+    reason = models.TextField()
+    corrected_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                     related_name='+')
+    # Net amount: > 0 arrears payable, < 0 recovery.
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    breakdown = models.JSONField(default=list, blank=True,
+                                 help_text='Per-month lines: month, year, working_days, old/new payable days, gross, delta.')
+    target_month = models.PositiveSmallIntegerField()
+    target_year = models.PositiveIntegerField()
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    applied_payslip = models.ForeignKey('Payslip', on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name='+')
+    carried_from = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True,
+                                     related_name='carries',
+                                     help_text='Excess recovery carried forward from this correction.')
+    # Rule 3(1) edit log: every recompute / admin amount edit appends
+    # {action, at, by, by_email, reason, old: {amount, breakdown, target_month, target_year}}.
+    history = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def kind(self):
+        return 'arrears' if self.amount >= 0 else 'recovery'
+
+    def __str__(self):
+        return f"DOJ correction {self.employee} {self.old_doj}→{self.new_doj} ({self.amount})"
+
+
+class Holiday(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='holidays'
+    )
+    name = models.CharField(max_length=150)
+    date = models.DateField()
+    description = models.TextField(blank=True, default='')
+    is_optional = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date']
+        unique_together = ('tenant', 'date')
+
+    def __str__(self):
+        return f"{self.name} ({self.date})"

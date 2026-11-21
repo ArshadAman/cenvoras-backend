@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
 
@@ -31,6 +32,14 @@ class Customer(models.Model):
         blank=True, 
         null=True,
         help_text="Customer's State/Region (Determines Tax Treatment)"
+    )
+    linked_vendor = models.OneToOneField(
+        'Vendor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='linked_customer',
+        help_text="Same party when this customer is also a vendor.",
     )
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -76,6 +85,10 @@ class Payment(models.Model):
                                        help_text="Service advance POS state; 'UNKNOWN' = treated as inter-state (IGST).")
     receipt_voucher_number = models.CharField(max_length=50, blank=True, default='',
                                               help_text="Rule 50 receipt voucher number (service advances).")
+    bank_account_id = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text="Profile bank account id used for bank/UPI/cheque receipts.",
+    )
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -216,6 +229,10 @@ class PurchaseBill(models.Model):
         default=False,
         help_text='True when this purchase is under GST reverse charge (RCM).',
     )
+    # Rudra (#219): 'Date of receipt of goods/services' on RCM bills. Null = the bill date.
+    # Drives the Rule 47A self-invoice window and the RCM time of supply (s.12(3)/s.13(3)).
+    rcm_receipt_date = models.DateField(null=True, blank=True,
+                                        help_text='Date of receipt of goods/services (RCM). Blank = bill date.')
 
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -292,7 +309,7 @@ class PurchaseOrderItem(models.Model):
     purchase_order = models.ForeignKey(PurchaseOrder, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey('inventory.Product', on_delete=models.PROTECT)
     batch = models.ForeignKey('inventory.ProductBatch', on_delete=models.SET_NULL, null=True, blank=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -310,16 +327,19 @@ class PurchaseBillItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being purchased")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     tax = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    # UAT P1 items 6/7 (Rudra CA)
+    is_rcm = models.BooleanField(default=False, help_text='RCM applicable: buyer pays the GST (e.g. GTA, advocate).')
+    itc_blocked = models.BooleanField(default=False, help_text='ITC blocked under s.17(5): tax is added to cost.')
     description = models.TextField(blank=True, default='', help_text="Custom item description / note")
 
     # Scheme Support (Phase 6)
-    free_quantity = models.PositiveIntegerField(default=0, help_text="Qty received free under scheme")
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Qty received free under scheme", validators=[MinValueValidator(0)])
 
     def __str__(self):
         bill_no = getattr(self.purchase_bill, 'bill_number', None) or '—'
@@ -356,6 +376,8 @@ class SalesInvoice(models.Model):
     gst_treatment = models.CharField(max_length=50, blank=True, null=True)
     journal = models.CharField(max_length=50, default="Sales")
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # UAT P1 item 13 (Rule 46(p)): whether tax is payable on reverse charge.
+    is_reverse_charge = models.BooleanField(default=False, help_text='Tax payable on reverse charge (Rule 46).')
 
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse from where items are sold")
     source_sales_order = models.ForeignKey(
@@ -467,7 +489,7 @@ class SalesInvoiceItem(models.Model):
     row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being sold")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField(default=1)
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=1, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -477,7 +499,7 @@ class SalesInvoiceItem(models.Model):
     source_item_id = models.CharField(max_length=64, null=True, blank=True, help_text="ID of source item in DeliveryChallan or SalesOrder")
     
     # Scheme Support (Phase 6)
-    free_quantity = models.PositiveIntegerField(default=0, help_text="Qty given free under scheme (Buy X Get Y)")
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Qty given free under scheme (Buy X Get Y)", validators=[MinValueValidator(0)])
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     sort_order = models.PositiveIntegerField(default=0)
 
@@ -488,3 +510,4 @@ class SalesInvoiceItem(models.Model):
 from .models_sidecar import TransactionMeta, InvoiceSettings, TenantLearnedHsnGst, SalesOrder, SalesOrderItem, DeliveryChallan, DeliveryChallanItem, PurchaseIndent, PurchaseIndentItem
 from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from .models_gst_shield import GSTR2BImport, GSTR2BRecord, VendorLegalNotice
+from .models_rcm import RcmSelfInvoice, RcmPaymentVoucher  # noqa: E402,F401

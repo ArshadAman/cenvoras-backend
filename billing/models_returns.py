@@ -3,6 +3,7 @@ Sales Return (Credit Note) & Purchase Return (Debit Note) Models.
 These are standard GST-compliant return vouchers.
 """
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
 from .models import SalesInvoice, PurchaseBill, Customer
@@ -71,9 +72,10 @@ class CreditNoteItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    # R21: up to 2-decimal quantities (part-quantity credits). Stock is in whole units, so only whole
-    # quantities restore stock (see CreditNoteSerializer).
-    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    # UAT P1 item 5: decimal(15,3). Precision is enforced by UQC in CreditNoteSerializer
+    # (count units whole, measured units up to 3 decimals). Stock is in whole units, so only whole
+    # quantities restore stock.
+    quantity = models.DecimalField(max_digits=15, decimal_places=3)
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -136,7 +138,7 @@ class DebitNoteItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)

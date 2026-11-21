@@ -1,3 +1,4 @@
+from hr.models import LATEST_ASSIGNMENT_ORDER  # noqa: E402
 from celery import shared_task
 from hr.models import PayrollRun
 from hr.services.payroll_engine import run_payroll
@@ -410,7 +411,7 @@ def send_employee_offer_letter_email(employee_id):
         </tr>
         """
     else:
-        latest = emp.salary_assignments.order_by('-effective_from', '-id').first()
+        latest = emp.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         ctc = latest.monthly_ctc if latest else Decimal('0.00')
         components = dict(latest.computed_components or {}) if latest else {}
         basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))

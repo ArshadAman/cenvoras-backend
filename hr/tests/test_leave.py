@@ -196,3 +196,46 @@ class LeaveLifecycleAPITests(APITestCase):
         
         # Verify no attendance created
         self.assertFalse(AttendanceRecord.objects.filter(employee=self.emp, date__range=(start_date, end_date)).exists())
+
+    def test_leave_before_joining_date_rejected(self):
+        """High issue 1: leave cannot be applied for dates before employee joined."""
+        self.client.force_authenticate(user=self.tenant)
+        url = reverse('leave-application-list')
+        res = self.client.post(url, {
+            'employee': str(self.emp.id),
+            'leave_type': str(self.leave_type.id),
+            'start_date': '2022-12-25',
+            'end_date': '2022-12-28',
+            'reason': 'Pre-joining vacation'
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('start_date', res.data)
+        self.assertIn('before employee joining date', str(res.data['start_date']))
+
+    def test_overlapping_approved_leave_rejected(self):
+        """High issue 2: a leave that overlaps an approved leave is rejected."""
+        # Create and approve an existing leave
+        LeaveApplication.objects.create(
+            tenant=self.tenant,
+            employee=self.emp,
+            leave_type=self.leave_type,
+            start_date=datetime.date(2023, 11, 10),
+            end_date=datetime.date(2023, 11, 15),
+            reason='First Leave',
+            status='approved',
+            computed_days=Decimal('5.0')
+        )
+        
+        self.client.force_authenticate(user=self.tenant)
+        url = reverse('leave-application-list')
+        # Try to apply overlapping leave (e.g. 12th to 18th)
+        res = self.client.post(url, {
+            'employee': str(self.emp.id),
+            'leave_type': str(self.leave_type.id),
+            'start_date': '2023-11-12',
+            'end_date': '2023-11-18',
+            'reason': 'Overlapping Leave'
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('start_date', res.data)
+        self.assertIn('overlaps with an already approved leave', str(res.data['start_date']))

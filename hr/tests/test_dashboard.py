@@ -2,7 +2,7 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
 from users.models import User
-from hr.models import Employee, PayrollRun, LeaveApplication, LeaveType, Department, Designation
+from hr.models import Employee, PayrollRun, LeaveApplication, LeaveType, Department, Designation, PayrollException
 import datetime
 
 class HRDashboardTests(APITestCase):
@@ -98,3 +98,35 @@ class HRDashboardTests(APITestCase):
         # In our setup, last_payroll_net could be None because it's looking for 
         # a specific month/year logic, or we created the run.
         # Let's just assert it is present.
+
+    def test_critical_payroll_exceptions_alert(self):
+        pr = PayrollRun.objects.filter(tenant=self.tenant).first()
+        PayrollException.objects.create(
+            tenant=self.tenant,
+            payroll_run=pr,
+            employee=self.emp1,
+            severity='critical',
+            code='MISSING_BANK_INFO',
+            message='Missing bank information (Account Number, IFSC). Direct deposit will fail.',
+            is_resolved=False
+        )
+
+        url = reverse('hr-dashboard')
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        alerts = response.data.get('alerts', [])
+        critical_alerts = [a for a in alerts if a.get('title') == 'Critical Payroll Exceptions']
+        self.assertEqual(len(critical_alerts), 1)
+
+        crit = critical_alerts[0]
+        self.assertEqual(crit['type'], 'danger')
+        self.assertEqual(len(crit['items']), 1)
+        item = crit['items'][0]
+        self.assertEqual(item['employee_id'], str(self.emp1.id))
+        self.assertEqual(item['employee_code'], 'EMP-001')
+        self.assertEqual(item['name'], 'John Doe')
+        self.assertEqual(item['department'], 'Tech')
+        self.assertEqual(item['designation'], 'Engineer')
+        self.assertEqual(item['code'], 'MISSING_BANK_INFO')
+        self.assertIn('Missing bank information', item['message'])

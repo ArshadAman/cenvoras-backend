@@ -70,17 +70,28 @@ class DocumentSyncService:
                 getattr(item, 'discount', 0),
                 getattr(item, 'tax', 0),
             )
-        round_off = Decimal(str(getattr(document, 'round_off', 0) or 0))
-        document.total_amount = (total + round_off).quantize(Decimal('0.01'))
-        
+        existing_round_off = Decimal(str(getattr(document, 'round_off', 0) or 0))
+        has_round_off_field = hasattr(document, 'round_off')
+        if has_round_off_field and existing_round_off != 0:
+            from billing.round_off import compute_round_off
+            document.total_amount, document.round_off = compute_round_off(total, apply=True)
+        else:
+            document.total_amount = total.quantize(Decimal('0.01'))
+
         # Save without triggering full clean/signals
         update_fields = ['total_amount']
+        if has_round_off_field and existing_round_off != 0:
+            update_fields.append('round_off')
         if hasattr(document, 'refresh_payment_status'):
             document.refresh_payment_status(save=False)
             update_fields.append('payment_status')
-            
-        document.save(update_fields=[f for f in update_fields if hasattr(document, f)])
-        document.__class__.objects.filter(pk=document.pk).update(total_amount=document.total_amount)
+
+        valid_fields = [f for f in update_fields if hasattr(document, f)]
+        document.save(update_fields=valid_fields)
+        db_updates = {'total_amount': document.total_amount}
+        if 'round_off' in valid_fields:
+            db_updates['round_off'] = document.round_off
+        document.__class__.objects.filter(pk=document.pk).update(**db_updates)
         return document.total_amount
 
     @classmethod

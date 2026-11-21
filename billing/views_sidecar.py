@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -194,7 +195,7 @@ def convert_order_to_invoice(request, pk):
                         continue
 
                     try:
-                        qty = int(entry.get('quantity', 0))
+                        qty = to_qty(entry.get('quantity', 0))
                     except (ValueError, TypeError):
                         qty = 0
 
@@ -365,8 +366,8 @@ def convert_order_to_invoice(request, pk):
                     bonus_line = SalesInvoiceItem(
                         sales_invoice=invoice,
                         product=b_prod,
-                        quantity=int(b_item.get('quantity', 0) or 0),
-                        free_quantity=int(b_item.get('free_quantity', 0) or 0),
+                        quantity=to_qty(b_item.get('quantity', 0) or 0),
+                        free_quantity=to_qty(b_item.get('free_quantity', 0) or 0),
                         price=Decimal('0.00'),
                         amount=Decimal('0.00'),
                         unit=b_item.get('unit') or 'pcs',
@@ -380,6 +381,28 @@ def convert_order_to_invoice(request, pk):
                     bonus_line.save()
 
             invoice.refresh_from_db()
+
+            from billing.round_off import compute_round_off
+            from billing.sync_service import DocumentSyncService
+            unrounded_total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in invoice.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0.00'),
+            )
+            order_had_unrounded_total = (
+                Decimal(str(order.round_off or 0)) == 0
+                and Decimal(str(order.total_amount or 0)) % Decimal('1') != 0
+            )
+            apply_ro = False if order_had_unrounded_total else (
+                Decimal(str(order.round_off or 0)) != 0 or bool(getattr(tenant, 'auto_round_off', True))
+            )
+            invoice.total_amount, invoice.round_off = compute_round_off(unrounded_total, apply=apply_ro)
+            invoice.save(update_fields=['total_amount', 'round_off'])
 
             # Persist bank/template on TransactionMeta (not on SalesInvoice)
             meta, _ = TransactionMeta.objects.get_or_create(invoice=invoice)
@@ -495,7 +518,10 @@ def delivery_challan_list_create(request):
             from billing.models import Customer
             cust_obj = Customer.objects.filter(id=customer_filter).first()
             if cust_obj and cust_obj.name:
-                challans = challans.filter(Q(customer_id=customer_filter) | Q(customer__id=customer_filter) | Q(customer_name__iexact=cust_obj.name))
+                challans = challans.filter(
+                    Q(customer_id=customer_filter) | Q(customer__id=customer_filter) |
+                    (Q(customer__isnull=True) & Q(customer_name__iexact=cust_obj.name))
+                )
             else:
                 challans = challans.filter(Q(customer_id=customer_filter) | Q(customer__id=customer_filter))
 
@@ -618,13 +644,14 @@ def batch_revert_challan_dispatches_and_stocks(challans, tenant):
 
     # 3. Batch Revert SalesOrderItem dispatched_quantity (Single query using CASE/WHEN with Greatest())
     if so_item_deltas:
-        from django.db.models import PositiveIntegerField
+        from django.db.models import DecimalField as _QtyField, Value as _Val
         cases = [
-            When(id=item_id, then=Greatest(F('dispatched_quantity') - int(delta), 0))
+            When(id=item_id, then=Greatest(F('dispatched_quantity') - to_qty(delta),
+                                           _Val(Decimal('0'), output_field=_QtyField(max_digits=15, decimal_places=3))))
             for item_id, delta in so_item_deltas.items()
         ]
         SalesOrderItem.objects.filter(id__in=so_item_deltas.keys()).update(
-            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'), output_field=PositiveIntegerField())
+            dispatched_quantity=Case(*cases, default=F('dispatched_quantity'), output_field=_QtyField(max_digits=15, decimal_places=3))
         )
 
     # 4. Batch Recalculate SalesOrder stages for all affected Sales Orders (Single aggregated query)
@@ -824,7 +851,7 @@ def convert_order_to_challan(request, pk):
                     continue
                 
                 try:
-                    qty = int(entry.get('quantity', 0))
+                    qty = to_qty(entry.get('quantity', 0))
                 except (ValueError, TypeError):
                     qty = 0
                 
@@ -982,15 +1009,12 @@ def convert_challan_to_invoice(request, pk):
                         c_item.price if c_item.price is not None
                         else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
                     ))
-                    qty = int(c_item.quantity or 1)
+                    qty = to_qty(c_item.quantity or 1)
                     discount = Decimal(str(c_item.discount or 0))
                     tax = Decimal(str(c_item.tax or 0))
-                    base_amount = qty * price
-                    discount_amount = (base_amount * discount) / Decimal('100')
-                    taxable_amount = base_amount - discount_amount
-                    tax_amount = (taxable_amount * tax) / Decimal('100')
-                    line_amount = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
-                    total_items_amount += line_amount
+                    from billing.sync_service import DocumentSyncService
+                    line_amount = DocumentSyncService.calculate_line_amount(qty, price, discount)
+                    total_items_amount += DocumentSyncService.calculate_line_gross(qty, price, discount, tax)
                     unit = c_item.unit or getattr(prod, 'unit', 'pcs') or 'pcs'
                     hsn_sac_code = c_item.hsn_sac_code or getattr(prod, 'hsn_sac_code', '') or ''
 
@@ -1014,9 +1038,16 @@ def convert_challan_to_invoice(request, pk):
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
 
-            final_total = (total_items_amount + (challan.round_off or Decimal('0.00'))).quantize(Decimal('0.01'))
-            invoice.total_amount = final_total
-            invoice.save(update_fields=['total_amount'])
+            from billing.round_off import compute_round_off
+            challan_had_unrounded_total = (
+                Decimal(str(challan.round_off or 0)) == 0
+                and Decimal(str(challan.total_amount or 0)) % Decimal('1') != 0
+            )
+            apply_ro = False if challan_had_unrounded_total else (
+                Decimal(str(challan.round_off or 0)) != 0 or bool(getattr(tenant, 'auto_round_off', True))
+            )
+            invoice.total_amount, invoice.round_off = compute_round_off(total_items_amount, apply=apply_ro)
+            invoice.save(update_fields=['total_amount', 'round_off'])
 
             persist_linked_challans(invoice, [challan])
             invoice.save(update_fields=['challan_number', 'challan_date'])
@@ -1175,7 +1206,7 @@ def bulk_convert_challans_to_invoice(request):
                             c_item.price if c_item.price is not None
                             else (getattr(prod, 'sale_price', None) or getattr(prod, 'price', None) or Decimal('0.00'))
                         ))
-                        qty = int(c_item.quantity or 1)
+                        qty = to_qty(c_item.quantity or 1)
                         discount = Decimal(str(c_item.discount or 0))
                         tax = Decimal(str(c_item.tax or 0))
                         base_amount = qty * price
@@ -1630,10 +1661,20 @@ def quotation_convert_to_sales_order(request, pk):
                 qty = item.quantity
 
             raw_disc = override.get('discount')
-            discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else (getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00'))
-
             raw_price = override.get('price')
-            price = Decimal(str(raw_price)) if raw_price is not None and str(raw_price).strip() != '' else item.price
+
+            if raw_price is not None and str(raw_price).strip() != '':
+                price = Decimal(str(raw_price))
+                discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else Decimal('0.00')
+            else:
+                quote_disc = getattr(item, 'discount', Decimal('0.00')) or Decimal('0.00')
+                base_price = item.price or Decimal('0.00')
+                if quote_disc > 0 and raw_disc is None:
+                    price = (base_price * (Decimal('100.00') - quote_disc) / Decimal('100.00')).quantize(Decimal('0.01'))
+                    discount = Decimal('0.00')
+                else:
+                    price = base_price
+                    discount = Decimal(str(raw_disc)) if raw_disc is not None and str(raw_disc).strip() != '' else quote_disc
 
             tax = getattr(item, 'tax', Decimal('0.00')) or Decimal('0.00')
 

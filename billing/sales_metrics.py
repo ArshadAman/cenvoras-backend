@@ -106,5 +106,175 @@ def _taxable_net(inv_qs, cn_qs, tenant):
     return taxable.quantize(Decimal('0.01'))
 
 
+def sales_register_invoices(tenant, date_from=None, date_to=None):
+    """Final sales invoices in the Sales Tax Register (shared by the register and AI month sales)."""
+    from billing.models import SalesInvoice
+    qs = SalesInvoice.objects.filter(created_by=tenant, status='final')
+    if date_from:
+        qs = qs.filter(invoice_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(invoice_date__lte=date_to)
+    return qs
+
+
+def sales_register_credit_notes(tenant, date_from=None, date_to=None):
+    """
+    Credit notes in the Sales Tax Register, by CN date: only CNs linked to a final invoice.
+    Unlinked CNs (legacy taxed CNs listed for fixing under #207, or credit notes without GST)
+    are not in any GST table and are not subtracted from taxable sales.
+    """
+    from billing.models_returns import CreditNote
+    # Time-barred (s.34) CNs are commercial credits only: never in any GST table (#191, Rudra).
+    qs = CreditNote.objects.filter(created_by=tenant, original_invoice__isnull=False,
+                                   original_invoice__status='final', gst_time_barred=False)
+    if date_from:
+        qs = qs.filter(date__gte=date_from)
+    if date_to:
+        qs = qs.filter(date__lte=date_to)
+    return qs
+
+
 def sales_mtd(tenant):
     return aggregate_sales_metric(tenant, mtd=True)
+
+
+# ---------------------------------------------------------------------------
+# UAT P1 item 3 (Rudra CA): sales for a named calendar month.
+#   Sales(M) = taxable value (excl. GST) of final invoices dated in M
+#              - taxable value of credit notes dated in M
+#              + debit notes dated in M
+# Month boundaries are IST calendar dates (invoice_date / CN date are DateFields, so no
+# UTC conversion is involved); months are 1-based. There is no customer-side debit note
+# model in Cenvora (DebitNote is a purchase return), so the DN term is 0.
+# ---------------------------------------------------------------------------
+import calendar as _calendar
+import re as _re
+
+_MONTHS = {}
+for _i in range(1, 13):
+    _MONTHS[_calendar.month_name[_i].lower()] = _i
+    _MONTHS[_calendar.month_abbr[_i].lower()] = _i
+_MONTHS['sept'] = 9
+_MONTH_RE = _re.compile(
+    r'\b(' + '|'.join(sorted(_MONTHS, key=len, reverse=True)) + r')\b(?:[\s,\'-]*((?:19|20)\d{2}))?',
+    _re.IGNORECASE)
+
+
+def ist_month_bounds(year: int, month: int):
+    """First and last IST calendar date of a 1-based month."""
+    if not 1 <= int(month) <= 12:
+        raise ValueError('month must be 1..12')
+    last = _calendar.monthrange(int(year), int(month))[1]
+    return date(int(year), int(month), 1), date(int(year), int(month), last)
+
+
+def resolve_month_reference(text: str, today: date | None = None):
+    """
+    Find a month name in `text` -> (year, month) or None.
+    'October 2025' -> (2025, 10). A month with no year means the most recent one that has
+    started: in Nov 2026, 'October' -> Oct 2026, 'December' -> Dec 2025, 'November' -> Nov 2026
+    (month to date).
+    """
+    if not text:
+        return None
+    today = today or _ist_today()
+    for m in _MONTH_RE.finditer(text):
+        word = m.group(1).lower()
+        if word == 'may' and not m.group(2) and not _re.search(r'\bmay\b\s*(sales?|month)|\bin may\b|\bof may\b|\bfor may\b', text, _re.I):
+            continue  # "may" as a verb
+        month = _MONTHS[word]
+        if m.group(2):
+            return int(m.group(2)), month
+        year = today.year if month <= today.month else today.year - 1
+        return year, month
+    return None
+
+
+def books_credit_notes(tenant, date_from=None, date_to=None):
+    """ALL credit notes dated in the window (linked, unlinked without GST, time-barred) - books basis."""
+    from billing.models_returns import CreditNote
+    qs = CreditNote.objects.filter(created_by=tenant)
+    if date_from:
+        qs = qs.filter(date__gte=date_from)
+    if date_to:
+        qs = qs.filter(date__lte=date_to)
+    return qs
+
+
+def _books_cn_value(cn_qs, tenant):
+    """Sales-return value as posted to the GL (ledger.services credit-note posting): taxable value
+    of the lines; a CN without GST reduces sales by its whole amount; a CN with no lines by its total."""
+    from billing.gst_utils import credit_note_tax_breakup, get_seller_state_code
+    seller = get_seller_state_code(tenant)
+    total = Decimal('0.00')
+    for cn in cn_qs.select_related('customer', 'original_invoice').prefetch_related('items'):
+        if cn.items.exists():
+            total += Decimal(str(credit_note_tax_breakup(cn, seller)['totals']['taxable']))
+        else:
+            total += Decimal(str(cn.total_amount or 0))
+    return total.quantize(Decimal('0.01'))
+
+
+def sales_for_month(tenant, year: int, month: int):
+    """
+    Rudra CA ruling (post-#221), two figures for month M (IST calendar dates, drafts excluded):
+      net_sales_books      = taxable value of final invoices dated in M
+                             - ALL credit notes dated in M (linked, unlinked without GST, time-barred)
+                             + debit notes dated in M  (no customer-side DN model yet: 0)
+                             -> the AI's default figure; matches the P&L sales-return basis.
+      gst_taxable_turnover = Sales Tax Register / GSTR-1 basis: only CNs linked to a final invoice
+                             and not time-barred (CNs that adjust GST).
+    """
+    from billing.models import SalesInvoice
+
+    start, end = ist_month_bounds(year, month)
+    inv_qs = sales_register_invoices(tenant, start, end)
+    from billing.models_returns import CreditNote
+    invoice_taxable = _taxable_net(inv_qs, CreditNote.objects.none(), tenant)
+    gst_cn_qs = sales_register_credit_notes(tenant, start, end)
+    gst_cn = (Decimal('0.00') - _taxable_net(SalesInvoice.objects.none(), gst_cn_qs, tenant)).quantize(Decimal('0.01'))
+    books_cn_qs = books_credit_notes(tenant, start, end)
+    books_cn = _books_cn_value(books_cn_qs, tenant)
+    debit_notes = Decimal('0.00')  # no customer-side debit note model in Cenvora (DebitNote = purchase return)
+    net_books = (invoice_taxable - books_cn + debit_notes).quantize(Decimal('0.01'))
+    gst_turnover = (invoice_taxable - gst_cn + debit_notes).quantize(Decimal('0.01'))
+    return {
+        'year': int(year), 'month': int(month),
+        'date_from': start, 'date_to': end,
+        'label': f"{_calendar.month_name[int(month)]} {int(year)}",
+        'invoice_taxable': invoice_taxable,
+        'credit_note_books': books_cn,
+        'credit_note_gst': gst_cn,
+        'credit_note_taxable': books_cn,
+        'debit_notes': debit_notes,
+        'net_sales_books': net_books,
+        'gst_taxable_turnover': gst_turnover,
+        'sales': net_books,
+        'invoice_count': inv_qs.count(),
+        'credit_note_count': books_cn_qs.count(),
+        'gst_credit_note_count': gst_cn_qs.count(),
+    }
+
+
+def answer_month_sales_question(question: str, tenant, today: date | None = None):
+    """Deterministic answer for 'sales in <month>' questions, else None."""
+    if not question or not _re.search(r'\bsal(e|es)\b|\bturnover\b|\brevenue\b', question, _re.I):
+        return None
+    ref = resolve_month_reference(question, today)
+    if not ref:
+        return None
+    r = sales_for_month(tenant, *ref)
+    # Default: net sales (books). Add GST taxable turnover when it differs or GST is asked about.
+    asks_gst = bool(_re.search(r'\bgst\b|\bgstr|\btaxable turnover\b|\breturn\b', question, _re.I))
+    out = (
+        f"**Net sales (books) for {r['label']}** ({r['date_from']:%d %b %Y} to {r['date_to']:%d %b %Y}): "
+        f"**₹{r['net_sales_books']:,.2f}**, excluding GST.\n\n"
+        f"• Invoices: ₹{r['invoice_taxable']:,.2f} ({r['invoice_count']} final invoices)\n"
+        f"• Less credit notes: ₹{r['credit_note_books']:,.2f} ({r['credit_note_count']})\n"
+        f"Drafts are excluded."
+    )
+    if asks_gst or r['gst_taxable_turnover'] != r['net_sales_books']:
+        out += (f"\n\nGST taxable turnover: ₹{r['gst_taxable_turnover']:,.2f} "
+                f"(only credit notes that adjust GST are deducted; credit notes without GST "
+                f"and time-barred ones are commercial credits only).")
+    return out

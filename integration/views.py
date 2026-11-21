@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -91,7 +92,7 @@ class PublicOrderCreateView(APIView):
             except Product.DoesNotExist:
                 return Response({"error": f"Product {item.get('product_id')} not found"}, status=status.HTTP_400_BAD_REQUEST)
                 
-            qty = int(item.get('quantity', 1))
+            qty = to_qty(item.get('quantity', 1))
             price = product.sale_price
             amount = price * qty
             SalesInvoiceItem.objects.create(

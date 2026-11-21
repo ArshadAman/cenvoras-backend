@@ -748,4 +748,86 @@ class DeliveryChallanFlowTests(TestCase):
         self.assertTrue(converted.challan_number.startswith("KE-C26/"))
         self.assertFalse(converted.challan_number.startswith("DC-"))
 
+    def _create_sample_challan(self, number="DC-PDF-001"):
+        challan = DeliveryChallan.objects.create(
+            challan_number=number,
+            date=date.today(),
+            customer=self.customer,
+            customer_name=self.customer.name,
+            total_amount=Decimal("4720.00"),
+            created_by=self.tenant,
+        )
+        DeliveryChallanItem.objects.create(
+            challan=challan,
+            product=self.product,
+            quantity=10,
+            price=Decimal("400.00"),
+            tax=Decimal("18.00"),
+            amount=Decimal("4720.00"),
+            unit="bag",
+        )
+        return challan
+
+    def test_delivery_challan_pdf_get_endpoint(self):
+        """GET /api/billing/delivery-challans/<id>/pdf/ returns valid application/pdf bytes."""
+        challan = self._create_sample_challan("DC-PDF-GET-001")
+        res = self.client.get(f"/api/billing/delivery-challans/{challan.id}/pdf/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertIn(f'delivery-challan-{challan.challan_number}.pdf', res["Content-Disposition"])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
+    def test_delivery_challan_pdf_post_html_vector(self):
+        """POST /api/billing/delivery-challans/<id>/pdf/ with rendered HTML returns Chromium vector PDF bytes."""
+        from unittest.mock import patch
+
+        challan = self._create_sample_challan("DC-PDF-VEC-001")
+        fake_pdf = b"%PDF-1.4\n%fake-vector-pdf\n%%EOF"
+        with patch("billing.html_pdf_service.render_html_to_vector_pdf", return_value=fake_pdf) as mock_render:
+            res = self.client.post(
+                f"/api/billing/delivery-challans/{challan.id}/pdf/",
+                {"html": "<html><body><div class='invoice-sheet'>Challan</div></body></html>", "template": {}},
+                format="json",
+            )
+        mock_render.assert_called_once()
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertIn(f'delivery-challan-{challan.challan_number}.pdf', res["Content-Disposition"])
+        self.assertEqual(res.content, fake_pdf)
+
+    def test_delivery_challan_pdf_post_html_fallback_501(self):
+        """POST with HTML returns 501 fallback_client=True when headless Chromium is unavailable."""
+        from unittest.mock import patch
+
+        challan = self._create_sample_challan("DC-PDF-501-001")
+        with patch("billing.html_pdf_service.render_html_to_vector_pdf", side_effect=RuntimeError("Chromium missing")):
+            res = self.client.post(
+                f"/api/billing/delivery-challans/{challan.id}/pdf/",
+                {"html": "<html><body>Challan</body></html>", "template": {}},
+                format="json",
+            )
+        self.assertEqual(res.status_code, status.HTTP_501_NOT_IMPLEMENTED)
+        self.assertTrue(res.data.get("fallback_client"))
+
+    def test_delivery_challan_pdf_tenant_isolation(self):
+        """Another tenant cannot download a delivery challan PDF."""
+        challan = self._create_sample_challan("DC-PDF-ISO-001")
+        other_tenant = User.objects.create_user(
+            username="other_challan_tenant",
+            email="other_challan@test.com",
+            password="testpassword",
+        )
+        other_client = APIClient()
+        other_client.force_authenticate(user=other_tenant)
+
+        get_res = other_client.get(f"/api/billing/delivery-challans/{challan.id}/pdf/")
+        self.assertEqual(get_res.status_code, status.HTTP_404_NOT_FOUND)
+
+        post_res = other_client.post(
+            f"/api/billing/delivery-challans/{challan.id}/pdf/",
+            {"html": "<html></html>"},
+            format="json",
+        )
+        self.assertEqual(post_res.status_code, status.HTTP_404_NOT_FOUND)
+
 

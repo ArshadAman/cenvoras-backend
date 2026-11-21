@@ -2,15 +2,22 @@
 from decimal import Decimal
 from datetime import date
 
-from billing.models import Customer
+from billing.models import Customer, SalesInvoice, SalesInvoiceItem
 from billing.models_returns import CreditNote, CreditNoteItem
 from billing.tests_four_fixes import FourFixesBase
 
 
 class GSTR1CDNRNoteValueTests(FourFixesBase):
     def _note(self, number, stored_total, customer):
+        # UAT P1 #12 (Rudra CA): a taxed CN must be linked to its invoice to be filed.
+        inv = SalesInvoice.objects.create(customer=customer, customer_name=customer.name,
+                                          invoice_number=f"INV-{number}", invoice_date=date.today(),
+                                          total_amount=Decimal("23600.00"), created_by=self.tenant)
+        SalesInvoiceItem.objects.create(sales_invoice=inv, product=self.product, hsn_sac_code="847130",
+                                        quantity=2, price=Decimal("10000.00"), tax=Decimal("18.00"),
+                                        amount=Decimal("23600.00"))
         cn = CreditNote.objects.create(
-            credit_note_number=number, date=date.today(), customer=customer,
+            credit_note_number=number, date=date.today(), customer=customer, original_invoice=inv,
             reason="return", total_amount=stored_total, created_by=self.tenant,
         )
         CreditNoteItem.objects.create(
@@ -24,7 +31,15 @@ class GSTR1CDNRNoteValueTests(FourFixesBase):
         res = self.client.get(f"/api/billing/gst/gstr1-export/?from={today}&to={today}")
         self.assertEqual(res.status_code, 200, getattr(res, "data", res.content))
         data = res.json() if hasattr(res, "json") else res.data
-        return {nt["nt_num"]: nt for c in data["cdnr"] for nt in c["nt"]}
+        notes = {}
+        for c in data["cdnr"]:
+            for nt in c["nt"]:
+                # Portal schema (UAT P1 #12): tax heads live in itms[].itm_det only.
+                flat = dict(nt)
+                for k in ("txval", "camt", "samt", "iamt"):
+                    flat[k] = sum(Decimal(str(i["itm_det"].get(k, 0))) for i in nt["itms"])
+                notes[nt["nt_num"]] = flat
+        return notes
 
     def test_val_includes_tax_even_when_stored_total_is_tax_exclusive(self):
         mh = Customer.objects.create(name="MH Buyer", gstin="27ABCDE1234F1Z5", state="Maharashtra", created_by=self.tenant)

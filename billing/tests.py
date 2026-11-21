@@ -108,7 +108,7 @@ class SalesInvoiceTests(TestCase):
         existing = Customer.objects.create(name="Acme Traders", created_by=self.tenant)
         data = {
             "customer_name": "acme traders",
-            "invoice_number": "INV-LINK-CUST-001",
+            "invoice_number": "INV-LINK-001",
             "invoice_date": "2024-01-01",
             "status": "final",
             "total_amount": "100.00",

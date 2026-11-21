@@ -1,4 +1,5 @@
 from django.urls import path
+from billing import views_rcm
 from .views import (
     purchase_bill_detail, purchase_bill_update_delete,
     sales_invoice_detail, sales_invoice_list_create, sales_invoice_update_delete, purchase_bill_list_create,
@@ -24,6 +25,12 @@ urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
     path('purchase-bills/<uuid:pk>/', purchase_bill_detail, name='purchase_bill_detail'),
     path('purchase-bills/<uuid:pk>/edit/', purchase_bill_update_delete, name='purchase_bill_update_delete'),
+    # RCM documents (Rudra follow-up to UAT P1 #7): self-invoice s.31(3)(f)/Rule 47A; payment vouchers
+    # s.31(3)(g) are created by vendor-payments/ (one per payment entry) and listed here
+    path('purchase-bills/<uuid:pk>/rcm-self-invoice/', views_rcm.rcm_self_invoice_create, name='rcm_self_invoice_create'),
+    path('rcm/self-invoices/', views_rcm.rcm_self_invoice_list, name='rcm_self_invoice_list'),
+    path('rcm/payment-vouchers/', views_rcm.rcm_payment_voucher_list, name='rcm_payment_voucher_list'),
+    path('gst/rcm-ledger-vs-3b/', views_rcm.rcm_ledger_vs_3b_view, name='rcm_ledger_vs_3b'),
     path('vendor-products/', vendor_products, name='vendor_products'),
     path('vendor-payments/unpaid-bills/', vendor_payment_views.unpaid_purchase_bills, name='unpaid_purchase_bills'),
     path('vendor-payments/', vendor_payment_views.vendor_payment_create, name='vendor_payment_create'),
@@ -44,8 +51,11 @@ urlpatterns = [
     path('sales-invoices/<uuid:pk>/edit/', sales_invoice_update_delete, name='sales_invoice_update_delete'),
     path('upload-sales-invoices-csv/', upload_sales_invoices_csv, name='upload_sales_invoices_csv'),
     path('customers/', customer_views.customer_list_create, name='customer_list_create'),
+    path('customers/duplicates/', customer_views.customer_duplicates, name='customer_duplicates'),
+    path('customers/merge/', customer_views.customer_merge, name='customer_merge'),
     path('customers/<uuid:pk>/', customer_views.customer_detail, name='customer_detail'),
     path('customers/<uuid:pk>/edit/', customer_views.customer_update_delete, name='customer_update_delete'),
+    path('customers/<uuid:pk>/ensure-vendor/', customer_views.customer_ensure_vendor, name='customer_ensure_vendor'),
     
     path('vendors/', vendor_views.vendor_list_create, name='vendor_list_create'),
     path('vendors/<uuid:pk>/', vendor_views.vendor_detail, name='vendor_detail'),

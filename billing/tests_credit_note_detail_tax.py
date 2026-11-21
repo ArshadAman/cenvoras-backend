@@ -31,7 +31,11 @@ class CreditNoteDetailTaxTests(FourFixesBase):
     def _gstr1_note(self, number):
         d = date.today().isoformat()
         data = self.client.get(f"/api/billing/gst/gstr1-export/?from={d}&to={d}").json()
-        return {nt["nt_num"]: nt for c in data["cdnr"] for nt in c["nt"]}[number]
+        nt = dict({nt["nt_num"]: nt for c in data["cdnr"] for nt in c["nt"]}[number])
+        # GSTN cdnr schema (UAT P1 #12): tax heads live in itms[].itm_det.
+        for k in ("txval", "camt", "samt", "iamt"):
+            nt[k] = sum(Decimal(str(i["itm_det"].get(k, 0))) for i in nt["itms"])
+        return nt
 
     def test_intra_state_split_and_invoice_number(self):
         inv = self._invoice("INV-007", self.customer)

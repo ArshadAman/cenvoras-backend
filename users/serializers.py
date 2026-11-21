@@ -68,6 +68,45 @@ class QuickSignupSerializer(serializers.ModelSerializer):
         )
         return user
 
+def _validate_gst_status(attrs, instance=None):
+    """UAT P1 #13 rework (Rudra CA): Regular/Composition need a GSTIN; Not registered has none."""
+    from billing.gst_status import REGULAR, COMPOSITION, UNREGISTERED
+    status = attrs.get('gst_status', getattr(instance, 'gst_status', None))
+    country = str(attrs.get('country', getattr(instance, 'country', 'IN')) or 'IN').upper()
+    if not status or country != 'IN':
+        return attrs
+    gstin = str(attrs.get('gstin', getattr(instance, 'gstin', '')) or '').strip()
+    if status in (REGULAR, COMPOSITION) and not gstin:
+        raise serializers.ValidationError({'gstin': 'GSTIN is required for a GST-registered business '
+                                                    '(Regular or Composition).'})
+    if status == UNREGISTERED and gstin:
+        raise serializers.ValidationError({'gst_status': 'A business that is not registered has no GSTIN. '
+                                                         'Remove the GSTIN or choose Regular / Composition.'})
+    return attrs
+
+
+def _require_company_identity(attrs, instance=None, require_all=False):
+    """
+    UAT P1 item 13 (Rudra CA): a company can't be saved with a blank legal (business) name or
+    address. Values are trimmed; on a partial update only the fields sent are checked unless
+    require_all is set.
+    """
+    errors = {}
+    for field, label in (('business_name', 'Business (legal) name'), ('business_address', 'Business address')):
+        if field in attrs:
+            value = (attrs.get(field) or '').strip()
+            if not value:
+                errors[field] = f'{label} is required.'
+            else:
+                attrs[field] = value
+        elif require_all and not (getattr(instance, field, '') or '').strip():
+            errors[field] = f'{label} is required.'
+    if errors:
+        raise serializers.ValidationError(errors)
+    return attrs
+
+
+
 class ProfileSetupSerializer(serializers.ModelSerializer):
     """Complete profile setup - done inside the app"""
     
@@ -77,7 +116,7 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'first_name', 'last_name', 'business_name', 'business_address', 
             'gstin', 'pan_number', 'gem_id', 'dl_number', 'phone', 'state', 'city',
             'country', 'trn', 'bank_name', 'bank_account_number', 'bank_ifsc_code',
-            'bank_branch', 'bank_upi_id', 'bank_qr_code'
+            'bank_branch', 'bank_upi_id', 'bank_qr_code', 'gst_status'
         )
         extra_kwargs = {
             'business_name': {'required': True},
@@ -97,8 +136,20 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
             'bank_upi_id': {'required': False, 'allow_blank': True, 'allow_null': True},
             'bank_qr_code': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
+
     
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        _validate_gst_status(attrs, self.instance)
+        return _require_company_identity(attrs, self.instance, require_all=True)
+
     def update(self, instance, validated_data):
+        if not validated_data.get('gst_status') and not instance.gst_status \
+                and str(validated_data.get('country', instance.country) or 'IN').upper() == 'IN':
+            gstin = str(validated_data.get('gstin', instance.gstin) or '').strip()
+            validated_data['gst_status'] = 'regular' if gstin else 'unregistered'
+        if str(validated_data.get('country', instance.country) or 'IN').upper() == 'IN':
+            validated_data['gst_status_confirmed'] = True   # Rudra: setup completion confirms it
         instance = super().update(instance, validated_data)
         # Check if profile should be marked as completed
         instance.mark_profile_completed()
@@ -106,9 +157,52 @@ class ProfileSetupSerializer(serializers.ModelSerializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """Full user profile for display"""
+    def get_gstin_warning(self, obj):
+        # Rudra (#212): flag a saved company GSTIN that fails the check (still accepted).
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
+    # UAT P1 #13 rework (Rudra CA): GST status and what it drives (see billing/gst_status.py).
+    def get_gst_status(self, obj):
+        from billing import gst_status as g
+        return g.gst_status(obj)
+
+    def get_gst_status_needs_confirmation(self, obj):
+        # Rudra (#216): admin banner "Confirm your GST status (Regular / Composition / Not registered)".
+        from billing import gst_status as g
+        return g.needs_confirmation(obj)
+
+    def get_gst_status_set(self, obj):
+        from billing import gst_status as g
+        return g.stored_gst_status(obj) is not None
+
+    def get_document_title(self, obj):
+        from billing import gst_status as g
+        return g.document_title(obj)
+
+    def get_document_declaration(self, obj):
+        from billing import gst_status as g
+        return g.document_declaration(obj)
+
+    def get_tax_locked(self, obj):
+        from billing import gst_status as g
+        return g.tax_locked(obj)
+
+    def get_gst_returns_available(self, obj):
+        from billing import gst_status as g
+        return g.gst_returns_available(obj)
+
     is_trial_active = serializers.SerializerMethodField()
     profile_completed = serializers.SerializerMethodField()
     can_generate_gst_invoice = serializers.SerializerMethodField()
+    gstin_warning = serializers.SerializerMethodField()
+    gst_status = serializers.SerializerMethodField()
+    gst_status_set = serializers.SerializerMethodField()
+    gst_status_needs_confirmation = serializers.SerializerMethodField()
+    document_title = serializers.SerializerMethodField()
+    document_declaration = serializers.SerializerMethodField()
+    tax_locked = serializers.SerializerMethodField()
+    gst_returns_available = serializers.SerializerMethodField()
     parent_business_name = serializers.CharField(source='parent.business_name', read_only=True)
     plan_name = serializers.SerializerMethodField()
     plan_code = serializers.SerializerMethodField()
@@ -153,12 +247,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'business_name', 'invoice_prefix', 'quotation_prefix', 'delivery_challan_prefix', 'sales_order_prefix', 'business_address', 'gstin', 'business_type', 'pan_number', 'gem_id', 'dl_number', 
             'state', 'city', 'subscription_status',
             'subscription_tier', 'permissions',
-            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 
+            'trial_ends_at', 'profile_completed', 'can_generate_gst_invoice', 'gstin_warning',
+            'gst_status', 'gst_status_set', 'gst_status_needs_confirmation', 'document_title', 'document_declaration', 'tax_locked',
+            'gst_returns_available',
             'is_trial_active', 'date_joined', 'last_login_at', 'role',
             'parent_business_name', 'plan_name', 'plan_code', 'max_managers',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections',
+            'auto_round_off',
         )
         read_only_fields = (
             'id', 'username', 'subscription_status', 'subscription_tier', 'permissions', 'trial_ends_at', 
@@ -199,7 +296,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'new_password', 'confirm_new_password',
             'country', 'currency', 'trn', 'is_vat_registered',
             'bank_name', 'bank_account_number', 'bank_ifsc_code', 'bank_branch',
-            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections'
+            'bank_upi_id', 'bank_qr_code', 'bank_accounts', 'default_bank_account_sections', 'default_preview_template_sections',
+            'auto_round_off', 'gst_status',
         ]
         extra_kwargs = {
             'phone': {'required': False},
@@ -276,6 +374,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     
     def validate(self, attrs):
         user = self.instance
+        _require_company_identity(attrs, user)
+        _validate_gst_status(attrs, user)
         
         # Password change validation
         new_password = attrs.get('new_password')
@@ -339,7 +439,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         if gstin:
             from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG, validate_gstin_state_match
             try:
-                gstin = validate_gstin_format(gstin)
+                gstin = validate_gstin_format(gstin, pan=attrs.get('pan_number') or None,
+                                              legacy=getattr(user, 'gstin', None))
                 attrs['gstin'] = gstin
             except ValueError as exc:
                 raise serializers.ValidationError({
@@ -355,6 +456,9 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return attrs
     
     def update(self, instance, validated_data):
+        # Rudra (#216): an admin saving the GST status confirms it (dismisses the banner).
+        if validated_data.get('gst_status'):
+            validated_data['gst_status_confirmed'] = True
         # Remove password fields from validated_data for normal update
         current_password = validated_data.pop('current_password', None)
         new_password = validated_data.pop('new_password', None)
@@ -409,11 +513,39 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 class TeamMemberSerializer(serializers.ModelSerializer):
     """Admin-only serializer for spawning Team Members (Managers, Salesmen)"""
     password = serializers.CharField(write_only=True, min_length=8, required=False, allow_blank=True)
+    display_name = serializers.CharField(read_only=True, required=False)
+    is_portal_employee = serializers.SerializerMethodField()
     
     class Meta:
         model = User
-        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined')
-        read_only_fields = ('id', 'date_joined')
+        fields = ('id', 'email', 'first_name', 'last_name', 'phone', 'role', 'permissions', 'password', 'date_joined', 'display_name', 'is_portal_employee')
+        read_only_fields = ('id', 'date_joined', 'display_name', 'is_portal_employee')
+
+    def get_is_portal_employee(self, obj):
+        return (obj.role or '').lower() == 'employee' or obj.employee_profile.exists()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        is_portal = (instance.role or '').lower() == 'employee' or instance.employee_profile.exists()
+        if is_portal:
+            data['role'] = 'employee'
+            data['is_portal_employee'] = True
+        first_name = (data.get('first_name') or '').strip()
+        last_name = (data.get('last_name') or '').strip()
+        display_name = f"{first_name} {last_name}".strip()
+        if not display_name:
+            emp = getattr(instance, 'employee_profile', None)
+            if emp is not None:
+                emp_obj = emp.first() if hasattr(emp, 'first') else emp
+                if emp_obj and getattr(emp_obj, 'full_name', None):
+                    display_name = emp_obj.full_name.strip()
+                    parts = display_name.split(maxsplit=1)
+                    if not first_name:
+                        data['first_name'] = parts[0]
+                    if not last_name and len(parts) > 1:
+                        data['last_name'] = parts[1]
+        data['display_name'] = display_name or instance.email
+        return data
         
     def validate_email(self, value):
         qs = User.objects.filter(email=value)
@@ -444,6 +576,10 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         except Exception:
             pass
 
+    # UAT P1 #11: least-access default. A team member created without an
+    # explicit role becomes a self-service Employee, never Admin/Manager.
+    DEFAULT_TEAM_ROLE = 'employee'
+
     def create(self, validated_data):
         admin_user = self.context['request'].user
         
@@ -451,6 +587,8 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         if admin_user.role != 'admin':
             raise serializers.ValidationError("Only Admins can spawn team members.")
             
+        if not validated_data.get('role') or 'role' not in self.initial_data:
+            validated_data['role'] = self.DEFAULT_TEAM_ROLE
         validated_data['username'] = validated_data['email']
         password = validated_data.pop('password', None)
         if not password:
@@ -465,12 +603,23 @@ class TeamMemberSerializer(serializers.ModelSerializer):
         )
         member.set_password(password)
         member.save()
+        self._write_team_audit('UPDATE', member, {'event': 'role_change',
+            'field': 'role', 'old': None, 'new': member.role,
+        })
         # AuditLog CREATE is written by the global post_save signal — avoid double-logging here.
         return member
 
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
+        old_role = instance.role
+        if 'role' in validated_data and validated_data['role'] != old_role:
+            instance._role_change_audited = True  # generic signal skips the role field
         instance = super().update(instance, validated_data)
+        if 'role' in validated_data and validated_data['role'] != old_role:
+            # UAT P1 #11: every role change is audit-logged (who, when, old, new).
+            self._write_team_audit('UPDATE', instance, {'event': 'role_change',
+                'field': 'role', 'old': old_role, 'new': instance.role,
+            })
         if password:
             instance.set_password(password)
             instance.save()

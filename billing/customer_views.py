@@ -93,7 +93,7 @@ def customer_list_create(request):
         ordering = request.query_params.get('ordering', '-created_at')
         
         # Filter customers for the authenticated user
-        customers = Customer.objects.filter(created_by=tenant)
+        customers = Customer.objects.filter(created_by=tenant).select_related('linked_vendor')
         
         # Apply search filter
         if search:
@@ -106,6 +106,12 @@ def customer_list_create(request):
         if ordering:
             customers = customers.order_by(ordering)
         
+        if request.query_params.get('all', '').lower() in ['1', 'true', 'yes']:
+            customers_list = list(customers)
+            recompute_customer_balances_for_customers(customers_list, tenant)
+            serializer = CustomerSerializer(customers_list, many=True)
+            return Response(serializer.data)
+
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(customers, request)
         if page is not None:
@@ -254,3 +260,74 @@ def customer_update_delete(request, pk):
                 "success": False,
                 "message": "Failed to delete customer. Please try again later."
             }, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customer_ensure_vendor(request, pk):
+    """Create or reuse the vendor counterpart so a customer can be billed as a vendor."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        customer = Customer.objects.get(pk=pk, created_by=tenant)
+    except Customer.DoesNotExist:
+        return Response({"success": False, "message": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    from billing.party_link import ensure_vendor_for_customer
+    from .serializers import VendorSerializer
+    vendor = ensure_vendor_for_customer(customer, tenant)
+    return Response({
+        "success": True,
+        "vendor": VendorSerializer(vendor).data,
+        "customer_id": str(customer.id),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_duplicates(request):
+    """List duplicate customer clusters (matching GSTIN or name) for current tenant."""
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    from .services_customer_merge import find_duplicate_customers
+    clusters = find_duplicate_customers(tenant)
+    return Response({
+        "success": True,
+        "count": len(clusters),
+        "clusters": clusters
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customer_merge(request):
+    """
+    Merge duplicate customer into primary customer.
+    Body: { "primary_id": "...", "duplicate_id": "..." }
+    """
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    primary_id = request.data.get('primary_id') or request.data.get('primary_customer_id')
+    duplicate_id = request.data.get('duplicate_id') or request.data.get('duplicate_customer_id')
+
+    if not primary_id or not duplicate_id:
+        return Response({
+            "success": False,
+            "message": "Both primary_id and duplicate_id are required."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    from .services_customer_merge import merge_customers
+    try:
+        result = merge_customers(tenant, primary_id, duplicate_id, actor=request.user)
+        return Response({
+            "success": True,
+            "message": "Customers merged successfully.",
+            "data": result
+        }, status=status.HTTP_200_OK)
+    except ValueError as e:
+        return Response({
+            "success": False,
+            "message": str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({
+            "success": False,
+            "message": f"An error occurred while merging customers: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

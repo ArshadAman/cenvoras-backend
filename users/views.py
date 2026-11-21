@@ -337,6 +337,23 @@ def view_profile(request):
     tenant = user.active_tenant
     user.last_login_at = timezone.now()
     user.save(update_fields=['last_login_at'])
+
+    if user.role == 'employee':
+        from hr.models import Employee
+        emp = Employee.objects.filter(tenant=tenant, user=user).first()
+        if emp:
+            needs_save = False
+            if not user.first_name and emp.full_name:
+                parts = emp.full_name.strip().split(' ', 1)
+                user.first_name = parts[0]
+                if len(parts) > 1 and not user.last_name:
+                    user.last_name = parts[1]
+                needs_save = True
+            if not user.phone and emp.personal_phone:
+                user.phone = emp.personal_phone
+                needs_save = True
+            if needs_save:
+                user.save(update_fields=['first_name', 'last_name', 'phone'])
     
     # Calculate profile completion percentage (never 100% without business address)
     total_fields = 7  # email, phone, business_name, first_name, last_name, business_address, gstin
@@ -506,6 +523,20 @@ def update_profile(request):
         # Check for password change
         if 'new_password' in request.data:
             changes_made.append('password')
+
+        if updated_user.role == 'employee':
+            from hr.models import Employee
+            emp = Employee.objects.filter(tenant=updated_user.active_tenant, user=updated_user).first()
+            if emp:
+                emp_updated = False
+                if 'phone' in changes_made:
+                    emp.personal_phone = updated_user.phone
+                    emp_updated = True
+                if 'first_name' in changes_made or 'last_name' in changes_made:
+                    emp.full_name = f"{updated_user.first_name} {updated_user.last_name}".strip()
+                    emp_updated = True
+                if emp_updated:
+                    emp.save(update_fields=['personal_phone', 'full_name'])
         
         # Determine new capabilities
         can_create_basic_invoices = bool(updated_user.business_name)
@@ -821,15 +852,17 @@ class TeamViewSet(viewsets.ModelViewSet):
         User = get_user_model()
         tenant = self.request.user.active_tenant
 
-        max_members = get_effective_limit(tenant, 'max_team_members', 0)
-        current_members = get_user_model().objects.filter(parent=tenant).exclude(id=tenant.id).count()
-        reason = get_limit_exceeded_reason(tenant, 'team')
-        if reason:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(reason)
-        if max_members >= 0 and current_members >= max_members:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(f"Your current plan limits you to {max_members} team members. Upgrade for more.")
+        target_role = (serializer.validated_data.get('role') or 'employee').lower()
+        if target_role != 'employee':
+            max_members = get_effective_limit(tenant, 'max_team_members', 0)
+            current_members = get_user_model().objects.filter(parent=tenant).exclude(id=tenant.id).exclude(role__iexact='employee').exclude(employee_profile__isnull=False).count()
+            reason = get_limit_exceeded_reason(tenant, 'team')
+            if reason:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(reason)
+            if max_members >= 0 and current_members >= max_members:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(f"Your current plan limits you to {max_members} staff members. Upgrade for more.")
             
         serializer.save()
 

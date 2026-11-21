@@ -50,13 +50,9 @@ def hsn_summary_report(request):
     hsn_dict = {}
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
 
         seller_state_code = get_seller_state_code(tenant)
         for inv in invoices:
@@ -98,6 +94,7 @@ def hsn_summary_report(request):
             created_by=tenant,
             original_invoice__isnull=False,
             original_invoice__status='final',
+            gst_time_barred=False,  # time-barred CNs never enter GST tables (#191)
         ).select_related('original_invoice').prefetch_related('items__product')
         if from_date:
             credit_notes = credit_notes.filter(date__gte=from_date)
@@ -245,13 +242,9 @@ def tax_register(request):
     }
 
     if report_type == 'sales':
-        invoices = SalesInvoice.objects.filter(
-            created_by=tenant, status='final'
-        ).select_related('customer').prefetch_related('items__product')
-        if from_date:
-            invoices = invoices.filter(invoice_date__gte=from_date)
-        if to_date:
-            invoices = invoices.filter(invoice_date__lte=to_date)
+        from billing.sales_metrics import sales_register_credit_notes, sales_register_invoices
+        invoices = sales_register_invoices(tenant, from_date, to_date
+                                           ).select_related('customer').prefetch_related('items__product')
         invoices = invoices.order_by('-invoice_date', '-created_at')
 
         for inv in invoices:
@@ -299,15 +292,8 @@ def tax_register(request):
             totals['total_tax'] += inv_tax
             totals['total'] += inv.total_amount
 
-        credit_notes = CreditNote.objects.filter(
-            created_by=tenant,
-            original_invoice__isnull=False,
-            original_invoice__status='final',
-        ).select_related('customer', 'original_invoice').prefetch_related('items')
-        if from_date:
-            credit_notes = credit_notes.filter(date__gte=from_date)
-        if to_date:
-            credit_notes = credit_notes.filter(date__lte=to_date)
+        credit_notes = sales_register_credit_notes(tenant, from_date, to_date
+                                                   ).select_related('customer', 'original_invoice').prefetch_related('items')
         for cn in credit_notes.order_by('-date', '-created_at'):
             brk = credit_note_tax_breakup(cn, seller_state_code)
             gstin = (cn.customer.gstin.strip().upper() if cn.customer and cn.customer.gstin else '')
@@ -509,13 +495,18 @@ def gstr1_json_export(request):
     Generate GSTR-1 compliant JSON for a given period.
     Query Params: ?from=YYYY-MM-DD&to=YYYY-MM-DD
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
     if not from_date or not to_date:
         return Response({'error': 'Both from and to dates are required'}, status=400)
 
-    from billing.gstr1_compute import compute_gstr1, row_label
+    from billing.gstr1_compute import compute_gstr1, row_label, cdnr_for_portal
     from billing.advances import group_for_portal
     data = compute_gstr1(tenant, from_date, to_date)
     payload = {
@@ -525,7 +516,7 @@ def gstr1_json_export(request):
         # R21: rows floored to 0 by CN carry-forward are not filed (kept on screen via _cenvora).
         'b2cs': [r for r in data['b2cs'] if any(r[k] for k in ('txval', 'camt', 'samt', 'iamt'))],
         'b2cl': data['b2cl'],
-        'cdnr': data['cdnr'],
+        'cdnr': cdnr_for_portal(data['cdnr']),
         'cdnur': data['cdnur'],
         'hsn': {
             'data': data['hsn_data'],
@@ -581,6 +572,11 @@ def gstr1_advances_csv(request):
     ?from=&to=&sheet=at|atadj. VERIFY: column headers follow the offline-tool Excel template as we
     understand it; the official field tables could not be read. Amounts are TAXABLE value (Rudra CA).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     import csv
     from django.http import HttpResponse
     tenant = getattr(request.user, 'active_tenant', request.user)
@@ -653,6 +649,11 @@ def gstr3b_summary(request):
     3.1(a) taxable outward only; 3.1(b) zero-rated; 3.1(c) nil/exempt; 3.1(e) non-GST.
     Filing 4C = max(4A-4B, 0). Excess reversal adds tax only to 3.1(a).
     """
+    # UAT P1 #13 rework (Rudra CA): GST returns only for Regular companies.
+    from billing.gst_status import gst_returns_available, returns_hidden_message
+    if not gst_returns_available(request.user):
+        return Response({'error': returns_hidden_message(request.user), 'gst_returns_available': False},
+                        status=status.HTTP_403_FORBIDDEN)
     tenant = getattr(request.user, 'active_tenant', request.user)
     from_date = request.query_params.get('from')
     to_date = request.query_params.get('to')
@@ -684,19 +685,35 @@ def gstr3b_summary(request):
             return qs.filter(credit__gt=0).aggregate(s=Sum('credit'))['s'] or Decimal('0.00')
         return Decimal('0.00')
 
-    itc_igst = _sum_input_gst('1303', debit=True, purchase_bill=True)
-    itc_cgst = _sum_input_gst('1301', debit=True, purchase_bill=True)
-    itc_sgst = _sum_input_gst('1302', debit=True, purchase_bill=True)
+    # UAT P1 items 6/7 (Rudra CA): 4A(5) only from bills of registered vendors and not blocked
+    # u/s 17(5); RCM ITC goes to 4A(3) and RCM tax to 3.1(d) (paid in cash, not set off).
+    from billing.itc import itc_summary
+    _itc = itc_summary(tenant, from_date, to_date)
+    # Rudra (#214): 4A is GROSS (incl. s.17(5) blocked), reversed in 4B(1); PoS / s.16(4) lost ITC
+    # is shown only in 4D(2). Net ITC (4C) = 4A - 4B is unchanged: itc_normal/itc_rcm are net.
+    _4a_n, _4a_r, _4b1, _4d2 = _itc['itc_4a_normal'], _itc['itc_4a_rcm'], _itc['blocked_split'], _itc['lost_4d2']
+    itc_igst = _itc['itc_normal']['igst']
+    itc_cgst = _itc['itc_normal']['cgst']
+    itc_sgst = _itc['itc_normal']['sgst']
+    rcm_itc_igst = _itc['itc_rcm']['igst']
+    rcm_itc_cgst = _itc['itc_rcm']['cgst']
+    rcm_itc_sgst = _itc['itc_rcm']['sgst']
+    rcm_igst = _itc['rcm_payable']['igst']
+    rcm_cgst = _itc['rcm_payable']['cgst']
+    rcm_sgst = _itc['rcm_payable']['sgst']
     rev_igst = _sum_input_gst('1303', credit=True, debit_note=True)
     rev_cgst = _sum_input_gst('1301', credit=True, debit_note=True)
     rev_sgst = _sum_input_gst('1302', credit=True, debit_note=True)
 
-    excess_igst = max(rev_igst - itc_igst, Decimal('0.00'))
-    excess_cgst = max(rev_cgst - itc_cgst, Decimal('0.00'))
-    excess_sgst = max(rev_sgst - itc_sgst, Decimal('0.00'))
-    net_itc_igst = max(itc_igst - rev_igst, Decimal('0.00'))
-    net_itc_cgst = max(itc_cgst - rev_cgst, Decimal('0.00'))
-    net_itc_sgst = max(itc_sgst - rev_sgst, Decimal('0.00'))
+    _all_itc_igst = itc_igst + rcm_itc_igst
+    _all_itc_cgst = itc_cgst + rcm_itc_cgst
+    _all_itc_sgst = itc_sgst + rcm_itc_sgst
+    excess_igst = max(rev_igst - _all_itc_igst, Decimal('0.00'))
+    excess_cgst = max(rev_cgst - _all_itc_cgst, Decimal('0.00'))
+    excess_sgst = max(rev_sgst - _all_itc_sgst, Decimal('0.00'))
+    net_itc_igst = max(_all_itc_igst - rev_igst, Decimal('0.00'))
+    net_itc_cgst = max(_all_itc_cgst - rev_cgst, Decimal('0.00'))
+    net_itc_sgst = max(_all_itc_sgst - rev_sgst, Decimal('0.00'))
 
     # Excess reversal adds TAX only to 3.1(a), not taxable value
     outward_taxable = a31['txval']
@@ -732,7 +749,10 @@ def gstr3b_summary(request):
     tot_paid_itc_igst = igst_setoff_igst + cgst_setoff_igst + sgst_setoff_igst
     tot_paid_itc_cgst = igst_setoff_cgst + cgst_setoff_cgst
     tot_paid_itc_sgst = igst_setoff_sgst + sgst_setoff_sgst
-    cash_payable_igst, cash_payable_cgst, cash_payable_sgst = liab_igst, liab_cgst, liab_sgst
+    # RCM tax (3.1(d)) can't be paid from the credit ledger: it is always cash.
+    cash_payable_igst = liab_igst + rcm_igst
+    cash_payable_cgst = liab_cgst + rcm_cgst
+    cash_payable_sgst = liab_sgst + rcm_sgst
     total_cash_payable = cash_payable_igst + cash_payable_cgst + cash_payable_sgst
 
     gstin = g1['gstin']
@@ -753,9 +773,9 @@ def gstr3b_summary(request):
                     f'That extra tax is added to 3.1(a); filing 4C is zero on those heads.'
                 ),
                 'true_4c': {
-                    'iamt': float(itc_igst - rev_igst),
-                    'camt': float(itc_cgst - rev_cgst),
-                    'samt': float(itc_sgst - rev_sgst),
+                    'iamt': float(_all_itc_igst - rev_igst),
+                    'camt': float(_all_itc_cgst - rev_cgst),
+                    'samt': float(_all_itc_sgst - rev_sgst),
                 },
                 'excess_tax_in_3_1_a': {
                     'iamt': float(excess_igst),
@@ -785,7 +805,8 @@ def gstr3b_summary(request):
             },
             'inward_reverse_charge': {
                 'desc': '(d) Inward supplies (liable to reverse charge)',
-                'txval': 0.0, 'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0,
+                'txval': float(_itc['rcm_taxable']), 'iamt': float(rcm_igst), 'camt': float(rcm_cgst),
+                'samt': float(rcm_sgst), 'csamt': 0.0,
             },
             'non_gst_outward': {
                 'desc': '(e) Non-GST outward supplies',
@@ -816,15 +837,21 @@ def gstr3b_summary(request):
         'table_4_itc': {
             'itc_available': {
                 'import_goods': {'iamt': 0.0, 'csamt': 0.0},
-                'import_services': {'iamt': 0.0, 'csamt': 0.0},
-                'inward_reverse_charge': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4A(2): RCM SAC lines on 'overseas' bills (see billing.itc). Same cash-paid RCM ITC,
+                # so it is inside itc_rcm and therefore inside 4C.
+                'import_services': {'iamt': float(_itc['itc_4a_imps']['igst']), 'csamt': 0.0},
+                'inward_reverse_charge': {'iamt': float(_4a_r['igst']), 'camt': float(_4a_r['cgst']),
+                                          'samt': float(_4a_r['sgst']), 'csamt': 0.0},
                 'inward_isd': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
                 'all_other_itc': {
-                    'iamt': float(itc_igst), 'camt': float(itc_cgst), 'samt': float(itc_sgst), 'csamt': 0.0,
+                    'iamt': float(_4a_n['igst']), 'camt': float(_4a_n['cgst']), 'samt': float(_4a_n['sgst']),
+                    'csamt': 0.0,
                 },
             },
             'itc_reversed': {
-                'as_per_rules': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4B(1): Rules 38, 42, 43 and s.17(5). Cenvora fills only the s.17(5) blocked part.
+                'as_per_rules': {'iamt': float(_4b1['igst']), 'camt': float(_4b1['cgst']),
+                                 'samt': float(_4b1['sgst']), 'csamt': 0.0},
                 'others': {
                     'iamt': float(rev_igst), 'camt': float(rev_cgst), 'samt': float(rev_sgst), 'csamt': 0.0,
                 },
@@ -833,9 +860,19 @@ def gstr3b_summary(request):
                 'iamt': float(net_itc_igst), 'camt': float(net_itc_cgst), 'samt': float(net_itc_sgst), 'csamt': 0.0,
             },
             'ineligible_itc': {
-                'as_per_section_17_5': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
-                'others': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4D is FOR INFORMATION ONLY (Rudra, #226): never part of 4C / net ITC. net_itc_* above
+                # is built from itc_normal + itc_rcm - 4B and never reads these rows.
+                # 4D(1): ITC reclaimed that was reversed under 4B(2) in an earlier period. Read-only at 0:
+                # Cenvora does not track reclaims yet. When reclaims are built, 4D(1) is the SAME amount
+                # that is re-added in 4A(5), reported here for information - not an extra amount on top.
+                # Blocked s.17(5) ITC is never here: it is in 4A and reversed in 4B(1).
+                'itc_reclaimed': {'iamt': 0.0, 'camt': 0.0, 'samt': 0.0, 'csamt': 0.0},
+                # 4D(2): ineligible ITC u/s 16(4) and ITC restricted due to PoS rules.
+                'others': {'iamt': float(_4d2['igst']), 'camt': float(_4d2['cgst']),
+                           'samt': float(_4d2['sgst']), 'csamt': 0.0},
             },
+            'mapping_note': ('VERIFY table mapping against current 3B instructions '
+                             '(Notfn 14/2022-CT, Circular 170/02/2022)'),
         },
         'table_5_exempt': {
             'inter_state': 0.0, 'intra_state': 0.0,
@@ -849,7 +886,7 @@ def gstr3b_summary(request):
         },
         'table_6_1_payment': {
             'igst': {
-                'tax_payable': float(outward_igst),
+                'tax_payable': float(outward_igst + rcm_igst),
                 'paid_via_itc': float(tot_paid_itc_igst),
                 'tax_paid_cash': float(cash_payable_igst),
                 'itc_breakup': {
@@ -859,7 +896,7 @@ def gstr3b_summary(request):
                 }
             },
             'cgst': {
-                'tax_payable': float(outward_cgst),
+                'tax_payable': float(outward_cgst + rcm_cgst),
                 'paid_via_itc': float(tot_paid_itc_cgst),
                 'tax_paid_cash': float(cash_payable_cgst),
                 'itc_breakup': {
@@ -868,7 +905,7 @@ def gstr3b_summary(request):
                 }
             },
             'sgst': {
-                'tax_payable': float(outward_sgst),
+                'tax_payable': float(outward_sgst + rcm_sgst),
                 'paid_via_itc': float(tot_paid_itc_sgst),
                 'tax_paid_cash': float(cash_payable_sgst),
                 'itc_breakup': {
@@ -876,7 +913,7 @@ def gstr3b_summary(request):
                     'sgst': float(sgst_setoff_sgst),
                 }
             },
-            'total_tax_payable': float(outward_igst + outward_cgst + outward_sgst),
+            'total_tax_payable': float(outward_igst + outward_cgst + outward_sgst + rcm_igst + rcm_cgst + rcm_sgst),
             'total_net_itc': float(net_itc_igst + net_itc_cgst + net_itc_sgst),
             'total_itc_utilized': float(tot_paid_itc_igst + tot_paid_itc_cgst + tot_paid_itc_sgst),
             'total_tax_paid_cash': float(total_cash_payable),

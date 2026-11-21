@@ -101,7 +101,10 @@ def gather_business_context(user):
         .order_by('name')[:30]
     )
 
-    # Pending payments
+    # Pending payments. UAT P1 item 2: refresh stored balances from the shared ledger formula
+    # (opening + invoices + DNs - receipts - CNs) so the AI matches the ledger and Receivables.
+    from billing.balance_sync import recompute_customer_balances_for_customers
+    recompute_customer_balances_for_customers(Customer.objects.filter(created_by=tenant), tenant)
     pending = list(
         Customer.objects.filter(created_by=tenant, current_balance__gt=0)
         .order_by('-current_balance')
@@ -367,6 +370,12 @@ class AIChatView(APIView):
                 "answer": "Hi! I'm **Cenvora AI** powered by Gemini. Ask me anything about your business!\n\n"
                           "Try: *\"What is my top product?\"* or *\"How are sales today?\"*"
             })
+
+        # UAT P1 item 3: "October sales" etc. -> deterministic month figure (IST, taxable, net of CNs).
+        from billing.sales_metrics import answer_month_sales_question
+        month_answer = answer_month_sales_question(question, getattr(user, 'active_tenant', user))
+        if month_answer:
+            return Response({"answer": month_answer, "question": question, "mode": "sales_engine", "action": None})
 
         # Gather live data
         context = gather_business_context(user)

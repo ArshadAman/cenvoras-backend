@@ -1,6 +1,7 @@
 """
 Payroll Exceptions Engine — Identifies pre-approval anomalies and integrity issues.
 """
+from hr.models import LATEST_ASSIGNMENT_ORDER  # same tie-break as the Employees list
 import datetime
 import calendar
 from decimal import Decimal
@@ -54,8 +55,25 @@ def scan_payroll_exceptions(payroll_run_id):
                 )
             )
 
-        # 2. Missing PAN (Warning: subject to 20% higher TDS deduction under Sec 206AA)
-        if not emp.pan_number:
+        # 2. PAN. UAT P1 item 8 (Rudra CA): a payroll with TDS > 0 needs a valid PAN, otherwise
+        #    s.206AA's higher 20% rate applies -> critical (blocks approval) until the PAN is added.
+        from hr.validators import is_valid_pan
+        from hr.models import Payslip
+        _tds = (Payslip.objects.filter(payroll_run=run, employee=emp).values_list('tds', flat=True).first()
+                or Decimal('0'))
+        if Decimal(str(_tds)) > 0 and not is_valid_pan(emp.pan_number, individual=True):
+            exceptions_to_create.append(
+                PayrollException(
+                    tenant=tenant,
+                    payroll_run=run,
+                    employee=emp,
+                    severity='critical',
+                    code='PAN_REQUIRED_FOR_TDS',
+                    message=(f"TDS of ₹{Decimal(str(_tds)):,.2f} is due but the employee has no valid PAN. "
+                             "Add the PAN before approving (without it s.206AA's 20% rate applies)."),
+                )
+            )
+        elif not emp.pan_number:
             exceptions_to_create.append(
                 PayrollException(
                     tenant=tenant,
@@ -71,7 +89,7 @@ def scan_payroll_exceptions(payroll_run_id):
         assignment = EmployeeSalaryAssignment.objects.filter(
             employee=emp,
             effective_from__lte=end_date,
-        ).order_by('-effective_from').first()
+        ).order_by(*LATEST_ASSIGNMENT_ORDER).first()
 
         if not assignment:
             exceptions_to_create.append(
@@ -167,6 +185,19 @@ def scan_payroll_exceptions(payroll_run_id):
                 message=f"Computed net salary is negative (₹{ps.net_salary}). Deductions exceed total gross earnings.",
             )
         )
+
+    # 9. Rudra CA: salary components exceed monthly CTC and scaling not confirmed → blocks approval.
+    from hr.services.payroll_engine import VERIFY_SALARY_STRUCTURE
+    for ps in Payslip.objects.filter(payroll_run=run).select_related('employee'):
+        flag = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)
+        if flag:
+            exceptions_to_create.append(PayrollException(
+                tenant=tenant, payroll_run=run, employee=ps.employee, severity='critical',
+                code='SALARY_EXCEEDS_CTC',
+                message=(f"{VERIFY_SALARY_STRUCTURE}: salary components exceed the monthly CTC "
+                         f"(₹{flag.get('monthly_ctc')}). Fix the salary structure and recalculate, or confirm "
+                         f"the scaled amounts (admin, with a reason)."),
+            ))
 
     if exceptions_to_create:
         PayrollException.objects.bulk_create(exceptions_to_create)

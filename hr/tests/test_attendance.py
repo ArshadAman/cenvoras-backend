@@ -61,7 +61,7 @@ class AttendanceAPITests(APITestCase):
         self.bulk_url = reverse('bulk-attendance')
 
     def test_upsert_logic_prevents_duplicates(self):
-        """Test duplicate (employee, date) results in update, not duplicate record."""
+        """Test duplicate (employee, date) requires overwrite confirmation."""
         self.client.force_authenticate(user=self.tenant)
         
         # Initial creation
@@ -74,17 +74,35 @@ class AttendanceAPITests(APITestCase):
         self.assertEqual(res_create.status_code, status.HTTP_201_CREATED)
         self.assertEqual(AttendanceRecord.objects.filter(employee=self.emp1, date='2023-10-01').count(), 1)
         
-        # Upsert (update existing)
+        # Duplicate without overwrite is rejected with 400
         payload['status'] = 'absent'
+        res_duplicate = self.client.post(self.list_url, payload)
+        self.assertEqual(res_duplicate.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Confirm overwrite to replace', str(res_duplicate.data))
+        
+        # Overwrite=True updates existing
+        payload['overwrite'] = True
         res_update = self.client.post(self.list_url, payload)
-        if res_update.status_code != 200:
-            print(res_update.data)
         self.assertEqual(res_update.status_code, status.HTTP_200_OK)
         
         # Verify no duplicate was created and status is updated
         records = AttendanceRecord.objects.filter(employee=self.emp1, date='2023-10-01')
         self.assertEqual(records.count(), 1)
         self.assertEqual(records.first().status, 'absent')
+
+    def test_future_date_attendance_rejected(self):
+        """Medium 10: Attendance cannot be marked for future dates."""
+        self.client.force_authenticate(user=self.tenant)
+        from billing.advances import today_ist
+        future_date = (today_ist() + datetime.timedelta(days=5)).isoformat()
+        payload = {
+            'employee': self.emp1.id,
+            'date': future_date,
+            'status': 'present'
+        }
+        res = self.client.post(self.list_url, payload)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Attendance cannot be marked for future dates', str(res.data))
 
     def test_bulk_endpoint_transaction(self):
         """Test bulk endpoint processes all records in one transaction."""

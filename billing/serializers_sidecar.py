@@ -1,3 +1,4 @@
+from billing.uqc import UQCQuantityMixin
 from datetime import date
 from decimal import Decimal
 from uuid import UUID
@@ -28,6 +29,103 @@ def _raise_number_conflict(exc):
     error.status_code = 409
     raise error
 
+
+def resolve_or_create_customer(user, customer_name, customer_email=None, customer_phone=None,
+                               customer_address=None, customer_gstin=None, place_of_supply=None):
+    """
+    Resolves an existing Customer by GSTIN -> Email -> Name (for this tenant),
+    updating any newly provided contact/address fields.
+    If not found, creates a new Customer globally and ensures PartyMeta exists.
+    """
+    from billing.models import Customer
+    from billing.models_sidecar import PartyMeta
+    from billing.serializers import normalize_indian_state_choice
+
+    customer_name = (customer_name or '').strip()
+    customer_email = (customer_email or '').strip()
+    customer_phone = (customer_phone or '').strip()
+    customer_address = (customer_address or '').strip()
+    customer_gstin = (customer_gstin or '').strip().upper()
+
+    if not customer_name and not customer_gstin:
+        return None
+
+    customer = None
+    # 1. Match by GSTIN first if provided
+    if customer_gstin:
+        customer = Customer.objects.filter(gstin__iexact=customer_gstin, created_by=user).first()
+
+    # 2. Match by email second if provided
+    if not customer and customer_email:
+        customer = Customer.objects.filter(email__iexact=customer_email, created_by=user).first()
+
+    # 3. Match by name third
+    if not customer and customer_name:
+        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
+
+    if customer:
+        update_fields = []
+        if customer_name and customer.name != customer_name:
+            customer.name = customer_name
+            update_fields.append('name')
+        if customer_address and not customer.address:
+            customer.address = customer_address
+            update_fields.append('address')
+        if customer_gstin and not customer.gstin:
+            customer.gstin = customer_gstin
+            update_fields.append('gstin')
+        if customer_phone and not customer.phone:
+            customer.phone = customer_phone
+            update_fields.append('phone')
+        if customer_email and not customer.email:
+            customer.email = customer_email
+            update_fields.append('email')
+        if not customer.state:
+            st = None
+            if customer_gstin and len(customer_gstin) >= 2:
+                st = normalize_indian_state_choice(customer_gstin[:2])
+            elif place_of_supply:
+                st = normalize_indian_state_choice(place_of_supply)
+            if st:
+                customer.state = st
+                update_fields.append('state')
+        if update_fields:
+            customer.save(update_fields=update_fields)
+        PartyMeta.objects.get_or_create(customer=customer)
+        return customer
+
+    # Not found -> Create global Customer record
+    derived_state = None
+    if customer_gstin and len(customer_gstin) >= 2:
+        derived_state = normalize_indian_state_choice(customer_gstin[:2])
+    elif place_of_supply:
+        derived_state = normalize_indian_state_choice(place_of_supply)
+
+    customer = Customer.objects.create(
+        name=customer_name or customer_gstin,
+        email=customer_email or None,
+        phone=customer_phone or None,
+        address=customer_address or None,
+        gstin=customer_gstin or None,
+        state=derived_state,
+        created_by=user,
+    )
+    PartyMeta.objects.get_or_create(customer=customer)
+    return customer
+
+
+
+def _legacy_customer_gstins(serializer):
+    """GSTINs already on record for this document/customer (accepted on format alone, item 14)."""
+    from billing.models import Customer
+    legacy = [getattr(serializer.instance, 'customer_gstin', None)]
+    cid = (getattr(serializer, 'initial_data', None) or {}).get('customer')
+    if cid:
+        try:
+            legacy += list(Customer.objects.filter(pk=cid).values_list('gstin', flat=True)[:1])
+        except Exception:
+            pass
+    return legacy
 
 class TransactionMetaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -79,7 +177,7 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
 
         return super().update(instance, validated_data)
 
-class SalesOrderItemSerializer(serializers.ModelSerializer):
+class SalesOrderItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -89,9 +187,9 @@ class SalesOrderItemSerializer(serializers.ModelSerializer):
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     discount = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
     tax = serializers.DecimalField(required=False, default=0, max_digits=8, decimal_places=2)
-    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
-    dispatched_quantity = serializers.IntegerField(read_only=True)
-    pending_quantity = serializers.IntegerField(read_only=True)
+    free_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, required=False, default=0)
+    dispatched_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, read_only=True)
+    pending_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, read_only=True)
     fulfillment_status = serializers.SerializerMethodField(read_only=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     source_item_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -278,60 +376,32 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         customer_name = (attrs.get('customer_name') or '').strip()
-        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
-        customer_email = attrs.get('customer_email') or ''
-        customer = None
-        if customer_email:
-            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
-        if not customer and customer_name:
-            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if customer:
-            return attrs
-        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
-            return attrs
-        raise serializers.ValidationError({
-            'customer_name': 'Save this customer first before creating a sales order.'
-        })
+        customer_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not customer_name and not customer_gstin and not attrs.get('customer') and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
+        return attrs
 
     def _resolve_customer(self, validated_data):
-        """Find an existing Customer from typed document fields. Do not create one."""
-        from .models import Customer
+        """Resolves existing Customer (GSTIN -> Email -> Name) or creates a global record."""
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None) or ''
         customer_phone = validated_data.pop('customer_phone', None) or ''
         customer_address = validated_data.get('customer_address') or ''
         customer_gstin = validated_data.get('customer_gstin') or ''
+        place_of_supply = validated_data.get('place_of_supply')
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
 
-        if not customer_name:
-            return None
-
-        customer = None
-        if customer_email:
-            customer = Customer.objects.filter(email=customer_email, created_by=user).first()
-        if not customer:
-            customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if not customer:
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before creating a sales order.'
-            })
-
-        update_fields = []
-        if customer_address and not customer.address:
-            customer.address = customer_address
-            update_fields.append('address')
-        if customer_gstin and not customer.gstin:
-            customer.gstin = customer_gstin
-            update_fields.append('gstin')
-        if customer_phone and not customer.phone:
-            customer.phone = customer_phone
-            update_fields.append('phone')
-        if customer_email and not customer.email:
-            customer.email = customer_email
-            update_fields.append('email')
-        if update_fields:
-            customer.save(update_fields=update_fields)
-        return customer
+        return resolve_or_create_customer(
+            user=user,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            customer_gstin=customer_gstin,
+            place_of_supply=place_of_supply,
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -369,6 +439,23 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             item_data.pop('id', None)
             item_data['sort_order'] = i
             SalesOrderItem.objects.create(order=order, **item_data)
+
+        if items_data:
+            from billing.sync_service import DocumentSyncService
+            from billing.round_off import compute_round_off
+            total = sum(
+                (
+                    DocumentSyncService.calculate_line_gross(
+                        item.quantity, item.price, item.discount, item.tax
+                    )
+                    for item in order.items.all()
+                    if getattr(item, 'row_type', 'item') != 'note'
+                ),
+                Decimal('0.00'),
+            )
+            existing_ro = Decimal(str(order.round_off or 0))
+            order.total_amount, order.round_off = compute_round_off(total, apply=(existing_ro != 0))
+            order.save(update_fields=['total_amount', 'round_off'])
             
         return order
 
@@ -418,7 +505,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
 
         return instance
 
-class DeliveryChallanItemSerializer(serializers.ModelSerializer):
+class DeliveryChallanItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -575,26 +662,19 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
     def validate_customer_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=_legacy_customer_gstins(self)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
     def validate(self, attrs):
         customer = attrs.get('customer')
         cust_name = (attrs.get('customer_name') or '').strip()
-        if customer:
-            return attrs
-        request = self.context.get('request')
-        user = getattr(request.user, 'active_tenant', request.user) if request else None
-        if cust_name and user:
-            existing = Customer.objects.filter(name__iexact=cust_name, created_by=user).first()
-            if existing:
-                return attrs
-        if self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data:
-            return attrs
-        raise serializers.ValidationError({
-            'customer_name': 'Save this customer first before creating a delivery challan.'
-        })
+        cust_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not cust_name and not cust_gstin and not customer and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
+        return attrs
 
     class Meta:
         model = DeliveryChallan
@@ -715,16 +795,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             _raise_number_conflict(exc)
 
 
-        # Link an existing customer by name; typed text must not create a master record.
+        # Link or create customer globally
         cust_name = validated_data.get('customer_name')
-        if not validated_data.get('customer') and cust_name:
-            existing_cust = Customer.objects.filter(name__iexact=cust_name.strip(), created_by=user).first()
-            if existing_cust:
-                validated_data['customer'] = existing_cust
-            else:
-                raise serializers.ValidationError({
-                    'customer_name': 'Save this customer first before creating a delivery challan.'
-                })
+        if not validated_data.get('customer') and (cust_name or validated_data.get('customer_gstin')):
+            customer = resolve_or_create_customer(
+                user=user,
+                customer_name=cust_name,
+                customer_address=validated_data.get('customer_address'),
+                customer_gstin=validated_data.get('customer_gstin'),
+                place_of_supply=validated_data.get('place_of_supply'),
+            )
+            validated_data['customer'] = customer
 
         # Calculate line amounts and total (gross = amount after disc + tax)
         total = Decimal('0.00')
@@ -735,8 +816,11 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             total += self._calculate_line_gross(item_data)
             processed_items.append(item_data)
 
-        round_off = validated_data.get('round_off', Decimal('0.00')) or Decimal('0.00')
-        validated_data['total_amount'] = total + round_off
+        round_off = Decimal(str(validated_data.get('round_off', Decimal('0.00')) or 0))
+        from billing.round_off import compute_round_off
+        validated_data['total_amount'], validated_data['round_off'] = compute_round_off(
+            total, apply=(round_off != 0)
+        )
 
         challan = DeliveryChallan.objects.create(**validated_data)
 
@@ -787,6 +871,17 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
                 _raise_number_conflict(exc)
             validated_data.pop('challan_number', None)
 
+        if 'customer_name' in validated_data or 'customer_gstin' in validated_data:
+            customer = resolve_or_create_customer(
+                user=instance.created_by,
+                customer_name=validated_data.get('customer_name', instance.customer_name),
+                customer_address=validated_data.get('customer_address', instance.customer_address),
+                customer_gstin=validated_data.get('customer_gstin', instance.customer_gstin),
+            )
+            if customer:
+                instance.customer = customer
+                validated_data['customer'] = customer
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -810,7 +905,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
 
         return instance
 
-class PurchaseIndentItemSerializer(serializers.ModelSerializer):
+class PurchaseIndentItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     
     class Meta:
@@ -838,7 +933,7 @@ class PurchaseIndentSerializer(serializers.ModelSerializer):
         return indent
 
 
-class QuotationItemSerializer(serializers.ModelSerializer):
+class QuotationItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -990,7 +1085,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     def validate_customer_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=_legacy_customer_gstins(self)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
@@ -1105,53 +1200,32 @@ class QuotationSerializer(serializers.ModelSerializer):
 
         customer = attrs.get('customer')
         customer_name = (attrs.get('customer_name') or '').strip()
-        if not customer:
-            request = self.context.get('request')
-            user = getattr(request.user, 'active_tenant', request.user) if request else None
-            if customer_name and user:
-                customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-            if not customer:
-                if not (self.instance and getattr(self.instance, 'customer_id', None) and 'customer_name' not in self.initial_data):
-                    raise serializers.ValidationError({
-                        'customer_name': 'Save this customer first before creating a quotation.'
-                    })
+        customer_gstin = (attrs.get('customer_gstin') or '').strip()
+        if not customer and not customer_name and not customer_gstin and not (self.instance and (getattr(self.instance, 'customer_id', None) or getattr(self.instance, 'customer_name', None))):
+            raise serializers.ValidationError({
+                'customer_name': 'Please enter or select a customer.'
+            })
 
         return attrs
 
     def _resolve_customer(self, validated_data):
-        from .models import Customer
-
-        user = self.context['request'].user.active_tenant
+        user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         customer_name = validated_data.get('customer_name')
         customer_email = validated_data.pop('customer_email', None)
         customer_phone = validated_data.pop('customer_phone', None)
         customer_gstin = validated_data.pop('customer_gstin', None)
+        customer_address = validated_data.get('customer_address')
+        place_of_supply = validated_data.get('place_of_supply')
 
-        if not customer_name:
-            return None
-
-        customer = Customer.objects.filter(name__iexact=customer_name, created_by=user).first()
-        if not customer:
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before creating a quotation.'
-            })
-
-        updated = False
-        if customer_email and not customer.email:
-            customer.email = customer_email
-            updated = True
-        if customer_phone and not customer.phone:
-            customer.phone = customer_phone
-            updated = True
-        if validated_data.get('customer_address') and not customer.address:
-            customer.address = validated_data.get('customer_address')
-            updated = True
-        if customer_gstin and not customer.gstin:
-            customer.gstin = customer_gstin
-            updated = True
-        if updated:
-            customer.save()
-        return customer
+        return resolve_or_create_customer(
+            user=user,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            customer_gstin=customer_gstin,
+            place_of_supply=place_of_supply,
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -1202,8 +1276,12 @@ class QuotationSerializer(serializers.ModelSerializer):
                 ),
                 Decimal('0.00'),
             )
-            quotation.total_amount = total + Decimal(str(quotation.round_off or 0))
-            quotation.save(update_fields=['total_amount'])
+            from billing.round_off import compute_round_off
+            existing_ro = Decimal(str(quotation.round_off or 0))
+            quotation.total_amount, quotation.round_off = compute_round_off(
+                total, apply=(existing_ro != 0)
+            )
+            quotation.save(update_fields=['total_amount', 'round_off'])
 
         return quotation
 

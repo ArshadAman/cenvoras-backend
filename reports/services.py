@@ -142,7 +142,7 @@ def get_expiry_report(days_threshold=30, tenant=None):
             expiry_date__lte=limit_date,
             stock_points__quantity__gt=0,  # Check related StockPoints
         ).distinct().select_related('product').annotate(
-            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+            total_stock=Coalesce(Sum('stock_points__quantity'), Value(Decimal('0')), output_field=DecimalField(max_digits=15, decimal_places=3))
         )
         if tenant:
             batches = batches.filter(product__created_by=tenant)

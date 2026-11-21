@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 import uuid
 from .models import SalesInvoice, Customer
@@ -260,9 +261,9 @@ class SalesOrderItem(models.Model):
     order = models.ForeignKey(SalesOrder, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
     row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
-    quantity = models.PositiveIntegerField(default=1)
-    dispatched_quantity = models.PositiveIntegerField(default=0, help_text="Quantity dispatched / fulfilled")
-    free_quantity = models.PositiveIntegerField(default=0)
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=1, validators=[MinValueValidator(0)])
+    dispatched_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Quantity dispatched / fulfilled", validators=[MinValueValidator(0)])
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
@@ -357,8 +358,8 @@ class DeliveryChallanItem(models.Model):
     row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
     batch = models.ForeignKey(ProductBatch, on_delete=models.SET_NULL, null=True, blank=True, help_text="Specific batch being dispatched")
     hsn_sac_code = models.CharField(max_length=20, blank=True, null=True)
-    quantity = models.PositiveIntegerField(default=1)
-    free_quantity = models.PositiveIntegerField(default=0, help_text="Free/sample quantity dispatched")
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=1, validators=[MinValueValidator(0)])
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Free/sample quantity dispatched", validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)
@@ -391,7 +392,7 @@ class PurchaseIndent(models.Model):
 class PurchaseIndentItem(models.Model):
     indent = models.ForeignKey(PurchaseIndent, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
-    required_quantity = models.PositiveIntegerField()
+    required_quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
 
 
 class Quotation(models.Model):
@@ -449,8 +450,8 @@ class QuotationItem(models.Model):
     quotation = models.ForeignKey(Quotation, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT, null=True, blank=True)
     row_type = models.CharField(max_length=20, default='item', help_text="Type of row: 'item' or 'note'")
-    quantity = models.PositiveIntegerField(default=1)
-    free_quantity = models.PositiveIntegerField(default=0)
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=1, validators=[MinValueValidator(0)])
+    free_quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0, validators=[MinValueValidator(0)])
     unit = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     discount = models.DecimalField(max_digits=8, decimal_places=2, default=0)

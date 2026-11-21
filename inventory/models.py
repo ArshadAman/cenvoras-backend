@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.conf import settings
 
 # Create your models here.
@@ -83,7 +84,7 @@ class Product(models.Model):
     sale_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True, default=None)
     tax = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # GST %
     warranty_months = models.PositiveIntegerField(default=0, help_text="Warranty duration in months (0 = no warranty)")
-    stock = models.IntegerField(default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
+    stock = models.DecimalField(max_digits=15, decimal_places=3, default=0, help_text="Global stock count (Cached, may be negative if sales exceed purchases)")
     low_stock_alert = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -123,6 +124,9 @@ class Product(models.Model):
                 self.stock = total
                 if save:
                     self.save(update_fields=['stock'])
+                    # Retest item 3: save() fires no QuerySet.update(), so the stock journal / adjustment
+                    # path left the 5-minute product list cache on the old total. Bump the catalog version.
+                    _invalidate_catalog_on_commit({self.created_by_id})
         return self.stock
 
     def save(self, *args, **kwargs):
@@ -142,6 +146,8 @@ class Warehouse(models.Model):
     name = models.CharField(max_length=100)
     address = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    gstin = models.CharField(max_length=15, blank=True, default='',
+                             help_text="GSTIN this location is registered under; blank = the company GSTIN.")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -190,7 +196,7 @@ class StockPoint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     batch = models.ForeignKey(ProductBatch, on_delete=models.CASCADE, related_name='stock_points')
     warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock_points')
-    quantity = models.IntegerField(default=0)
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, default=0)
     objects = StockPointQuerySet.as_manager()
 
     last_updated = models.DateTimeField(auto_now=True)
@@ -227,6 +233,9 @@ class StockTransfer(models.Model):
     transfer_date = models.DateField(auto_now_add=True)
     status = models.CharField(max_length=20, default='completed', choices=[('pending', 'Pending'), ('completed', 'Completed')])
     notes = models.TextField(blank=True, null=True)
+    # UAT P1 #15: same-GSTIN transfer = delivery challan at weighted-average cost, no GST.
+    challan_number = models.CharField(max_length=30, blank=True, default='')
+    total_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -239,7 +248,9 @@ class StockTransferItem(models.Model):
     transfer = models.ForeignKey(StockTransfer, related_name='items', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     batch = models.ForeignKey(ProductBatch, on_delete=models.PROTECT)
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=15, decimal_places=3, validators=[MinValueValidator(0)])
+    rate = models.DecimalField(max_digits=14, decimal_places=2, default=0, help_text="Weighted-average cost per unit")
+    value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
 
     def __str__(self):
         return f"{self.product.name} ({self.quantity})"

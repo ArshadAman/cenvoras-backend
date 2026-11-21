@@ -48,8 +48,15 @@ def overdue_bills_report(request):
         if request.query_params.get('customer'):
             overdue_invoices = overdue_invoices.filter(customer_id=request.query_params.get('customer'))
 
+        # Retest item 2a: outstanding is net of receipts AND linked credit notes (ledger formula).
+        from .balance_sync import invoice_outstanding_map
+        overdue_invoices = list(overdue_invoices)
+        net_map = invoice_outstanding_map(overdue_invoices)
         data = []
         for invoice in overdue_invoices:
+            invoice.outstanding_amount = net_map[invoice.id]
+            if invoice.outstanding_amount <= 0:
+                continue
             due_date = invoice.due_date
             data.append({
                 'id': str(invoice.id),
@@ -95,28 +102,24 @@ def customer_balance_reconciliation(request):
             customers = customers.filter(id=customer_id)
             invoices = invoices.filter(customer_id=customer_id)
 
-        invoice_rows = invoices.values('customer_id').annotate(
-            outstanding=Sum(
-                ExpressionWrapper(
-                    Coalesce(F('total_amount'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))) -
-                    Coalesce(F('amount_paid'), Value(0, output_field=DecimalField(max_digits=12, decimal_places=2))),
-                    output_field=DecimalField(max_digits=12, decimal_places=2)
-                )
-            )
-        )
-
-        outstanding_by_customer = {
-            row['customer_id']: (row['outstanding'] or Decimal('0'))
-            for row in invoice_rows
-            if row['customer_id']
-        }
+        # Retest item 2b: invoice outstanding is net of linked credit notes, and the customer
+        # balance comes from the shared ledger formula (opening + invoices + DNs - receipts - CNs).
+        from .balance_sync import customer_balance_breakdown, invoice_outstanding_map
+        inv_list = list(invoices.only('id', 'customer_id', 'total_amount', 'amount_paid'))
+        inv_map = invoice_outstanding_map(inv_list)
+        outstanding_by_customer = {}
+        for inv in inv_list:
+            if inv.customer_id:
+                outstanding_by_customer[inv.customer_id] = (
+                    outstanding_by_customer.get(inv.customer_id, Decimal('0')) + inv_map[inv.id])
+        breakdown = customer_balance_breakdown(tenant, customer_ids=list(customers.values_list('id', flat=True)))
 
         rows = []
         total_unapplied_credit = Decimal('0')
         total_unmapped_debit = Decimal('0')
 
         for customer in customers:
-            current_balance = Decimal(str(customer.current_balance or 0))
+            current_balance = breakdown.get(customer.id, {}).get('outstanding', Decimal('0'))
             invoice_outstanding = Decimal(str(outstanding_by_customer.get(customer.id, Decimal('0')) or 0))
             difference = invoice_outstanding - current_balance
 

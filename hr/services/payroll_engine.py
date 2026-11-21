@@ -1,3 +1,4 @@
+from hr.models import LATEST_ASSIGNMENT_ORDER  # same tie-break as the Employees list
 import datetime
 import calendar
 from decimal import Decimal
@@ -205,16 +206,35 @@ def compute_overtime(employee, month, year):
     return total_hours, total_amount
 
 
-def compute_pf(basic_salary, hrms_settings=None):
+STATUTORY_PF_WAGE_CEILING = Decimal('15000.00')
+
+
+def statutory_pf_wage_ceiling(on_date=None):
     """
-    Computes Employee PF and Employer PF contributions.
-    Supports statutory ₹15,000 wage ceiling and ₹1,250 statutory EPS cap.
+    The statutory EPF/EPS wage ceiling in force on on_date. Single source for every PF cap.
+    VERIFY / TODO (awaiting Cenvora's go-ahead): EPFO S.O. 5109(E) raised the ceiling from ₹15,000 to
+    ₹25,000 w.e.f. 17-09-2026. A dated ceiling table (and the September split, and the s.2(88) wage
+    base) will be added here without touching callers. For now this always returns ₹15,000.
+    """
+    return STATUTORY_PF_WAGE_CEILING
+
+
+def pf_wage_ceiling(on_date=None, hrms_settings=None):
+    """PF wage cap for on_date: the tenant's configured ceiling if set, else the statutory one."""
+    configured = getattr(hrms_settings, 'pf_wage_ceiling', None) if hrms_settings is not None else None
+    return Decimal(str(configured)) if configured else statutory_pf_wage_ceiling(on_date)
+
+
+def compute_pf(basic_salary, hrms_settings=None, on_date=None):
+    """
+    Computes Employee PF and Employer PF contributions on the PF wage (Basic + DA).
+    Wage ceiling from pf_wage_ceiling(on_date); EPS capped at 8.33% of the statutory ceiling.
     """
     basic = Decimal(str(basic_salary))
-    # Default ON (statutory ₹15k ceiling); tenant may opt out via HRMS settings
+    # Default ON (statutory ceiling); tenant may opt out via HRMS settings
     apply_ceiling = True if hrms_settings is None else bool(hrms_settings.pf_apply_ceiling)
     if apply_ceiling:
-        ceiling = Decimal(str(getattr(hrms_settings, 'pf_wage_ceiling', None) or 15000))
+        ceiling = pf_wage_ceiling(on_date, hrms_settings)
         pf_wage = min(basic, ceiling)
     else:
         pf_wage = basic
@@ -227,35 +247,67 @@ def compute_pf(basic_salary, hrms_settings=None):
 
     # Statutory EPFO EPS Cap: 8.33% capped at ₹1,250 (which is 8.33% of ₹15,000 ceiling).
     # The remainder of the 12% employer contribution goes to EPF.
-    eps_wage_ceiling = Decimal('15000.00')
+    eps_wage_ceiling = statutory_pf_wage_ceiling(on_date)
+    eps_cap = Decimal('1250.00') if eps_wage_ceiling == STATUTORY_PF_WAGE_CEILING else \
+        (eps_wage_ceiling * Decimal('0.0833')).quantize(Decimal('1'))
     eps_wage = min(pf_wage, eps_wage_ceiling)
     if eps_wage >= eps_wage_ceiling:
-        employer_eps = Decimal('1250.00')
+        employer_eps = eps_cap
     else:
-        employer_eps = min(Decimal(str(round(float(eps_wage) * (8.33 / 100.0), 2))), Decimal('1250.00'))
+        employer_eps = min(Decimal(str(round(float(eps_wage) * (8.33 / 100.0), 2))), eps_cap)
     employer_epf = max(Decimal('0.00'), employer_pf - employer_eps)
 
     return {
         'employee_pf': emp_pf,
         'employer_pf': employer_pf,
         'employer_epf': employer_epf,
-        'employer_eps': employer_eps
+        'employer_eps': employer_eps,
+        # Contribution base: the PF wage after the ceiling (what the 12% is applied to).
+        'pf_contribution_base': pf_wage.quantize(Decimal('0.01')),
     }
+
+
+PF_WAGES_META_KEY = '_pf_wages'
+
+
+def custom_pf_wage_names(assignment):
+    """Employee-level custom allowances flagged 'Counts as PF wages' (stored on the assignment)."""
+    names = (getattr(assignment, 'computed_components', None) or {}).get(PF_WAGES_META_KEY) or []
+    return {str(n) for n in names} if isinstance(names, (list, tuple)) else set()
+
+
+def pf_wage_component_names(assignment):
+    """Names counted in PF wages besides Basic: structure components flagged counts_as_pf_wages, plus
+    custom allowances (names that are NOT structure components) flagged on the assignment. A key that IS a
+    structure component name is that component's amount, so only the structure flag applies to it."""
+    structure = {c.name: c for c in assignment.salary_structure.components.all()}
+    names = {n for n, c in structure.items() if c.counts_as_pf_wages and not c.is_basic}
+    names |= {n for n in custom_pf_wage_names(assignment) if n not in structure}
+    return names
+
+
+def _inr(v):
+    v = Decimal(str(v)).quantize(Decimal('0.01'))
+    return f"{v:,.0f}" if v == v.to_integral_value() else f"{v:,.2f}"
 
 
 def compute_esi(gross_salary, hrms_settings=None):
     """
     Computes Employee and Employer ESI.
     Applies only if gross monthly salary is <= ₹21,000 (statutory threshold).
+    Under Rule 52 of ESI (Central) Rules, 1950, all fractions of a rupee are rounded off
+    to the next higher rupee (ROUND_CEILING).
     """
+    from decimal import ROUND_CEILING
+
     gross = Decimal(str(gross_salary))
     ceiling = Decimal(str(hrms_settings.esi_wage_ceiling if hrms_settings else 21000.0))
 
     if gross <= ceiling:
         emp_rate = Decimal(str(hrms_settings.esi_employee_rate if hrms_settings else 0.75)) / Decimal('100')
         empr_rate = Decimal(str(hrms_settings.esi_employer_rate if hrms_settings else 3.25)) / Decimal('100')
-        emp_esi = (gross * emp_rate).quantize(Decimal('0.01'))
-        employer_esi = (gross * empr_rate).quantize(Decimal('0.01'))
+        emp_esi = (gross * emp_rate).quantize(Decimal('1'), rounding=ROUND_CEILING).quantize(Decimal('0.01'))
+        employer_esi = (gross * empr_rate).quantize(Decimal('1'), rounding=ROUND_CEILING).quantize(Decimal('0.01'))
     else:
         emp_esi = Decimal('0.00')
         employer_esi = Decimal('0.00')
@@ -300,7 +352,7 @@ def _normalize_pt_state_name(work_state):
     return state
 
 
-def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None):
+def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None, tenant=None, hrms_settings=None):
     """
     State-wise Professional Tax using date-versioned ProfessionalTaxSlab rows.
 
@@ -320,6 +372,16 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
     ):
         return Decimal('0.00')
 
+    tenant_obj = tenant or (getattr(employee, 'tenant', None) if employee else None)
+    settings_obj = hrms_settings
+    if settings_obj is None and tenant_obj is not None:
+        try:
+            settings_obj = getattr(tenant_obj, 'hrms_settings', None)
+        except Exception:
+            settings_obj = None
+    if settings_obj is not None and getattr(settings_obj, 'pt_enabled', True) is False:
+        return Decimal('0.00')
+
     gross = Decimal(str(gross_salary))
     state = resolve_work_state(employee=employee, tenant=tenant, work_state=work_state)
     if not state:
@@ -332,7 +394,8 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
 
     qs = ProfessionalTaxSlab.objects.filter(
         state_name__iexact=state,
-        lower_bound__lte=gross,
+    ).filter(
+        Q(lower_exclusive=False, lower_bound__lte=gross) | Q(lower_exclusive=True, lower_bound__lt=gross)
     ).filter(
         Q(upper_bound__isnull=True) | Q(upper_bound__gte=gross)
     ).filter(
@@ -346,9 +409,98 @@ def compute_pt(gross_salary, work_state, month=None, on_date=None, employee=None
         return Decimal('0.00')
 
     amount = Decimal(str(slab.pt_amount))
-    if month == 2 and slab.february_amount is not None and amount > 0:
+    special_month = getattr(slab, 'special_month', None) or 2
+    if month == special_month and slab.february_amount is not None and amount > 0:
         return Decimal(str(slab.february_amount)).quantize(Decimal('0.01'))
     return amount.quantize(Decimal('0.01'))
+
+
+def compute_pt_arrears(employee, related_month, related_year, paid_gross, revised_gross, tenant=None):
+    """
+    UAT P1 #1 (Rudra CA): PT on arrears is slabbed against the month the arrears RELATE to,
+    not the month they are paid. Returns the extra PT due for that month:
+        PT(revised gross, slab of related month) − PT(gross already paid, same slab).
+    """
+    import calendar as _cal
+    day = min(28, _cal.monthrange(int(related_year), int(related_month))[1])
+    on = datetime.date(int(related_year), int(related_month), day)
+    kw = dict(month=int(related_month), on_date=on, employee=employee, tenant=tenant)
+    before = compute_pt(paid_gross, '', **kw)
+    after = compute_pt(revised_gross, '', **kw)
+    return (after - before).quantize(Decimal('0.01'))
+
+
+SPECIAL_ALLOWANCE = 'Special Allowance'
+
+
+VERIFY_SALARY_STRUCTURE = 'VERIFY salary structure'
+
+
+def _component_snapshot(computed_components):
+    return {k: str(v) for k, v in (computed_components or {}).items() if not str(k).startswith('_')}
+
+
+def scaling_confirmed(assignment):
+    """True if an admin confirmed scaling for exactly this CTC and these components."""
+    c = getattr(assignment, 'ctc_scaling_confirmation', None)
+    if not c:
+        return False
+    return (Decimal(str(c.get('monthly_ctc', '0'))) == Decimal(str(assignment.monthly_ctc or 0))
+            and c.get('components') == _component_snapshot(assignment.computed_components))
+
+
+def scale_to_ctc(earnings, ctc):
+    """Pro-rata scale of earnings to CTC (paise drift goes to the largest component)."""
+    D = Decimal
+    others = sum(earnings.values(), D('0'))
+    if others <= 0:
+        return dict(earnings)
+    factor = ctc / others
+    out = {k: (v * factor).quantize(D('0.01')) for k, v in earnings.items()}
+    drift = ctc - sum(out.values(), D('0'))
+    if drift and out:
+        k = max(out, key=lambda n: out[n])
+        out[k] += drift
+    return out
+
+
+def balance_earnings_to_ctc(full_earnings, monthly_ctc, allow_scaling=False):
+    """
+    Un-prorated monthly earnings balanced so gross == monthly CTC (Rudra CA):
+      - below CTC: the shortfall goes to Special Allowance;
+      - above CTC: Special Allowance is reduced, floored at 0;
+      - if the other components alone still exceed CTC there is NO silent scaling: unless an admin
+        has confirmed scaling (allow_scaling), the stored components are used as they are (gross > CTC)
+        and a 'VERIFY salary structure' note is returned, which blocks approval of the run.
+        With allow_scaling, all earnings are scaled pro rata to CTC.
+    Cenvora's CTC excludes employer PF/ESI (they sit on top as total employer cost), so nothing is
+    subtracted for them. A CTC of 0 (not set) leaves the components as they are.
+    Returns (earnings_dict, gross, notes).
+    """
+    D = Decimal
+    earnings = {k: D(str(v)) for k, v in (full_earnings or {}).items()}
+    ctc = D(str(monthly_ctc or 0))
+    notes = []
+    total = sum(earnings.values(), D('0'))
+    if ctc <= 0:
+        return earnings, total, notes
+    if total < ctc:
+        earnings[SPECIAL_ALLOWANCE] = earnings.get(SPECIAL_ALLOWANCE, D('0')) + (ctc - total)
+    elif total > ctc:
+        excess = total - ctc
+        sa = earnings.get(SPECIAL_ALLOWANCE)
+        if sa is not None:
+            cut = min(sa, excess)
+            earnings[SPECIAL_ALLOWANCE] = sa - cut
+            excess -= cut
+        if excess > 0:
+            if allow_scaling:
+                earnings = scale_to_ctc(earnings, ctc)
+                notes.append('Salary components exceed monthly CTC; scaled to CTC as confirmed by admin')
+            else:
+                notes.append(f'{VERIFY_SALARY_STRUCTURE}: components exceed monthly CTC by ₹{excess:.2f}')
+    gross = sum(earnings.values(), D('0'))
+    return earnings, gross, notes
 
 
 def compute_gross(employee, month, year):
@@ -363,7 +515,7 @@ def compute_gross(employee, month, year):
     assignment = EmployeeSalaryAssignment.objects.filter(
         employee=employee,
         effective_from__lte=end_date
-    ).order_by('-effective_from').first()
+    ).order_by(*LATEST_ASSIGNMENT_ORDER).first()
 
     if not assignment:
         return Decimal('0.0'), None, Decimal('0.0'), {}, {}
@@ -386,8 +538,7 @@ def compute_gross(employee, month, year):
     # Separate earnings from deductions based on SalaryStructure component types
     structure_components = {c.name: c for c in assignment.salary_structure.components.all()}
     
-    total_monthly_gross = Decimal('0.0')
-    earnings_map = {}
+    full_earnings = {}
     custom_deductions_map = {}
 
     for comp_name, value_str in assignment.computed_components.items():
@@ -405,17 +556,20 @@ def compute_gross(employee, month, year):
             prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
             custom_deductions_map[comp_name] = prorated_val
         else:
-            total_monthly_gross += val
-            prorated_val = (val * proration_factor).quantize(Decimal('0.01'))
-            earnings_map[comp_name] = prorated_val
+            full_earnings[comp_name] = val
 
-    # Balancing Component: If total earnings < monthly_ctc and no component covers it,
-    # allocate remainder to Special Allowance so employee receives full assigned compensation.
-    monthly_ctc = Decimal(str(assignment.monthly_ctc))
-    if total_monthly_gross < monthly_ctc and 'Special Allowance' not in earnings_map:
-        remainder = monthly_ctc - total_monthly_gross
-        total_monthly_gross = monthly_ctc
-        earnings_map['Special Allowance'] = (remainder * proration_factor).quantize(Decimal('0.01'))
+    # Rudra CA: monthly gross = monthly CTC (employer PF/ESI are not part of Cenvora's CTC) and
+    # never above it. Special Allowance balances in both directions, floored at 0.
+    confirmed = scaling_confirmed(assignment)
+    full_earnings, total_monthly_gross, _gross_notes = balance_earnings_to_ctc(
+        full_earnings, assignment.monthly_ctc, allow_scaling=confirmed)
+    # Passed to compute_payslip_for_employee (flag + scaled preview for the admin to confirm).
+    assignment._ctc_notes = _gross_notes
+    assignment._ctc_scaled_preview = None
+    if any(n.startswith(VERIFY_SALARY_STRUCTURE) for n in _gross_notes):
+        assignment._ctc_scaled_preview = {k: str(v) for k, v in scale_to_ctc(
+            full_earnings, Decimal(str(assignment.monthly_ctc))).items()}
+    earnings_map = {k: (v * proration_factor).quantize(Decimal('0.01')) for k, v in full_earnings.items()}
 
     prorated_gross = (total_monthly_gross * proration_factor).quantize(Decimal('0.01'))
 
@@ -513,11 +667,35 @@ def compute_payslip_for_employee(employee, payroll_run):
         total_ab_amount += calc_amt
         ab_breakdown.append((label, calc_amt))
 
+    # UAT P1 #10: DOJ-correction arrears (+) / same-FY recovery (−) for months already run;
+    # earlier-FY recovery is a post-tax deduction (Rudra CA).
+    from hr.services.doj_correction import pending_for_payslip, carry_excess_recovery
+    doj = pending_for_payslip(employee, month, year, settings)
+    doj_earn_total = Decimal('0.00')
+    for label, amt in doj['earning_lines']:
+        total_ab_amount += amt
+        doj_earn_total += amt
+        ab_breakdown.append((label, amt))
+
     gross_with_earnings = (prorated_gross + ot_amount + total_ab_amount).quantize(Decimal('0.01'))
+    if doj['corrections']:
+        # Taxable gross is floored at 0; the unrecovered excess carries into the next run.
+        excess = -gross_with_earnings if gross_with_earnings < 0 else Decimal('0.00')
+        if excess > 0:
+            gross_with_earnings = Decimal('0.00')
+            doj_earn_total += excess
+            ab_breakdown.append((f'DOJ correction recovery carried to next run', excess))
+        carry_excess_recovery(doj['corrections'], excess, int(month), int(year))
 
     # Basic component lookup for PF — same fallback as salary card (50% CTC / computed Basic)
+    # PF wage = Basic actually paid this month (the scaled Basic after a confirmed CTC scaling),
+    # prorated, plus DA below; compute_pf applies pf_wage_ceiling().
+    # VERIFY (Rudra review item, not built): Code on Wages s.2(y) 50% add-back — if excluded allowances
+    # exceed 50% of total remuneration, the excess is added back to wages for PF/ESI.
     basic_comp = assignment.salary_structure.components.filter(is_basic=True).first()
-    if basic_comp:
+    if basic_comp and basic_comp.name in earnings_map:
+        basic_salary = Decimal(str(earnings_map[basic_comp.name])).quantize(Decimal('0.01'))
+    elif basic_comp:
         base_basic_str = assignment.computed_components.get(basic_comp.name, '0.0')
         basic_salary = (Decimal(str(base_basic_str)) * proration_factor).quantize(Decimal('0.01'))
     else:
@@ -529,9 +707,28 @@ def compute_payslip_for_employee(employee, payroll_run):
             base_basic = (Decimal(str(assignment.monthly_ctc or 0)) * Decimal('0.50')).quantize(Decimal('0.01'))
         basic_salary = (base_basic * proration_factor).quantize(Decimal('0.01'))
 
+    # EPF Act s.6: PF wages = Basic + DA / retaining allowance (components flagged counts_as_pf_wages), as paid.
+    da_salary = Decimal('0.00')
+    for name in pf_wage_component_names(assignment):
+        if name in earnings_map:
+            da_salary += Decimal(str(earnings_map[name]))
+    da_salary = da_salary.quantize(Decimal('0.01'))
+    pf_wage_paid = (basic_salary + da_salary).quantize(Decimal('0.01'))
+
     # Statutory Calculations
-    pf_details = compute_pf(basic_salary, settings)
+    _month_end = datetime.date(int(year), int(month), calendar.monthrange(int(year), int(month))[1])
+    pf_details = compute_pf(pf_wage_paid, settings, on_date=_month_end)
+    arrear_pf = doj['pf']
+    if arrear_pf['wages'] > 0:
+        pf_details = dict(pf_details)
+        for k in ('employee_pf', 'employer_pf', 'employer_epf', 'employer_eps'):
+            pf_details[k] = (Decimal(str(pf_details[k])) + arrear_pf[k]).quantize(Decimal('0.01'))
     esi_details = compute_esi(gross_with_earnings, settings)
+    # UAT P1 item 9: company-level PF / ESI coverage (both default on) and per-employee PF membership.
+    if (settings is not None and not getattr(settings, 'pf_enabled', True)) or getattr(employee, 'pf_member', None) is False:
+        pf_details = {k: (Decimal('0.00') if isinstance(v, Decimal) else v) for k, v in pf_details.items()}
+    if settings is not None and not getattr(settings, 'esi_enabled', True):
+        esi_details = {k: (Decimal('0.00') if isinstance(v, Decimal) else v) for k, v in esi_details.items()}
     tds_data = compute_dynamic_tds(employee, gross_with_earnings, month, year)
     tds_val = tds_data['monthly_tds']
     import datetime as _dt
@@ -540,16 +737,20 @@ def compute_payslip_for_employee(employee, payroll_run):
     from hr.services.work_state import resolve_work_state
     resolved_pt_state = resolve_work_state(employee=employee, tenant=tenant)
     pt_val = compute_pt(
-        gross_with_earnings,
+        max(Decimal('0.00'), gross_with_earnings - doj_earn_total),  # arrears are slabbed by their own month
         resolved_pt_state,
         month=int(month),
         on_date=_dt.date(int(year), int(month), pt_day),
         employee=employee,
         tenant=tenant,
+        hrms_settings=settings,
     )
+
+    pt_val = (pt_val + doj['pt_arrears']).quantize(Decimal('0.01'))
 
     # Custom deductions total
     custom_deductions_total = sum(custom_deductions.values(), Decimal('0.00'))
+    doj_post_tax = sum((a for _l, a in doj['deduction_lines']), Decimal('0.00'))
 
     # Statutory Deductions subtotal
     statutory_deductions = (
@@ -565,7 +766,20 @@ def compute_payslip_for_employee(employee, payroll_run):
         employee, available_for_loans, settings.allow_negative_salary
     )
 
-    raw_total_deductions = (statutory_deductions + advance_rec + loan_rec).quantize(Decimal('0.01'))
+    # Earlier-FY DOJ recovery = min(balance, cap% x wages - other deductions, net before recovery), >= 0.
+    # Default cap 50% of wages on TOTAL deductions (Code on Wages s.18). VERIFY limit/applicability,
+    # and which deductions count toward the 50%.
+    from hr.services.doj_correction import cap_prior_fy_recovery, carry_prior_fy_recovery
+    doj_recovery_balance = Decimal('0.00')
+    if doj['corrections']:
+        doj['deduction_lines'], doj_post_tax, doj_recovery_balance = cap_prior_fy_recovery(
+            doj['deduction_lines'], gross_with_earnings,
+            gross_with_earnings - statutory_deductions - advance_rec - loan_rec,
+            getattr(settings, 'doj_recovery_cap_percent', None),
+            other_deductions=statutory_deductions + advance_rec + loan_rec)
+        rm, ry = doj.get('prior_fy_month', (int(month), int(year)))
+        carry_prior_fy_recovery(doj['corrections'], doj_recovery_balance, int(month), int(year), rm, ry)
+    raw_total_deductions = (statutory_deductions + advance_rec + loan_rec + doj_post_tax).quantize(Decimal('0.01'))
     raw_net_salary = (gross_with_earnings - raw_total_deductions).quantize(Decimal('0.01'))
 
     # Apply tenant salary rounding rule
@@ -589,6 +803,14 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     deductions = {}
     deduction_reasons = {}
+    ctc_notes = getattr(assignment, '_ctc_notes', None) or []
+    if any(n.startswith(VERIFY_SALARY_STRUCTURE) for n in ctc_notes):
+        deduction_reasons[VERIFY_SALARY_STRUCTURE] = {
+            'amount': '0', 'reason': ' '.join(ctc_notes), 'warnings': ctc_notes,
+            'monthly_ctc': str(assignment.monthly_ctc), 'assignment_id': str(assignment.pk),
+            'stored_components': _component_snapshot(assignment.computed_components),
+            'scaled_components': getattr(assignment, '_ctc_scaled_preview', None),
+        }
 
     # 1. Loss of Pay (LOP) Reason
     if breakdown['lop_days'] > 0:
@@ -613,10 +835,16 @@ def compute_payslip_for_employee(employee, payroll_run):
 
     # 2. Provident Fund (PF)
     if pf_details['employee_pf'] > 0:
+        _pf_base = Decimal(str(pf_details.get('pf_contribution_base') or pf_wage_paid)).quantize(Decimal('0.01'))
         deductions['PF'] = str(pf_details['employee_pf'])
         deduction_reasons['PF'] = {
             'amount': str(pf_details['employee_pf']),
-            'reason': f"Employee statutory 12% contribution on Basic salary ₹{basic_salary}"
+            'reason': (f"Employee statutory 12% contribution on PF wage ₹{_inr(pf_wage_paid)}"
+                       + (f" (capped at ₹{_inr(_pf_base)})" if _pf_base < pf_wage_paid else '')
+                       + f" (Basic ₹{_inr(basic_salary)}" + (f" + DA/RA ₹{_inr(da_salary)}" if da_salary else '') + ")"),
+            # pf_wage = statutory PF wage (Basic + DA/RA, uncapped); pf_contribution_base = after the ceiling.
+            'pf_wage': str(pf_wage_paid), 'pf_contribution_base': str(_pf_base),
+            'basic': str(basic_salary), 'da': str(da_salary),
         }
 
     # 3. Employee State Insurance (ESI)
@@ -684,6 +912,24 @@ def compute_payslip_for_employee(employee, payroll_run):
             'reason': "; ".join(ln_details) or "Monthly personal loan recovery installment"
         }
 
+    # UAT P1 #10: DOJ correction post-tax recovery, PF arrears and review flags
+    for label, amt in doj['deduction_lines']:
+        deductions[label] = str(amt)
+        deduction_reasons[label] = {'amount': str(amt), 'reason': (
+            'Recovery of salary paid in an earlier financial year after a DOJ correction; '
+            'deducted after tax (not a negative earning).')}
+    if arrear_pf['wages'] > 0:
+        deduction_reasons['PF (arrears)'] = {'amount': str(arrear_pf['employee_pf']), 'reason': (
+            f"Employee PF on DOJ-correction arrears: PF wage ₹{arrear_pf['wages']} (basic + DA), capped at the "
+            f"ceiling of the months the arrears relate to. Report in the ECR arrears columns.")}
+    if doj_recovery_balance > 0:
+        doj['warnings'].append(f'Earlier-FY recovery balance ₹{doj_recovery_balance} carried to the next payroll '
+                               f'(total deductions capped at {getattr(settings, "doj_recovery_cap_percent", 50)}% of wages).')
+    if doj['warnings']:
+        deduction_reasons['DOJ correction'] = {'amount': '0', 'reason': ' '.join(doj['warnings']),
+                                               'warnings': doj['warnings'],
+                                               'lines': doj.get('breakdown', [])}
+
     payslip = Payslip(
         tenant=tenant,
         payroll_run=payroll_run,
@@ -712,8 +958,115 @@ def compute_payslip_for_employee(employee, payroll_run):
         employer_esi=esi_details['employer_esi'],
         employer_total_contribution=employer_total,
         net_salary=net_salary,
+        arrear_pf_wages=arrear_pf['wages'],
+        arrear_employee_pf=arrear_pf['employee_pf'],
+        arrear_employer_epf=arrear_pf['employer_epf'],
+        arrear_employer_eps=arrear_pf['employer_eps'],
+        doj_recovery_balance=doj_recovery_balance,
     )
     return payslip
+
+
+def eligible_employees(run):
+    """Joined on or before month-end; active/probation/notice, or logged attendance in the month."""
+    days_in_month = calendar.monthrange(run.year, run.month)[1]
+    start_date = datetime.date(run.year, run.month, 1)
+    end_date = datetime.date(run.year, run.month, days_in_month)
+    return Employee.objects.filter(
+        tenant=run.tenant, date_of_joining__lte=end_date,
+    ).exclude(employment_type='contract').filter(
+        Q(status__in=['active', 'probation', 'notice_period']) |
+        Q(attendance_records__date__range=(start_date, end_date))
+    ).distinct()
+
+
+class _Rollback(Exception):
+    pass
+
+
+ESI_GROSS_LIMIT = Decimal('21000')
+
+
+def _payslip_pf_wage(ps, settings=None):
+    """(PF contribution base, source) of a payslip, for the recalculation PREVIEW only.
+
+    'stored': deduction_reasons['PF']['pf_contribution_base'] (payslips from #234 on).
+    'derived': older payslips. Worked out from STATUTORY employee PF only: Payslip.employee_pf minus
+    arrear_employee_pf (DOJ arrears PF is added into employee_pf). Cenvora has no VPF / voluntary or
+    higher-wage PF field: employee_pf is the statutory contribution and any 'VPF' set up as a custom
+    deduction lives in deductions, not employee_pf. The derived base is still capped at the ceiling
+    helper's value in case such an extra was ever folded in.
+
+    NEVER use a derived base as the source for a revised ECR or any PF difference calculation:
+    recompute from the stored components (computed_components + compute_pf) instead.
+    """
+    pf = (ps.deduction_reasons or {}).get('PF') or {}
+    if pf.get('pf_contribution_base') is not None:
+        return Decimal(str(pf['pf_contribution_base'])), 'stored'
+    statutory_ee = Decimal(str(ps.employee_pf or 0)) - Decimal(str(getattr(ps, 'arrear_employee_pf', 0) or 0))
+    if statutory_ee <= 0:
+        return Decimal('0.00'), 'derived'
+    rate = Decimal(str(getattr(settings, 'pf_employee_rate', 12.0) if settings is not None else 12.0)) / Decimal('100')
+    base = (statutory_ee / rate).quantize(Decimal('0.01'))
+    if settings is None or bool(getattr(settings, 'pf_apply_ceiling', True)):
+        run = ps.payroll_run
+        on = datetime.date(int(run.year), int(run.month), calendar.monthrange(int(run.year), int(run.month))[1])
+        base = min(base, pf_wage_ceiling(on, settings))
+    return base, 'derived'
+
+
+def preview_recalculation(run):
+    """
+    Dry run: compute every payslip the run would get, compare with the stored payslips, and roll
+    everything back (nothing is saved). Returns per-employee old vs new gross, ESI and PT.
+    """
+    old = {ps.employee_id: ps for ps in Payslip.objects.filter(payroll_run=run).select_related('employee', 'payroll_run')}
+    _settings = get_hrms_settings(run.tenant)
+    rows = []
+    try:
+        with transaction.atomic():
+            for emp in eligible_employees(run):
+                ps = compute_payslip_for_employee(emp, run)
+                if ps is None:
+                    continue
+                o = old.get(emp.pk)
+                og = o.gross_salary if o else None
+                ng = ps.gross_salary
+                o_esi = (o.employee_esi or 0) > 0 if o else None
+                n_esi = (ps.employee_esi or 0) > 0
+                o_pt = o.professional_tax if o else None
+                n_pt = ps.professional_tax
+                esi_change = None
+                if o is not None and o_esi != n_esi:
+                    esi_change = 'now ESI-covered' if n_esi else 'no longer ESI-covered'
+                verify = (ps.deduction_reasons or {}).get(VERIFY_SALARY_STRUCTURE)
+                o_pfw, o_src = _payslip_pf_wage(o, _settings) if o else (None, None)
+                n_pfw, _ = _payslip_pf_wage(ps, _settings)
+                rows.append({
+                    'employee_id': str(emp.pk), 'employee_code': emp.employee_code, 'name': emp.full_name,
+                    'old_gross': str(og) if og is not None else None, 'new_gross': str(ng),
+                    'gross_changed': og is None or og != ng,
+                    'new_gross_within_esi_limit': ng <= ESI_GROSS_LIMIT,
+                    'old_employee_esi': str(o.employee_esi) if o else None, 'new_employee_esi': str(ps.employee_esi),
+                    'esi_change': esi_change,
+                    'old_pt': str(o_pt) if o_pt is not None else None, 'new_pt': str(n_pt),
+                    'pt_changed': o is not None and o_pt != n_pt,
+                    'old_pf_wage': str(o_pfw) if o_pfw is not None else None,
+                    'pf_base_source': o_src,  # 'derived' = display/compare only, never an ECR source
+                    'new_pf_wage': str(n_pfw) if n_pfw is not None else None,
+                    # Only the contribution base or the PF amount, not an internal representation.
+                    'pf_wage_changed': o is not None and (o_pfw != n_pfw
+                                                          or (o.employee_pf or 0) != (ps.employee_pf or 0)),
+                    'verify_salary_structure': bool(verify),
+                    'verify_detail': verify,
+                })
+            raise _Rollback()
+    except _Rollback:
+        pass
+    changed = [r for r in rows if r['gross_changed'] or r['esi_change'] or r['pt_changed']
+               or r['pf_wage_changed'] or r['verify_salary_structure']]
+    return {'run_id': str(run.id), 'month': run.month, 'year': run.year,
+            'has_existing_payslips': bool(old), 'employees': len(rows), 'changes': changed}
 
 
 def run_payroll(payroll_run_id):
@@ -735,15 +1088,7 @@ def run_payroll(payroll_run_id):
         start_date = datetime.date(run.year, run.month, 1)
         end_date = datetime.date(run.year, run.month, days_in_month)
 
-        employees = Employee.objects.filter(
-            tenant=run.tenant,
-            date_of_joining__lte=end_date,
-        ).exclude(
-            employment_type='contract'
-        ).filter(
-            Q(status__in=['active', 'probation', 'notice_period']) |
-            Q(attendance_records__date__range=(start_date, end_date))
-        ).distinct()
+        employees = eligible_employees(run)
 
         payslips_to_create = []
         total_gross = Decimal('0.00')
@@ -775,3 +1120,68 @@ def run_payroll(payroll_run_id):
 
         # Scan for exceptions (missing bank details, PAN, unapproved overtime/leave, negative net pay)
         scan_payroll_exceptions(run.id)
+
+
+import re as _re
+PF_WAGE_NAME_RE = _re.compile(r'(\bda\b|dearness|retaining)', _re.IGNORECASE)
+
+
+def unflagged_pf_wage_candidates(tenant):
+    """Components whose name has 'DA' (whole word), 'dearness' or 'retaining' and aren't flagged as PF wages."""
+    from hr.models import SalaryComponent
+    out = []
+    for c in SalaryComponent.objects.filter(salary_structure__tenant=tenant, counts_as_pf_wages=False,
+                                            is_basic=False).select_related('salary_structure'):
+        if c.type != 'deduction' and PF_WAGE_NAME_RE.search(c.name or ''):
+            out.append(c)
+    return out
+
+
+FIXED_ALLOWANCE_NAMES = {'basic', 'hra', 'special allowance', 'conveyance allowance', 'medical allowance'}
+
+
+def current_assignment(employee):
+    """The employee's current assignment by the #230 tie-break (same one the employee form shows)."""
+    from hr.models import LATEST_ASSIGNMENT_ORDER
+    return employee.salary_assignments.select_related('salary_structure').order_by(*LATEST_ASSIGNMENT_ORDER).first()
+
+
+def custom_allowances(assignment):
+    """Single source for the employee form, the PF banner and PF flags: custom allowances on an assignment.
+    = computed_components keys that are not metadata ('_'), not structure components, not the fixed
+    Basic/HRA/Special/Conveyance/Medical rows, with an amount > 0 (a stored 'DA': '0.00' is not an allowance)."""
+    if assignment is None:
+        return {}
+    structure = {c.name for c in assignment.salary_structure.components.all()}
+    out, seen = {}, set()
+    for name, val in (assignment.computed_components or {}).items():
+        n = str(name).strip()
+        norm = n.lower().replace('_', ' ')
+        if n.startswith('_') or n in structure or norm in FIXED_ALLOWANCE_NAMES or norm in seen:
+            continue
+        try:
+            amt = Decimal(str(val)).quantize(Decimal('0.01'))
+        except Exception:
+            continue
+        if amt > 0:
+            seen.add(norm)  # same allowance under two key spellings counts once (the form shows one row)
+            out[name] = amt
+    return out
+
+
+def unflagged_custom_pf_wage_candidates(tenant):
+    """Employee-level custom allowances (on each employee's latest assignment, not structure components)
+    whose name matches DA / dearness / retaining and that aren't flagged as PF wages."""
+    from hr.models import EmployeeSalaryAssignment, LATEST_ASSIGNMENT_ORDER
+    out, seen = [], set()
+    qs = EmployeeSalaryAssignment.objects.filter(employee__tenant=tenant).select_related(
+        'employee', 'salary_structure').order_by('employee_id', *LATEST_ASSIGNMENT_ORDER)
+    for a in qs:
+        if a.employee_id in seen:
+            continue
+        seen.add(a.employee_id)  # first row per employee = current assignment by the #230 tie-break
+        flagged = custom_pf_wage_names(a)
+        for name, val in custom_allowances(a).items():
+            if name not in flagged and PF_WAGE_NAME_RE.search(str(name)):
+                out.append((a, name, val))
+    return out

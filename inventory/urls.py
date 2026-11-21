@@ -20,7 +20,9 @@ urlpatterns = [
     path('batches/', views.batch_list, name='batch-list'),
     path('batches/split/', views.batch_split, name='batch-split'),
     path('transfers/', views.StockTransferListCreateView.as_view(), name='stock-transfer-list-create'),
+    path('transfers/preview/', views.stock_transfer_preview, name='stock-transfer-preview'),
     path('transfers/<uuid:pk>/', views.StockTransferDetailView.as_view(), name='stock-transfer-detail'),
+    path('transfers/<uuid:pk>/challan/', views.stock_transfer_challan, name='stock-transfer-challan'),
     
     # Reports
     path('reports/expiry/', views.expiry_report, name='expiry-report'),

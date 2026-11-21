@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 import csv
 import hashlib
 import json
@@ -14,7 +15,8 @@ from django.http import HttpResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.db import transaction
-from django.db.models import Sum, F
+from decimal import Decimal
+from django.db.models import Sum, F, Value, DecimalField
 from django.db.models.functions import Coalesce
 from cenvoras.cache_utils import CACHE_TTL_MEDIUM, cache_get_or_set, tenant_cache_key
 from .models import Product, Warehouse, StockPoint, StockTransfer, ProductBatch
@@ -101,7 +103,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['name', 'item_code', 'internal_reference', 'description', 'hsn_sac_code', 'manufacturer']
+    search_fields = ['name', 'item_code', 'internal_reference', 'description', 'manufacturer']
     idempotency_ttl = 600
     idempotency_lock_ttl = 300
 
@@ -377,6 +379,49 @@ class StockTransferListCreateView(generics.ListCreateAPIView):
             .order_by('-transfer_date')
         )
 
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def stock_transfer_challan(request, pk):
+    """UAT P1 #15: printable Rule 55(2) delivery challan (HTML)."""
+    from django.http import HttpResponse
+    from django.shortcuts import get_object_or_404
+    from .transfer_service import render_challan_html
+    tr = get_object_or_404(StockTransfer.objects.select_related('source_warehouse', 'destination_warehouse',
+                                                                'created_by'),
+                           pk=pk, created_by=request.user.active_tenant)
+    return HttpResponse(render_challan_html(tr), content_type='text/html; charset=utf-8')
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def stock_transfer_preview(request):
+    """UAT P1 #15: value + warnings BEFORE saving (no writes)."""
+    from .stock_sync import resolve_batch_for_product
+    from .transfer_service import TransferError, transfer_warnings, validate_transfer
+    tenant = request.user.active_tenant
+    wh = {w.pk: w for w in Warehouse.objects.filter(created_by=tenant)}
+    try:
+        import uuid as _uuid
+        src = wh.get(_uuid.UUID(str(request.data.get('source_warehouse'))))
+        dst = wh.get(_uuid.UUID(str(request.data.get('destination_warehouse'))))
+        lines = []
+        for it in request.data.get('items') or []:
+            product = Product.objects.get(pk=it.get('product'), created_by=tenant)
+            batch = ProductBatch.objects.filter(pk=it.get('batch'), product=product).first() if it.get('batch') else None
+            if batch is None:
+                batch = ProductBatch.objects.filter(product=product).order_by('created_at').first()
+            if batch is None:
+                return Response({'items': [f'{product.name}: no stock at the source location.']}, status=400)
+            lines.append((product, batch, to_qty(it.get('quantity') or 0)))
+    except (ValueError, TypeError, Product.DoesNotExist):
+        return Response({'error': 'Choose locations, products and quantities.'}, status=400)
+    try:
+        total, _ = validate_transfer(tenant, src, dst, lines)
+    except TransferError as exc:
+        return Response({'items': exc.errors}, status=400)
+    return Response({'total_value': str(total), 'warnings': transfer_warnings(total)})
+
+
 class StockTransferDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StockTransferSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -567,6 +612,15 @@ def inventory_csv_job_status(request, task_id):
         payload['total'] = total or (created + updated + skipped + failed)
         payload['current'] = payload['total']
         payload['errors'] = result.get('errors', [])
+        # Include detailed per-row results from task result or cache fallback
+        details = result.get('details')
+        if not details:
+            try:
+                details = cache.get(f"bulk_upload_results_{task_id}")
+            except Exception:
+                details = None
+        if details:
+            payload['details'] = details
     elif task.state == 'FAILURE':
         payload['percent'] = 100
         payload['error'] = str(task.result)
@@ -605,7 +659,7 @@ def expiry_report(request):
             expiry_date__lte=cutoff,
             is_active=True,
         ).select_related('product').annotate(
-            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+            total_stock=Coalesce(Sum('stock_points__quantity'), Value(Decimal('0')), output_field=DecimalField(max_digits=15, decimal_places=3))
         ).order_by('expiry_date')
 
         results = []
@@ -615,7 +669,7 @@ def expiry_report(request):
             if total_qty <= 0:
                 sibling_count = batch.product.batches.filter(is_active=True).count()
                 if sibling_count == 1 and (batch.product.stock or 0) > 0:
-                    total_qty = int(batch.product.stock)
+                    total_qty = to_qty(batch.product.stock)
                 else:
                     continue
             days_left = (batch.expiry_date - today).days
@@ -700,7 +754,7 @@ def batch_split(request):
     new_batch_number = request.data.get('new_batch_number', '').strip()
     raw_split_qty = request.data.get('split_quantity', 0)
     try:
-        split_qty = int(raw_split_qty)
+        split_qty = to_qty(raw_split_qty)
     except (TypeError, ValueError):
         return Response({'error': 'split_quantity must be a valid integer.'}, status=status.HTTP_400_BAD_REQUEST)
     manufacturing_date = request.data.get('manufacturing_date')
@@ -936,7 +990,7 @@ def expiry_dashboard_summary(request):
             expiry_date__lte=cutoff,
             is_active=True,
         ).select_related('product').annotate(
-            total_stock=Coalesce(Sum('stock_points__quantity'), 0)
+            total_stock=Coalesce(Sum('stock_points__quantity'), Value(Decimal('0')), output_field=DecimalField(max_digits=15, decimal_places=3))
         )
 
         count = 0
@@ -947,7 +1001,7 @@ def expiry_dashboard_summary(request):
             if total_qty <= 0:
                 sibling_count = batch.product.batches.filter(is_active=True).count()
                 if sibling_count == 1 and (batch.product.stock or 0) > 0:
-                    total_qty = int(batch.product.stock)
+                    total_qty = to_qty(batch.product.stock)
                 else:
                     continue
             days_left = (batch.expiry_date - today).days

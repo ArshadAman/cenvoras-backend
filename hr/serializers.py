@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
+from .models import LATEST_ASSIGNMENT_ORDER
 from .models import (
     Department, Designation, Employee, AttendanceRecord,
     LeaveType, LeaveBalance, LeaveApplication,
@@ -10,7 +11,7 @@ from .models import (
     PayrollRun, Payslip, EmployeeTask, EmployeeQuery, EmployeeNotification,
     EmployeeSalaryHistory, OvertimeRecord, EmployeeAdvanceLoan, LoanRecoveryLog,
     PayrollException, HRDocument, HRMSSettings, EmployeeAllowanceBonus,
-    EmployeeTaxDeclaration
+    EmployeeTaxDeclaration, Holiday
 )
 
 
@@ -50,12 +51,31 @@ class DesignationSerializer(serializers.ModelSerializer):
         return value
 
 
+# UAT P1 #11: salary data is visible only to Admin/HR/Accountant (payroll
+# operators) and to an employee viewing their own record.
+SALARY_VIEW_ROLES = ('admin', 'hr', 'accountant')
+SALARY_FIELDS = ('current_ctc', 'salary_details', 'monthly_salary', 'ctc', 'contract_fee')
+
+
+def can_view_salary(user, employee=None):
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return True  # internal/system serialisation (tasks, PDFs) — no request user
+    role = getattr(user, 'role', None)
+    if role in SALARY_VIEW_ROLES:
+        return True
+    if role == 'employee' and employee is not None and getattr(employee, 'user_id', None) == user.id:
+        return True
+    return False
+
+
 class EmployeeSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
     designation_name = serializers.CharField(source='designation.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
     reporting_manager_name = serializers.CharField(source='reporting_manager.full_name', read_only=True, default='')
     current_ctc = serializers.SerializerMethodField()
+    # UAT item 1: optional on input; blank/omitted defaults to the company's state in create().
+    work_state = serializers.CharField(required=False, allow_blank=True, max_length=100)
     salary_details = serializers.SerializerMethodField()
     kyc_documents = serializers.SerializerMethodField()
 
@@ -95,6 +115,136 @@ class EmployeeSerializer(serializers.ModelSerializer):
         exclude = ['tenant']
         read_only_fields = ['id', 'employee_code', 'created_at', 'updated_at']
 
+    # ---- UAT P1 items 8/9 (Rudra CA): statutory identifiers ---------------------------
+    # The employee form posts uan_number / esi_number / pf_number; the model fields are
+    # uan / esi_ip_number / pf_member_id. Accept both so the values are actually saved.
+    _ID_ALIASES = {'uan_number': 'uan', 'esi_number': 'esi_ip_number', 'pf_number': 'pf_member_id'}
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        for alias, field in self._ID_ALIASES.items():
+            if alias in data and field not in data:
+                data[field] = data.get(alias)
+        if 'pf_member_id' in data and data['pf_member_id']:
+            from hr.validators import normalize_pf_number
+            data['pf_member_id'] = normalize_pf_number(data['pf_member_id'])
+        return super().to_internal_value(data)
+
+    @staticmethod
+    def _id_or_none(value, error_fn):
+        from hr.validators import clean
+        v = clean(value)
+        if not v:
+            return None
+        err = error_fn(v)
+        if err:
+            raise serializers.ValidationError(err)
+        return v
+
+    def validate_pan_number(self, value):
+        from hr.validators import pan_error
+        return self._id_or_none(value, lambda v: pan_error(v, individual=True))
+
+    def validate_bank_ifsc(self, value):
+        from hr.validators import ifsc_error
+        v = self._id_or_none(value, ifsc_error)
+        if not v:
+            raise serializers.ValidationError('Bank IFSC code is mandatory.')
+        return v
+
+    def validate_work_state(self, value):
+        """UAT R2: only a real Indian state/UT (canonical name); blank = company state."""
+        if value is None or not str(value).strip():
+            return value
+        from hr.services.work_state import canonical_work_state
+        name = canonical_work_state(value)
+        if name is None:
+            raise serializers.ValidationError(
+                f'"{str(value).strip()}" is not an Indian state or union territory. '
+                'Choose the work state from the list (e.g. Odisha, Karnataka).')
+        return name
+
+    def validate_uan(self, value):
+        from hr.validators import uan_error
+        return self._id_or_none(value, uan_error)
+
+    def validate_esi_ip_number(self, value):
+        from hr.validators import esi_ip_error
+        return self._id_or_none(value, esi_ip_error)
+
+    def validate_pf_member_id(self, value):
+        from hr.validators import normalize_pf_number, pf_member_error
+        v = normalize_pf_number(value)
+        if not v:
+            return None
+        err = pf_member_error(v)
+        if err:
+            raise serializers.ValidationError(err)
+        return v
+
+    def validate_personal_email(self, value):
+        if not value or not str(value).strip():
+            return value
+        v = str(value).strip().lower()
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        if tenant is None and self.instance is not None:
+            tenant = self.instance.tenant
+
+        if tenant:
+            qs = Employee.objects.filter(tenant=tenant, personal_email__iexact=v)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError("An employee with this personal email already exists in your organization.")
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user_qs = User.objects.filter(email__iexact=v)
+        if self.instance and self.instance.user_id:
+            user_qs = user_qs.exclude(pk=self.instance.user_id)
+        if tenant:
+            user_qs = user_qs.exclude(parent=tenant, pk=getattr(self.instance, 'user_id', None))
+        if user_qs.exists():
+            raise serializers.ValidationError("A user account with this email address already exists.")
+
+        return v
+
+    def _hrms_settings(self):
+        from hr.models import HRMSSettings
+        request = self.context.get('request')
+        tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else None
+        if tenant is None and self.instance is not None:
+            tenant = self.instance.tenant
+        return HRMSSettings.objects.filter(tenant=tenant).first() if tenant is not None else None
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        def cur(name, default=None):
+            return attrs.get(name, getattr(self.instance, name, default) if self.instance else default)
+        settings_obj = self._hrms_settings()
+        pf_on = getattr(settings_obj, 'pf_enabled', True)
+        esi_on = getattr(settings_obj, 'esi_enabled', True)
+        errors = {}
+        is_contract = cur('employment_type') == 'contract'
+        if pf_on and not is_contract and cur('pf_member') is True and not cur('uan'):
+            errors['uan'] = 'UAN is mandatory for PF members (12 digits).'
+        if esi_on and not is_contract and cur('esi_covered', False) and not cur('esi_ip_number'):
+            errors['esi_ip_number'] = 'ESI IP number is mandatory for ESI-covered employees (10 digits).'
+        doj = attrs.get('date_of_joining')
+        from billing.advances import today_ist
+        today = today_ist()
+        if doj and doj > today:
+            errors['date_of_joining'] = "Date of joining cannot be in the future."
+        start = getattr(settings_obj, 'company_start_date', None)
+        if doj and start and doj < start:
+            errors['date_of_joining'] = (
+                f"Date of joining can't be before the company start date ({start:%d/%m/%Y}).")
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
     def validate_date_of_birth(self, value):
         if value:
             from django.utils import timezone
@@ -129,7 +279,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def get_current_ctc(self, obj):
         if obj.employment_type == 'contract':
             return str(obj.contract_fee or '0.00')
-        latest = obj.salary_assignments.order_by('-effective_from').first()
+        latest = obj.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         if latest:
             return str(latest.monthly_ctc)
         latest_hist = obj.salary_history.order_by('-effective_date', '-created_at').first()
@@ -160,13 +310,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 'employer_contributions': {'total_employer_cost': '0.00'},
                 'employer_estimates': {'total_employer_cost': '0.00'},
             }
-        latest = obj.salary_assignments.order_by('-effective_from', '-id').first()
+        latest = obj.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         if not latest or latest.monthly_ctc <= 0:
             return None
         ctc = latest.monthly_ctc
         components = dict(latest.computed_components or {})
         meta_basic_pct = components.pop('_basic_pct', None)
         meta_hra_pct = components.pop('_hra_pct', None)
+        from hr.services.payroll_engine import custom_allowances as _custom_allowances
+        pf_wage_flags = components.pop('_pf_wages', None) or []
+        components = {k: v for k, v in components.items() if not str(k).startswith('_')}
 
         basic = Decimal(str(components.get('Basic') or components.get('basic') or (ctc * Decimal('0.50')))).quantize(Decimal('0.01'))
         hra = Decimal(str(components.get('HRA') or components.get('hra') or (basic * Decimal('0.50')))).quantize(Decimal('0.01'))
@@ -308,6 +461,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
             'effective_from': str(latest.effective_from),
             'components': components_dict,
             'earnings': earnings_dict,
+            'pf_wage_components': list(pf_wage_flags),
+            # Same source as the PF banner (payroll_engine.custom_allowances on the current assignment).
+            'custom_allowances': {k: str(v) for k, v in _custom_allowances(latest).items()},
+            # Same-name rule (Rudra): a custom row named like a structure component takes that component's PF flag.
+            'structure_components': [{'name': c.name, 'counts_as_pf_wages': bool(c.counts_as_pf_wages or c.is_basic)}
+                                     for c in latest.salary_structure.components.all()],
             'employee_deductions': deductions_dict,
             'statutory_estimates': deductions_dict,
             'employer_contributions': employer_dict,
@@ -328,7 +487,42 @@ class EmployeeSerializer(serializers.ModelSerializer):
         data['work_state_resolved'] = resolve_work_state(
             employee=instance, tenant=getattr(instance, 'tenant', None)
         )
+        if not can_view_salary(getattr(self.context.get('request'), 'user', None), instance):
+            for key in SALARY_FIELDS:
+                data.pop(key, None)
+            data['salary_hidden'] = True
+        # UAT P1 items 8/9: alias keys for the form, and 'Upcoming' for a future joining date.
+        for alias, field in self._ID_ALIASES.items():
+            data[alias] = data.get(field)
+        from billing.advances import today_ist
+        doj = getattr(instance, 'date_of_joining', None)
+        data['is_upcoming'] = bool(doj and doj > today_ist())
+        data['status_display'] = 'Upcoming' if data['is_upcoming'] and instance.status == 'active' else (
+            instance.get_status_display() if hasattr(instance, 'get_status_display') else instance.status)
         return data
+
+    def validate_contract_fee(self, value):
+        user = getattr(self.context.get('request'), 'user', None)
+        if not can_view_salary(user, self.instance):
+            if self.instance is not None:
+                return self.instance.contract_fee
+            return value
+        return value
+
+    def validate_date_of_joining(self, value):
+        from billing.advances import today_ist
+        if value and value > today_ist():
+            raise serializers.ValidationError("Date of joining cannot be in the future.")
+        # UAT P1 #10: once payroll exists from min(old, new DOJ), a plain edit is blocked.
+        inst = self.instance
+        if inst is not None and value and inst.date_of_joining and value != inst.date_of_joining:
+            from hr.services.doj_correction import employee_has_payroll_from
+            if employee_has_payroll_from(inst, min(value, inst.date_of_joining)):
+                raise serializers.ValidationError(
+                    'Payroll has already been run for this employee from that month. Use "DOJ correction" '
+                    '(admin only, with a reason) so locked months stay unchanged and the difference is '
+                    'paid or recovered in the next open payroll.')
+        return value
 
     def validate_user(self, value):
         if value:
@@ -339,17 +533,6 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 if user_tenant != tenant and value != tenant:
                     raise serializers.ValidationError("Assigned user does not belong to the active tenant.")
         return value
-
-    def validate_work_state(self, value):
-        """Persist full state name so PT slabs match (KA / 29 → Karnataka)."""
-        state = (value or '').strip()
-        if not state:
-            return state
-        from billing.gst_utils import CODE_TO_STATE_NAME, normalize_state_code
-        code = normalize_state_code(state)
-        if code and code in CODE_TO_STATE_NAME:
-            return CODE_TO_STATE_NAME[code]
-        return state
 
     def create(self, validated_data):
         salary_data = self.initial_data.get('salary') or self.initial_data.get('salary_assignment')
@@ -374,11 +557,45 @@ class EmployeeSerializer(serializers.ModelSerializer):
         from hr.services.work_state import resolve_work_state
         request = self.context.get('request')
         tenant = getattr(request.user, 'active_tenant', request.user) if request and hasattr(request, 'user') else instance.tenant
+
+        if request and getattr(request.user, 'role', None) == 'employee':
+            allowed_fields = {
+                'personal_phone', 'address', 'emergency_contact_name',
+                'emergency_contact_phone', 'bank_name', 'bank_account_number',
+                'bank_ifsc', 'account_holder_name', 'upi_id'
+            }
+            validated_data = {k: v for k, v in validated_data.items() if k in allowed_fields}
+            salary_data = None
+            declaration_data = None
+
         incoming = validated_data.get('work_state', instance.work_state)
         resolved = resolve_work_state(employee=instance, tenant=tenant, work_state=incoming)
         if resolved:
             validated_data['work_state'] = resolved
+
+        old_doj = instance.date_of_joining
         employee = super().update(instance, validated_data)
+        new_doj = employee.date_of_joining
+
+        if (old_doj and new_doj and old_doj != new_doj) or (new_doj and employee.salary_assignments.filter(effective_from__gt=timezone.now().date()).exists()):
+            from hr.models import EmployeeSalaryAssignment, EmployeeSalaryHistory
+            assignments = EmployeeSalaryAssignment.objects.filter(employee=employee).order_by('effective_from', 'created_at')
+            if assignments.exists():
+                EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=old_doj).update(effective_from=new_doj)
+                earliest = assignments.first()
+                if earliest.effective_from > new_doj or assignments.count() == 1:
+                    earliest.effective_from = new_doj
+                    earliest.save(update_fields=['effective_from'])
+                EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from__gt=timezone.now().date()).update(effective_from=new_doj)
+            EmployeeSalaryHistory.objects.filter(employee=employee, effective_date=old_doj).update(effective_date=new_doj)
+            EmployeeSalaryHistory.objects.filter(employee=employee, effective_date__gt=timezone.now().date()).update(effective_date=new_doj)
+            histories = EmployeeSalaryHistory.objects.filter(employee=employee).order_by('effective_date', 'created_at')
+            if histories.exists():
+                initial_hist = histories.first()
+                if initial_hist.effective_date > new_doj or histories.count() == 1:
+                    initial_hist.effective_date = new_doj
+                    initial_hist.save(update_fields=['effective_date'])
+
         if employee.employment_type != 'contract':
             if salary_data is not None:
                 self._handle_salary_assignment(employee, salary_data)
@@ -412,13 +629,26 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 )
 
     def _handle_salary_assignment(self, employee, salary_data):
+        if not can_view_salary(getattr(self.context.get('request'), 'user', None), employee):
+            return  # roles that cannot see salary cannot change it either
         if employee.employment_type == 'contract':
             return
         if not salary_data or not isinstance(salary_data, dict):
-            return
+            # When creating a regular employee without explicit salary payload, assign standard structure from DOJ
+            has_existing = employee.salary_assignments.exists()
+            if not has_existing:
+                salary_data = {
+                    'monthly_ctc': Decimal('50000.00'),
+                    'effective_from': employee.date_of_joining or timezone.now().date(),
+                }
+            else:
+                return
         monthly_ctc = salary_data.get('monthly_ctc')
         if not monthly_ctc or float(monthly_ctc) <= 0:
-            return
+            if not employee.salary_assignments.exists():
+                monthly_ctc = Decimal('50000.00')
+            else:
+                return
 
         ctc = Decimal(str(monthly_ctc)).quantize(Decimal('0.01'))
         effective_from = salary_data.get('effective_from') or employee.date_of_joining or timezone.now().date()
@@ -452,7 +682,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         custom_components = salary_data.get('components') or {}
         basic_pct_raw = salary_data.get('basic_pct')
         hra_pct_raw = salary_data.get('hra_pct')
-        latest_existing = employee.salary_assignments.order_by('-effective_from', '-id').first()
+        latest_existing = employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
         prev_salary = latest_existing.monthly_ctc if latest_existing else Decimal('0.00')
 
         if latest_existing:
@@ -472,7 +702,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 assignment = latest_existing
                 assignment.salary_structure = structure
                 assignment.monthly_ctc = ctc
-                assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
+                eff_target = salary_data.get('effective_from') or employee.date_of_joining
+                if eff_target:
+                    assignment.effective_from = eff_target
+                    assignment.save(update_fields=['salary_structure', 'monthly_ctc', 'effective_from'])
+                else:
+                    assignment.save(update_fields=['salary_structure', 'monthly_ctc'])
         else:
             assignment = EmployeeSalaryAssignment.objects.create(
                 tenant=tenant,
@@ -517,7 +752,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
                         canon = 'Medical Allowance'
                     extras[canon] = str(val)
                     extra += val
-                special = max(Decimal('0.00'), ctc - basic_amt - hra_amt - da_val - extra).quantize(Decimal('0.01'))
+                total_fixed = (basic_amt + hra_amt + da_val + extra).quantize(Decimal('0.01'))
+                if total_fixed > ctc:
+                    raise serializers.ValidationError({
+                        'salary': f"Total fixed earnings and allowances (₹{total_fixed}) exceed monthly CTC (₹{ctc}). Fixed earnings cannot exceed monthly CTC."
+                    })
+                special = max(Decimal('0.00'), ctc - total_fixed).quantize(Decimal('0.01'))
                 computed_from_pct = {
                     'Basic': str(basic_amt),
                     'HRA': str(hra_amt),
@@ -529,14 +769,25 @@ class EmployeeSerializer(serializers.ModelSerializer):
                 computed_from_pct['Special Allowance'] = str(special)
                 computed_from_pct['_basic_pct'] = str(basic_pct.quantize(Decimal('0.01')))
                 computed_from_pct['_hra_pct'] = str(hra_pct.quantize(Decimal('0.01')))
+            except serializers.ValidationError:
+                raise
             except Exception:
                 computed_from_pct = None
 
+        # Custom allowances ticked 'Counts as PF wages (DA / retaining allowance)' (default off).
+        _pf_flags = salary_data.get('pf_wage_components')
+        if not isinstance(_pf_flags, (list, tuple)):
+            # Not sent (older client / other screens): keep the flags already saved.
+            _pf_flags = list(((assignment.computed_components or {}) if assignment else {}).get('_pf_wages') or [])
         if computed_from_pct is not None:
+            if isinstance(_pf_flags, (list, tuple)):
+                computed_from_pct['_pf_wages'] = sorted({str(n).strip() for n in _pf_flags
+                                                         if str(n).strip() in computed_from_pct})
             assignment.computed_components = computed_from_pct
             assignment.save(update_fields=['computed_components'])
         elif custom_components:
             computed = {}
+            fixed_sum = Decimal('0.00')
             for k, v in custom_components.items():
                 if str(k).startswith('_'):
                     continue
@@ -552,9 +803,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     canonical_name = 'Special Allowance'
 
                 try:
-                    computed[canonical_name] = str(Decimal(str(v)).quantize(Decimal('0.01')))
+                    val_dec = Decimal(str(v)).quantize(Decimal('0.01'))
+                    computed[canonical_name] = str(val_dec)
+                    if canonical_name != 'Special Allowance' and val_dec > 0:
+                        fixed_sum += val_dec
                 except Exception:
                     computed[canonical_name] = str(v)
+            if fixed_sum > ctc:
+                raise serializers.ValidationError({
+                    'salary': f"Total fixed earnings and allowances (₹{fixed_sum}) exceed monthly CTC (₹{ctc}). Fixed earnings cannot exceed monthly CTC."
+                })
             # Derive % metadata for FE reload
             try:
                 b = Decimal(str(computed.get('Basic') or 0))
@@ -564,6 +822,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
                     computed['_hra_pct'] = str((h * Decimal('100') / b).quantize(Decimal('0.01'))) if b > 0 else '0.00'
             except Exception:
                 pass
+            if isinstance(_pf_flags, (list, tuple)):
+                computed['_pf_wages'] = sorted({str(n).strip() for n in _pf_flags if str(n).strip() in computed})
             assignment.computed_components = computed
             assignment.save(update_fields=['computed_components'])
         else:
@@ -652,6 +912,12 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         employee = attrs.get('employee') or getattr(self.instance, 'employee', None)
         date = attrs.get('date') or getattr(self.instance, 'date', None)
+        if date:
+            from billing.advances import today_ist
+            if date > today_ist():
+                raise serializers.ValidationError({
+                    'date': "Attendance cannot be marked for future dates."
+                })
         if employee and date and employee.date_of_joining:
             if date < employee.date_of_joining:
                 raise serializers.ValidationError({
@@ -681,11 +947,36 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
 class LeaveBalanceSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.full_name', read_only=True)
     leave_type_name = serializers.CharField(source='leave_type.name', read_only=True)
+    allocated = serializers.SerializerMethodField()
+    used = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveBalance
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_allocated(self, obj):
+        if obj.leave_type and obj.leave_type.annual_entitlement is not None:
+            val = float(obj.leave_type.annual_entitlement)
+            return int(val) if val.is_integer() else val
+        val = float(obj.balance or 0.0)
+        return int(val) if val.is_integer() else val
+
+    def get_used(self, obj):
+        from django.db.models import Sum
+        approved_sum = LeaveApplication.objects.filter(
+            employee=obj.employee,
+            leave_type=obj.leave_type,
+            start_date__year=obj.year,
+            status='approved'
+        ).aggregate(total=Sum('computed_days'))['total']
+
+        entitlement_diff = 0.0
+        if obj.leave_type and obj.leave_type.annual_entitlement is not None and obj.balance is not None:
+            entitlement_diff = max(0.0, float(obj.leave_type.annual_entitlement) - float(obj.balance))
+
+        val = max(float(approved_sum or 0.0), entitlement_diff)
+        return int(val) if val.is_integer() else val
 
 
 class LeaveApplicationSerializer(serializers.ModelSerializer):
@@ -698,11 +989,66 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'computed_days', 'lwp_days', 'applied_at', 'updated_at', 'status']
 
     def validate(self, data):
-        start = data.get('start_date')
-        end = data.get('end_date')
+        start = data.get('start_date') or (self.instance.start_date if self.instance else None)
+        end = data.get('end_date') or (self.instance.end_date if self.instance else None)
+        employee = data.get('employee') or (self.instance.employee if self.instance else None)
+        request = self.context.get('request')
+        if not employee and request and getattr(request.user, 'role', None) == 'employee':
+            from hr.models import Employee
+            user = request.user
+            tenant = getattr(user, 'active_tenant', user)
+            employee = Employee.objects.filter(tenant=tenant, user=user).first()
+            if not employee:
+                employee = Employee.objects.filter(tenant=tenant, personal_email=user.email).first()
+            if employee:
+                data['employee'] = employee
+
+        reason = data.get('reason') if 'reason' in data else (self.instance.reason if self.instance else None)
+
+        if not reason or not str(reason).strip():
+            raise serializers.ValidationError({"reason": "A reason is required when applying for leave."})
+
         if start and end and start > end:
             raise serializers.ValidationError({"end_date": "End date must be on or after start date."})
+
+        if employee and employee.date_of_joining and start:
+            if start < employee.date_of_joining:
+                raise serializers.ValidationError({
+                    "start_date": f"Leave cannot be applied for dates before employee joining date ({employee.date_of_joining:%d-%m-%Y})."
+                })
+
+        if employee and start and end:
+            overlap_qs = LeaveApplication.objects.filter(
+                employee=employee,
+                status__in=['approved', 'pending'],
+                start_date__lte=end,
+                end_date__gte=start,
+            )
+            if self.instance:
+                overlap_qs = overlap_qs.exclude(pk=self.instance.pk)
+            overlapping = overlap_qs.select_related('leave_type').first()
+            if overlapping:
+                lt_name = overlapping.leave_type.name if overlapping.leave_type else 'Leave'
+                status_label = "approved" if overlapping.status == "approved" else "existing pending"
+                raise serializers.ValidationError({
+                    "start_date": f"This leave request overlaps with an {status_label} leave from {overlapping.start_date:%d-%m-%Y} to {overlapping.end_date:%d-%m-%Y} ({lt_name})."
+                })
+
         return data
+
+
+def same_date_assignment_warnings(employee, effective_from, exclude_pk=None):
+    """Shared (#230): warning when the employee already has an assignment with this effective date."""
+    import datetime as _dt
+    if isinstance(effective_from, str):
+        effective_from = _dt.date.fromisoformat(effective_from[:10])
+    qs = EmployeeSalaryAssignment.objects.filter(employee=employee, effective_from=effective_from)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    if not qs.exists():
+        return []
+    return [f'This replaces the assignment effective {effective_from:%d-%m-%Y}. '
+            'Payroll uses the most recently saved assignment for that date.']
 
 
 class SalaryComponentSerializer(serializers.ModelSerializer):
@@ -710,7 +1056,7 @@ class SalaryComponentSerializer(serializers.ModelSerializer):
         model = SalaryComponent
         fields = [
             'id', 'name', 'type', 'component_type', 'calculation_base',
-            'is_basic', 'value', 'percentage', 'is_taxable',
+            'is_basic', 'counts_as_pf_wages', 'value', 'percentage', 'is_taxable',
             'pf_applicable', 'esi_applicable', 'pt_applicable', 'tds_applicable',
             'employee_contribution_pct', 'employer_contribution_pct',
             'is_active', 'order'
@@ -779,7 +1125,7 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeSalaryAssignment
         exclude = ['tenant']
-        read_only_fields = ['id', 'computed_components', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'computed_components', 'ctc_scaling_confirmation', 'created_at', 'updated_at']
 
     def validate_employee(self, value):
         request = self.context.get('request')
@@ -789,15 +1135,31 @@ class EmployeeSalaryAssignmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("Employee does not belong to the active tenant.")
         return value
 
+    def _same_date_warning(self, assignment):
+        """Warn (not block) when another assignment already has this effective date: the newest one wins."""
+        w = same_date_assignment_warnings(assignment.employee, assignment.effective_from, exclude_pk=assignment.pk)
+        if w:
+            self._warnings = w
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if getattr(self, '_warnings', None):
+            data['warnings'] = self._warnings
+        return data
+
     def create(self, validated_data):
         assignment = super().create(validated_data)
         self._compute_components(assignment)
         self._log_salary_history(assignment, previous_salary=Decimal('0.00'), reason="Initial salary structure assignment")
+        self._same_date_warning(assignment)
         return assignment
 
     def update(self, instance, validated_data):
         old_ctc = instance.monthly_ctc
+        old_date = instance.effective_from
         assignment = super().update(instance, validated_data)
+        if assignment.effective_from != old_date:
+            self._same_date_warning(assignment)
         self._compute_components(assignment)
         if old_ctc != assignment.monthly_ctc:
             self._log_salary_history(assignment, previous_salary=old_ctc, reason="Salary revision / increment")
@@ -919,6 +1281,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'total_employer_contributions', 'approved_at', 'approved_by',
             'paid_at', 'paid_by', 'locked_at', 'locked_by', 'finalised_at',
             'is_reopened', 'reopened_at', 'reopened_by', 'reopen_history',
+            'tds_deposited_at', 'pf_deposited_at', 'esi_deposited_at',
             'created_at', 'updated_at'
         ]
 
@@ -937,6 +1300,15 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             tenant = getattr(request.user, 'active_tenant', request.user)
             month = data.get('month', getattr(self.instance, 'month', None))
             year = data.get('year', getattr(self.instance, 'year', None))
+
+            if month and year:
+                from billing.advances import today_ist
+                today = today_ist()
+                if (year > today.year) or (year == today.year and month > today.month):
+                    raise serializers.ValidationError(
+                        f"Cannot create payroll cycle for {month}/{year}. "
+                        f"Payroll cycles cannot be created ahead of time for future months (current period: {today.month}/{today.year})."
+                    )
 
             # Disallow duplicate payroll runs for the same period
             qs = PayrollRun.objects.filter(tenant=tenant, month=month, year=year)
@@ -989,18 +1361,24 @@ class PayslipSerializer(serializers.ModelSerializer):
             db['Provident Fund (PF)'] = str(obj.employee_pf)
         if obj.employee_esi > 0 and 'ESI' not in db:
             db['ESI'] = str(obj.employee_esi)
-        if obj.tds > 0 and 'TDS' not in db and 'Income Tax (TDS)' not in db:
-            db['Income Tax (TDS)'] = str(obj.tds)
-        if obj.professional_tax > 0 and 'PT' not in db and 'Professional Tax (PT)' not in db:
-            db['Professional Tax (PT)'] = str(obj.professional_tax)
+        # Always display Professional Tax (PT) line
+        if 'PT' not in db and 'Professional Tax (PT)' not in db:
+            db['Professional Tax (PT)'] = str(obj.professional_tax or '0.00')
+        # Always display Income Tax (TDS) line
+        if 'TDS' not in db and 'Income Tax (TDS)' not in db:
+            db['Income Tax (TDS)'] = str(obj.tds or '0.00')
         if obj.advance_recovery > 0 and 'Salary Advance Recovery' not in db:
             db['Salary Advance Recovery'] = str(obj.advance_recovery)
         if obj.loan_recovery > 0 and 'Loan Recovery' not in db:
             db['Loan Recovery'] = str(obj.loan_recovery)
 
-        # LOP is applied via gross proration — do not inject a synthetic deduction line
-        db.pop('Loss of Pay (LOP)', None)
-        db.pop('LOP', None)
+        # Show Loss of Pay (LOP) line when unpaid leaves exist
+        lop_amt = self.get_lop_amount(obj)
+        if obj.lop_days > 0 or (lop_amt and float(lop_amt) > 0):
+            db['Loss of Pay (LOP)'] = str(lop_amt or '0.00')
+        else:
+            db.pop('Loss of Pay (LOP)', None)
+            db.pop('LOP', None)
 
         # Fallback if total_deductions > 0 but db is still empty
         if not db and obj.total_deductions > 0:
@@ -1023,10 +1401,10 @@ class PayslipSerializer(serializers.ModelSerializer):
             reasons.setdefault('Provident Fund (PF)', "Employee statutory 12.00% Provident Fund contribution on Basic salary")
         if obj.employee_esi > 0:
             reasons.setdefault('ESI', "Employee statutory 0.75% State Insurance contribution on gross earnings")
-        if obj.tds > 0:
+        if obj.tds >= 0:
             reasons.setdefault('TDS', "Monthly income tax withholding deducted under Section 192")
             reasons.setdefault('Income Tax (TDS)', "Monthly income tax withholding deducted under Section 192")
-        if obj.professional_tax > 0:
+        if obj.professional_tax >= 0:
             reasons.setdefault('PT', "State statutory Professional Tax slab deduction")
             reasons.setdefault('Professional Tax (PT)', "State statutory Professional Tax slab deduction")
         if obj.advance_recovery > 0:
@@ -1073,7 +1451,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         if obj.lop_days > 0 and obj.total_working_days:
             working_days = Decimal(str(obj.total_working_days))
             lop_days = Decimal(str(obj.lop_days))
-            assignment = obj.employee.salary_assignments.order_by('-effective_from', '-id').first()
+            assignment = obj.employee.salary_assignments.order_by(*LATEST_ASSIGNMENT_ORDER).first()
             if assignment and working_days > 0:
                 ctc = Decimal(str(assignment.monthly_ctc or 0))
                 return str((ctc * lop_days / working_days).quantize(Decimal('0.01')))
@@ -1188,3 +1566,10 @@ class EmployeeAllowanceBonusSerializer(serializers.ModelSerializer):
         model = EmployeeAllowanceBonus
         exclude = ['tenant']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class HolidaySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Holiday
+        fields = ['id', 'name', 'date', 'description', 'is_optional', 'created_at']
+        read_only_fields = ['id', 'created_at']

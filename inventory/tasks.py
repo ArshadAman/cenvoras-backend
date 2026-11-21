@@ -1,3 +1,4 @@
+from billing.uqc import to_qty
 import csv
 import logging
 import os
@@ -186,6 +187,9 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
         updated_count = 0
         skipped_count = 0
         errors = []
+        created_items = []
+        updated_items = []
+        skipped_items = []
 
         for index, row in enumerate(reader, start=2):
             processed_count = index - 1
@@ -318,7 +322,7 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                                 diff_fields['sale_price'] = payload['sale_price']
 
                         if 'stock' in payload and payload['stock'] is not None:
-                            if int(payload['stock']) != int(existing_product.stock or 0):
+                            if to_qty(payload['stock']) != to_qty(existing_product.stock or 0):
                                 diff_fields['stock'] = payload['stock']
 
                         if 'tax' in payload and payload['tax'] is not None:
@@ -355,11 +359,32 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
 
                         if not diff_fields:
                             skipped_count += 1
+                            skipped_items.append({
+                                'row': index,
+                                'item_code': existing_product.item_code or payload.get('item_code') or '',
+                                'name': existing_product.name,
+                                'status': 'unchanged',
+                            })
                         else:
+                            change_list = []
+                            for attr, new_val in diff_fields.items():
+                                old_val = getattr(existing_product, attr, None)
+                                change_list.append({
+                                    'field': attr,
+                                    'old': str(old_val) if old_val is not None else '',
+                                    'new': str(new_val) if new_val is not None else '',
+                                })
                             for attr, val in diff_fields.items():
                                 setattr(existing_product, attr, val)
                             existing_product.save(update_fields=list(diff_fields.keys()))
                             updated_count += 1
+                            updated_items.append({
+                                'row': index,
+                                'item_code': existing_product.item_code or payload.get('item_code') or '',
+                                'name': existing_product.name,
+                                'status': 'updated',
+                                'changes': change_list,
+                            })
                     else:
                         # Map cost_price to model field 'price'
                         cost_price_val = payload.pop('cost_price', 0)
@@ -372,6 +397,15 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                         )
                         ProductMeta.objects.get_or_create(product=new_product)
                         created_count += 1
+                        created_items.append({
+                            'row': index,
+                            'item_code': new_product.item_code or '',
+                            'name': new_product.name,
+                            'status': 'created',
+                            'stock': float(new_product.stock or 0),
+                            'sale_price': float(new_product.sale_price or 0) if new_product.sale_price is not None else None,
+                            'cost_price': float(new_product.price or 0),
+                        })
 
                         if normalized_item_code:
                             existing_by_code[normalized_item_code] = new_product
@@ -401,6 +435,23 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
                 errors[:5],
             )
 
+        # Build detailed results for audit/inspection
+        details = {
+            'created': created_items[:2000],
+            'updated': updated_items,
+            'skipped': skipped_items,
+            'failed': errors[:50],
+        }
+
+        # Cache full details for 24h so the frontend can retrieve them on demand
+        try:
+            from django.core.cache import cache as _cache
+            task_id = getattr(self.request, 'id', None) if self else None
+            if task_id:
+                _cache.set(f"bulk_upload_results_{task_id}", details, timeout=86400)
+        except Exception:
+            pass
+
         return {
             "created_count": created_count,
             "updated_count": updated_count,
@@ -408,6 +459,7 @@ def process_bulk_upload_csv(self, file_path_or_content: str, user_id: str):
             "failed_count": len(errors),
             "total_rows": total_rows,
             "errors": errors[:50],  # Return up to 50 sample errors to avoid payload bloat
+            "details": details,
         }
     finally:
         if is_temp_file:

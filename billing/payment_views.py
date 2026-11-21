@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -32,7 +33,8 @@ def payment_list_create(request):
     """
     if request.method == 'GET':
         tenant = getattr(request.user, 'active_tenant', request.user)
-        payments = (Payment.objects.filter(created_by=tenant).select_related('customer', 'invoice')
+        payments = (Payment.objects.filter(Q(created_by=tenant) | Q(created_by__parent=tenant))
+                    .select_related('customer', 'invoice')
                     .prefetch_related('adjustments__invoice').order_by('-date', '-created_at'))
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)

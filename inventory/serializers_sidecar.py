@@ -1,3 +1,5 @@
+from billing.uqc import UQCQuantityMixin
+from billing.uqc import to_qty
 from django.db import transaction
 from rest_framework import serializers
 from .models import Product, ProductBatch, Warehouse
@@ -53,7 +55,7 @@ class BillOfMaterialSerializer(serializers.ModelSerializer):
             return obj.finished_good.name
         return obj.finished_good_name
 
-class StockJournalItemSerializer(serializers.ModelSerializer):
+class StockJournalItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
     batch = serializers.PrimaryKeyRelatedField(
@@ -99,7 +101,7 @@ class StockJournalSerializer(serializers.ModelSerializer):
                 if product.created_by_id != tenant.id:
                     raise serializers.ValidationError({'product': f'Product "{product.name}" not found.'})
 
-                qty_delta = int(item_data.get('quantity') or 0)
+                qty_delta = to_qty(item_data.get('quantity') or 0)
                 if qty_delta == 0:
                     raise serializers.ValidationError({'quantity': 'Quantity cannot be zero.'})
 

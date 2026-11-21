@@ -397,6 +397,12 @@ def vendor_payment_create(request):
         bill.refresh_from_db()
         bill.refresh_payment_status(save=True)
 
+        # Rudra (#219): s.31(3)(g) payment voucher for RCM supplies, dated from this payment entry.
+        from billing.rcm_documents import create_payment_voucher
+        _pd = pay_date if isinstance(pay_date, date) else date.fromisoformat(str(pay_date)[:10])
+        rcm_voucher = create_payment_voucher(tenant, bill, _pd, amount, mode,
+                                             str(request.data.get('reference') or ''))
+
         # Restore Rule 37 ITC if previously reversed and now paid
         _restore_rule37_if_needed(bill, tenant, pay_date)
 
@@ -421,6 +427,7 @@ def vendor_payment_create(request):
         'vendor_has_pan': _vendor_pan(bill) is not None,
         'amount_paid': str(bill.amount_paid),
         'payment_status': bill.payment_status,
+        'rcm_payment_voucher': rcm_voucher.number if rcm_voucher else None,
     }, status=status.HTTP_201_CREATED)
 
 

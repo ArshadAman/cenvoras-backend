@@ -1,3 +1,4 @@
+from billing.uqc import UQCQuantityMixin
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from .models import PurchaseBill, PurchaseBillItem, SalesInvoice, SalesInvoiceItem, Customer, Vendor, Payment
@@ -124,7 +125,7 @@ class CustomerField(serializers.Field):
     def to_representation(self, value):
         return str(value)
 
-class PurchaseBillItemSerializer(serializers.ModelSerializer):
+class PurchaseBillItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     product = ProductField()
     product_detail = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -142,7 +143,7 @@ class PurchaseBillItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'product', 'product_detail', 'description', 'hsn_sac_code', 'unit',
             'quantity', 'free_quantity', 'price', 'amount', 'discount', 'tax',
-            'batch_number', 'expiry_date', 'mrp'
+            'batch_number', 'expiry_date', 'mrp', 'is_rcm', 'itc_blocked'
         ]
 
     def to_representation(self, instance):
@@ -261,7 +262,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
-            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge',
+            'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge', 'rcm_receipt_date',
             'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
@@ -298,12 +299,37 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
         vendor_gstin = data.get('vendor_gstin') or (self.instance.vendor_gstin if self.instance else None)
         if not vendor_gstin and data.get('gst_treatment') in (None, '', 'registered'):
             data['gst_treatment'] = 'unregistered'
+
+        # UAT P1 item 7 (Rudra CA): an unregistered vendor can't charge GST. Tax is locked at 0
+        # on every line that isn't flagged "RCM applicable".
+        if items is not None:
+            from billing.itc import lock_unregistered_line_tax
+            gstin = data.get('vendor_gstin', getattr(self.instance, 'vendor_gstin', None))
+            if not gstin and vendor is not None:
+                gstin = getattr(vendor, 'gstin', None)
+            rcm_bill = data.get('is_reverse_charge', getattr(self.instance, 'is_reverse_charge', False))
+            if lock_unregistered_line_tax(gstin, rcm_bill, items):
+                self._tax_locked_unregistered = True
         return data
+
+    @classmethod
+    def _vendor_payable(cls, item_data, bill_rcm=False):
+        """What the vendor is owed for a line: taxable only on RCM lines (item 7), else taxable + tax."""
+        if bill_rcm or item_data.get('is_rcm'):
+            from billing.sync_service import DocumentSyncService
+            return DocumentSyncService.calculate_line_amount(
+                item_data.get('quantity', 0), item_data.get('price', 0), item_data.get('discount', 0),
+                item_data.get('tax', 0)).quantize(Decimal('0.01'))
+        return cls._calculate_line_gross(item_data)
 
     def validate_vendor_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        legacy = [getattr(self.instance, 'vendor_gstin', None)]
+        vendor_id = (self.initial_data or {}).get('vendor') if hasattr(self, 'initial_data') else None
+        if vendor_id:
+            legacy += list(Vendor.objects.filter(pk=vendor_id).values_list('gstin', flat=True)[:1])
         try:
-            return validate_gstin_format(value) or None
+            return validate_gstin_format(value, legacy=legacy) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
 
@@ -359,8 +385,9 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             validated_data['gst_treatment'] = 'unregistered'
         
         # Recalculate total amount from items to ensure integrity (line amount + tax)
+        _bill_rcm = bool(validated_data.get('is_reverse_charge'))
         recalculated_total = sum(
-            (self._calculate_line_gross(item) for item in items_data),
+            (self._vendor_payable(item, _bill_rcm) for item in items_data),
             Decimal('0.00')
         )
         validated_data['total_amount'] = recalculated_total
@@ -393,6 +420,16 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             item_data['amount'] = self._calculate_line_amount(item_data)
             # Ensure price is passed as 'price' to the model (serializer uses 'price' field)
             PurchaseBillItem.objects.create(purchase_bill=purchase_bill, **item_data)
+            prod = item_data.get('product')
+            unit_price = item_data.get('price')
+            if prod and unit_price is not None:
+                try:
+                    p_val = Decimal(str(unit_price))
+                    if p_val > 0:
+                        prod_pk = prod.pk if hasattr(prod, 'pk') else prod
+                        Product.objects.filter(pk=prod_pk, created_by=user).update(price=p_val)
+                except Exception:
+                    pass
 
         # Refresh payment status in case amount_paid was provided
         purchase_bill.refresh_payment_status(save=True)
@@ -466,14 +503,25 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 item_data['amount'] = self._calculate_line_amount(item_data)
                 PurchaseBillItem.objects.create(purchase_bill=instance, **item_data)
+                prod = item_data.get('product')
+                unit_price = item_data.get('price')
+                if prod and unit_price is not None:
+                    try:
+                        p_val = Decimal(str(unit_price))
+                        if p_val > 0:
+                            prod_pk = prod.pk if hasattr(prod, 'pk') else prod
+                            Product.objects.filter(pk=prod_pk, created_by=user).update(price=p_val)
+                    except Exception:
+                        pass
 
             recalculated_total = sum(
-                (self._calculate_line_gross({
+                (self._vendor_payable({
                     'quantity': item.quantity,
                     'price': item.price,
                     'discount': item.discount,
                     'tax': item.tax,
-                }) for item in instance.items.all()),
+                    'is_rcm': item.is_rcm,
+                }, instance.is_reverse_charge) for item in instance.items.all()),
                 Decimal('0'),
             )
             instance.total_amount = recalculated_total
@@ -549,7 +597,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             ret['gst_treatment'] = 'unregistered'
         return ret
 
-class SalesInvoiceItemSerializer(serializers.ModelSerializer):
+class SalesInvoiceItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
     id = serializers.UUIDField(required=False, allow_null=True)
     product = ProductField(required=False, allow_null=True)
     row_type = serializers.CharField(required=False, default='item')
@@ -558,8 +606,8 @@ class SalesInvoiceItemSerializer(serializers.ModelSerializer):
     remaining_qty = serializers.SerializerMethodField(read_only=True)
     hsn_sac_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     unit = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    quantity = serializers.IntegerField(min_value=0, default=1)
-    free_quantity = serializers.IntegerField(min_value=0, required=False, default=0)
+    quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, default=1)
+    free_quantity = serializers.DecimalField(max_digits=15, decimal_places=3, min_value=0, required=False, default=0)
 
     def validate(self, data):
         if data.get('row_type') == 'note':
@@ -900,7 +948,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     invoice_date = serializers.DateField(required=False, allow_null=True)
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    # UAT P1 item 4: round_off is computed by the server (round half up to the rupee); a value sent
+    # by the client only signals "round" (non-zero) or "don't round" (zero).
+    round_off = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    apply_round_off = serializers.BooleanField(required=False, allow_null=True, write_only=True)
     meta = TransactionMetaSerializer(required=False)
     bank_account_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     template_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -911,7 +962,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_challans', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'is_reverse_charge', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -1031,6 +1082,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         total_amount = data.get('total_amount', getattr(self.instance, 'total_amount', 0))
         items = data.get('items')
+        # UAT P1 item 13 rework (Rudra CA): Composition / Not registered companies can't charge
+        # GST (s.10 / s.32): lock every line's tax at 0.
+        from billing import gst_status as _gs
+        _req_user = getattr(self.context.get('request'), 'user', None)
+        if _req_user is not None and _gs.tax_locked(_req_user):
+            for _it in (items or []):
+                if (_it.get('row_type') or 'item') != 'note' and Decimal(str(_it.get('tax', 0) or 0)) != 0:
+                    _it['tax'] = Decimal('0.00')
         if items:
             total_amount = sum(
                 (self._calculate_line_gross(item) for item in items),
@@ -1054,6 +1113,32 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if immutable_errors:
                 raise serializers.ValidationError(immutable_errors)
         
+        # Rule 46 checks apply to Regular companies only (UAT P1 #13 rework).
+        _rule46_on = _req_user is None or _gs.rule46_applies(_req_user)
+
+        # UAT P1 item 13 (Rudra CA): Rule 46 essentials on a final invoice.
+        _status = data.get('status', getattr(self.instance, 'status', 'final'))
+        if _rule46_on and _status == 'final' and (items is not None or not self.instance):
+            from billing.rule46 import rule46_errors
+            from billing.sync_service import DocumentSyncService
+            _init = getattr(self, 'initial_data', {}) or {}
+            _cust = customer or getattr(self.instance, 'customer', None)
+            _rows = items if items is not None else []
+            _taxable = sum((DocumentSyncService.calculate_line_amount(
+                it.get('quantity', 0), it.get('price', 0), it.get('discount', 0), it.get('tax', 0))
+                for it in _rows if (it.get('row_type') or 'item') != 'note'), Decimal('0.00'))
+            r46 = rule46_errors(
+                invoice_number=data.get('invoice_number', getattr(self.instance, 'invoice_number', None)),
+                invoice_date=data.get('invoice_date', getattr(self.instance, 'invoice_date', None)),
+                customer_name=(data.get('customer_name') or getattr(self.instance, 'customer_name', None)
+                               or getattr(_cust, 'name', None)),
+                customer_address=(_init.get('customer_address') or getattr(self.instance, 'customer_address', None)
+                                  or getattr(_cust, 'address', None)),
+                customer_gstin=_init.get('customer_gstin') or getattr(_cust, 'gstin', None),
+                items=_rows, taxable_total=_taxable)
+            if r46:
+                raise serializers.ValidationError(r46)
+
         # Rudra CA POS rules (s.10/s.12 IGST Act): block mismatched POS for services / bill-to-ship-to.
         if 'place_of_supply' in data or not self.instance:
             from billing.gst_rules import invoice_pos_decision
@@ -1122,7 +1207,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if customer_gstin:
             from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
             try:
-                customer_gstin = validate_gstin_format(customer_gstin)
+                _legacy = [getattr(self.instance, 'customer_gstin', None),
+                           getattr(data.get('customer'), 'gstin', None)]
+                customer_gstin = validate_gstin_format(customer_gstin, legacy=_legacy)
                 data['customer_gstin'] = customer_gstin
             except ValueError as exc:
                 raise serializers.ValidationError({
@@ -1146,13 +1233,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         user = getattr(request.user, 'active_tenant', request.user)
         print("DEBUG SalesInvoiceSerializer: User:", user)
 
-        # Link an existing Customer when the typed name/email already exists.
-        # Never create a master record from document text — that only happens
-        # via Add Customer (POST /customers/).
+        from .models_sidecar import PartyMeta
+        # Link an existing Customer (GSTIN -> Email -> Name), or auto-create globally.
         customer_obj = None
-        if customer_email and str(customer_email).strip():
+        if customer_gstin and str(customer_gstin).strip():
+            customer_obj = Customer.objects.filter(gstin__iexact=str(customer_gstin).strip(), created_by=user).first()
+
+        if not customer_obj and customer_email and str(customer_email).strip():
             print("DEBUG SalesInvoiceSerializer: Email provided, matching existing customer")
-            customer_obj = Customer.objects.filter(email=customer_email, created_by=user).first()
+            customer_obj = Customer.objects.filter(email__iexact=customer_email.strip(), created_by=user).first()
             if customer_obj:
                 print("DEBUG SalesInvoiceSerializer: Found existing customer by email:", customer_obj.name)
 
@@ -1189,9 +1278,23 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 print("DEBUG SalesInvoiceSerializer: Updated customer details")
             PartyMeta.objects.get_or_create(customer=customer_obj)
         elif customer_name and customer_name.strip():
-            raise serializers.ValidationError({
-                'customer_name': 'Save this customer first before billing or quoting them.'
-            })
+            derived_state = None
+            if customer_gstin and len(customer_gstin) >= 2:
+                derived_state = normalize_indian_state_choice(customer_gstin[:2])
+            elif data.get('place_of_supply'):
+                derived_state = normalize_indian_state_choice(data.get('place_of_supply'))
+
+            customer_obj = Customer.objects.create(
+                name=customer_name.strip(),
+                email=customer_email or None,
+                phone=customer_phone or None,
+                address=customer_address or None,
+                gstin=customer_gstin or None,
+                state=derived_state,
+                created_by=user,
+            )
+            PartyMeta.objects.get_or_create(customer=customer_obj)
+            print("DEBUG SalesInvoiceSerializer: Auto-created global customer:", customer_obj.name)
         else:
             print("DEBUG SalesInvoiceSerializer: No saved customer match; storing name on document only")
 
@@ -1233,6 +1336,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         bank_account_id = validated_data.pop('bank_account_id', None)
         template_id = validated_data.pop('template_id', None)
         provided_total_amount = validated_data.pop('total_amount', None)
+        _apply_round_off = validated_data.pop('apply_round_off', None)
+        _client_round_off = validated_data.pop('round_off', None)
         print("DEBUG SalesInvoiceSerializer: Items data:", items_data)
 
         recalculated_total = sum(
@@ -1299,9 +1404,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
             print("DEBUG SalesInvoiceSerializer: All items created successfully")
 
-            round_off = validated_data.get('round_off', Decimal('0.00'))
+            from billing.round_off import compute_round_off, resolve_apply_round_off
             from billing.sync_service import DocumentSyncService
-            recalculated_total = sum(
+            unrounded_total = sum(
                 (
                     DocumentSyncService.calculate_line_gross(
                         item.quantity, item.price, item.discount, item.tax
@@ -1310,7 +1415,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if getattr(item, 'row_type', 'item') != 'note'
                 ),
                 Decimal('0'),
-            ) + Decimal(str(round_off or 0))
+            )
+            recalculated_total, round_off = compute_round_off(
+                unrounded_total,
+                resolve_apply_round_off(sales_invoice.created_by, _apply_round_off, _client_round_off))
             sales_invoice.total_amount = recalculated_total
             sales_invoice.round_off = round_off
             if sales_invoice.amount_paid > sales_invoice.total_amount:
@@ -1365,6 +1473,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         meta_data = validated_data.pop('meta', None)
         bank_account_id = validated_data.pop('bank_account_id', None)
         template_id = validated_data.pop('template_id', None)
+        _apply_round_off = validated_data.pop('apply_round_off', None)
+        _client_round_off = validated_data.pop('round_off', None)
+        _previous_round_off = instance.round_off
         old_customer_id = instance.customer_id
         old_status = instance.status
         old_place_of_supply = instance.place_of_supply
@@ -1459,9 +1570,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             from billing.sync_service import DocumentSyncService
             DocumentSyncService.sync_document_items(instance, all_items_to_sync, user=instance.created_by)
 
-            round_off = validated_data.get('round_off', instance.round_off)
-            instance.round_off = round_off
+            from billing.round_off import compute_round_off, resolve_apply_round_off
+            instance.round_off = Decimal('0.00')
             DocumentSyncService.recalculate_document_total(instance)
+            instance.total_amount, instance.round_off = compute_round_off(
+                instance.total_amount,
+                resolve_apply_round_off(instance.created_by, _apply_round_off, _client_round_off,
+                                        _previous_round_off))
 
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount
@@ -1532,16 +1647,28 @@ from .models_sidecar import PartyMeta
 
 class VendorSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Rudra (#212): saved GSTIN that fails the checksum/state check -> 'Invalid GSTIN, please correct'
+    gstin_warning = serializers.SerializerMethodField()
+
+    def get_gstin_warning(self, obj):
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
     # Accepted for FE compatibility but ignored — PartyMeta is customer-only
     meta = serializers.JSONField(required=False, write_only=True)
+    linked_customer = serializers.SerializerMethodField()
+
+    def get_linked_customer(self, obj):
+        from billing.party_link import counterpart_payload
+        return counterpart_payload(vendor=obj).get('linked_customer')
     
     class Meta:
         model = Vendor
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'pan', 'address', 'state',
-            'created_by', 'created_at', 'meta'
+            'created_by', 'created_at', 'meta', 'linked_customer', 'gstin_warning',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'linked_customer', 'gstin_warning']
 
     def validate_email(self, value):
         if value:
@@ -1565,8 +1692,9 @@ class VendorSerializer(serializers.ModelSerializer):
 
     def validate_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
+        _pan = (self.initial_data or {}).get('pan') if hasattr(self, 'initial_data') else None
         try:
-            gstin = validate_gstin_format(value)
+            gstin = validate_gstin_format(value, pan=_pan, legacy=getattr(self.instance, 'gstin', None))
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
         if not gstin:
@@ -1600,6 +1728,8 @@ class VendorSerializer(serializers.ModelSerializer):
             vendor = Vendor.objects.create(**validated_data)
         except Exception as exc:
             raise serializers.ValidationError({'detail': f'Could not create vendor: {exc}'}) from exc
+        from billing.party_link import autolink_vendor
+        autolink_vendor(vendor, validated_data['created_by'])
         return vendor
 
     def update(self, instance, validated_data):
@@ -1616,21 +1746,36 @@ class VendorSerializer(serializers.ModelSerializer):
             instance.save()
         except Exception as exc:
             raise serializers.ValidationError({'detail': f'Could not update vendor: {exc}'}) from exc
+        from billing.party_link import autolink_vendor
+        tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        autolink_vendor(instance, tenant)
         return instance
     
 
 class CustomerSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Rudra (#212): saved GSTIN that fails the checksum/state check -> 'Invalid GSTIN, please correct'
+    gstin_warning = serializers.SerializerMethodField()
+
+    def get_gstin_warning(self, obj):
+        from billing.gst_utils import gstin_warning
+        return gstin_warning(getattr(obj, 'gstin', None))
+
     meta = PartyMetaSerializer(required=False)
+    linked_vendor = serializers.SerializerMethodField()
+
+    def get_linked_vendor(self, obj):
+        from billing.party_link import counterpart_payload
+        return counterpart_payload(customer=obj).get('linked_vendor')
     
     class Meta:
         model = Customer
         fields = [
             'id', 'name', 'email', 'phone', 'gstin', 'address', 'state',
             'credit_limit', 'current_balance', 'allow_credit',
-            'created_by', 'created_at', 'meta'
+            'created_by', 'created_at', 'meta', 'linked_vendor', 'gstin_warning',
         ]
-        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance']
+        read_only_fields = ['id', 'created_by', 'created_at', 'current_balance', 'linked_vendor', 'gstin_warning']
 
     def validate_email(self, value):
         if value:
@@ -1646,9 +1791,29 @@ class CustomerSerializer(serializers.ModelSerializer):
     def validate_gstin(self, value):
         from billing.gst_utils import validate_gstin_format, GSTIN_INVALID_MSG
         try:
-            return validate_gstin_format(value) or None
+            norm_value = validate_gstin_format(value, legacy=getattr(self.instance, 'gstin', None)) or None
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
+
+        if norm_value:
+            norm_value = norm_value.strip().upper()
+            request = self.context.get('request')
+            user = None
+            if request and hasattr(request, 'user') and request.user.is_authenticated:
+                user = getattr(request.user, 'active_tenant', request.user)
+            elif self.instance and getattr(self.instance, 'created_by', None):
+                user = self.instance.created_by
+
+            if user:
+                qs = Customer.objects.filter(created_by=user, gstin__iexact=norm_value)
+                if self.instance and self.instance.pk:
+                    qs = qs.exclude(pk=self.instance.pk)
+                existing = qs.first()
+                if existing:
+                    raise serializers.ValidationError(
+                        f"A customer with GSTIN '{norm_value}' already exists: '{existing.name}'."
+                    )
+        return norm_value
 
     def create(self, validated_data):
         meta_data = validated_data.pop('meta', None)
@@ -1660,7 +1825,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             PartyMeta.objects.create(customer=customer, **meta_data)
         else:
             PartyMeta.objects.create(customer=customer)
-            
+        from billing.party_link import autolink_customer
+        autolink_customer(customer, validated_data['created_by'])
         return customer
 
     def update(self, instance, validated_data):
@@ -1677,7 +1843,9 @@ class CustomerSerializer(serializers.ModelSerializer):
             for attr, value in meta_data.items():
                 setattr(meta, attr, value)
             meta.save()
-            
+        from billing.party_link import autolink_customer
+        tenant = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
+        autolink_customer(instance, tenant)
         return instance
 
     def to_representation(self, instance):
@@ -1707,10 +1875,12 @@ class PaymentSerializer(serializers.ModelSerializer):
             'id', 'customer', 'customer_name', 'invoice', 'invoice_number', 'date', 'amount',
             'mode', 'reference', 'notes', 'supply_kind', 'adjusted_on', 'created_by', 'created_at',
             'unapplied_amount', 'adjustments', 'gst_rate', 'place_of_supply', 'receipt_voucher_number',
+            'bank_account_id',
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'invoice_number', 'receipt_voucher_number']
         extra_kwargs = {'gst_rate': {'required': False, 'allow_null': True},
-                        'place_of_supply': {'required': False, 'allow_blank': True}}
+                        'place_of_supply': {'required': False, 'allow_blank': True},
+                        'bank_account_id': {'required': False, 'allow_blank': True}}
 
     def to_internal_value(self, data):
         # 'unknown' rate -> 18% (Rule 50 proviso); 'unknown' POS kept as UNKNOWN -> inter-state (IGST).

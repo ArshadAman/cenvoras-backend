@@ -89,6 +89,7 @@ class ProductCreateIdempotencyTests(TestCase):
 	def test_duplicate_product_submission_returns_existing_product(self):
 		payload = {
 			"name": "Idempotent Item",
+			"hsn_sac_code": "84713010",
 			"sale_price": "125.00",
 			"cost_price": "100.00",
 			"unit": "pcs",
@@ -444,6 +445,7 @@ class ProductSoftDeleteAndArchivalTests(TestCase):
 	def test_archived_product_can_be_reactivated(self):
 		product = Product.objects.create(
 			name="Seasonal Item",
+			hsn_sac_code="84713010",
 			sale_price=80,
 			is_active=False,
 			created_by=self.tenant

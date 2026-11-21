@@ -10,6 +10,9 @@ def sync_product_stock_on_stockpoint_save(sender, instance, **kwargs):
     try:
         if instance.batch_id and instance.batch and instance.batch.product:
             instance.batch.product.recalculate_stock(save=True)
+        if instance.warehouse_id and instance.warehouse and instance.warehouse.created_by_id:
+            from .views import invalidate_tenant_catalog
+            invalidate_tenant_catalog(instance.warehouse.created_by_id)
     except Exception:
         pass
 
@@ -21,6 +24,9 @@ def sync_product_stock_on_stockpoint_delete(sender, instance, **kwargs):
     try:
         if instance.batch_id and instance.batch and instance.batch.product:
             instance.batch.product.recalculate_stock(save=True)
+        if instance.warehouse_id and instance.warehouse and instance.warehouse.created_by_id:
+            from .views import invalidate_tenant_catalog
+            invalidate_tenant_catalog(instance.warehouse.created_by_id)
     except Exception:
         pass
 

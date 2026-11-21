@@ -116,9 +116,11 @@ def increase_stock_on_purchase(sender, instance, created, **kwargs):
                 StockPoint.objects.filter(pk=stock_point.pk).update(quantity=F('quantity') + qty_to_add)
 
     try:
+        if not user and instance.product:
+            user = getattr(instance.product, 'created_by', None)
         if user:
             from inventory.views import invalidate_tenant_catalog
-            tenant_id = getattr(user, 'id', None)
+            tenant_id = getattr(getattr(user, 'active_tenant', user), 'id', None) or getattr(user, 'id', None)
             if tenant_id:
                 invalidate_tenant_catalog(tenant_id)
     except Exception:
@@ -327,9 +329,11 @@ def decrease_stock_on_purchase_delete(sender, instance, **kwargs):
 
     try:
         user = getattr(instance.purchase_bill, 'created_by', None) if instance.purchase_bill else None
+        if not user and instance.product:
+            user = getattr(instance.product, 'created_by', None)
         if user:
             from inventory.views import invalidate_tenant_catalog
-            tenant_id = getattr(user, 'id', None)
+            tenant_id = getattr(getattr(user, 'active_tenant', user), 'id', None) or getattr(user, 'id', None)
             if tenant_id:
                 invalidate_tenant_catalog(tenant_id)
     except Exception:

@@ -125,6 +125,18 @@ class Product(models.Model):
                     self.save(update_fields=['stock'])
         return self.stock
 
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.created_by_id:
+            _invalidate_catalog_on_commit([self.created_by_id])
+
+    def delete(self, *args, **kwargs):
+        tenant_id = self.created_by_id
+        res = super().delete(*args, **kwargs)
+        if tenant_id:
+            _invalidate_catalog_on_commit([tenant_id])
+        return res
+
 class Warehouse(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100)
@@ -182,6 +194,25 @@ class StockPoint(models.Model):
     objects = StockPointQuerySet.as_manager()
 
     last_updated = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        try:
+            creator_id = self.warehouse.created_by_id if self.warehouse_id else None
+            if creator_id:
+                _invalidate_catalog_on_commit([creator_id])
+        except Exception:
+            pass
+
+    def delete(self, *args, **kwargs):
+        try:
+            creator_id = self.warehouse.created_by_id if self.warehouse_id else None
+        except Exception:
+            creator_id = None
+        res = super().delete(*args, **kwargs)
+        if creator_id:
+            _invalidate_catalog_on_commit([creator_id])
+        return res
 
     class Meta:
         unique_together = ('warehouse', 'batch')

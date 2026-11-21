@@ -607,6 +607,15 @@ def inventory_csv_job_status(request, task_id):
         payload['total'] = total or (created + updated + skipped + failed)
         payload['current'] = payload['total']
         payload['errors'] = result.get('errors', [])
+        # Include detailed per-row results from task result or cache fallback
+        details = result.get('details')
+        if not details:
+            try:
+                details = cache.get(f"bulk_upload_results_{task_id}")
+            except Exception:
+                details = None
+        if details:
+            payload['details'] = details
     elif task.state == 'FAILURE':
         payload['percent'] = 100
         payload['error'] = str(task.result)

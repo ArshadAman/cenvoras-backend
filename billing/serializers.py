@@ -1028,6 +1028,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         customer = getattr(instance, 'customer', None)
+        cust_id = str(customer.id) if customer and getattr(customer, 'id', None) else (str(instance.customer_id) if getattr(instance, 'customer_id', None) else None)
+        data['customer'] = cust_id
+        data['customer_id'] = cust_id
         data['customer_email'] = getattr(customer, 'email', None) if customer else data.get('customer_email')
         data['customer_phone'] = getattr(customer, 'phone', None) if customer else data.get('customer_phone')
         data['customer_address'] = getattr(instance, 'customer_address', None) or (getattr(customer, 'address', None) if customer else data.get('customer_address'))

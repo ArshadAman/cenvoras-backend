@@ -363,10 +363,20 @@ def increase_stock_on_sale_delete(sender, instance, **kwargs):
 # FINANCIAL SIGNALS (Atomic)
 # ---------------------------------------------------------
 
+def _recompute_customer_after_commit(customer_id):
+    from django.db import transaction
+    from billing.balance_sync import recompute_customer_balance
+    if not customer_id:
+        return
+    try:
+        transaction.on_commit(lambda: recompute_customer_balance(customer_id))
+    except Exception:
+        recompute_customer_balance(customer_id)
+
+
 @receiver(post_save, sender=SalesInvoice)
 def update_balance_on_sale(sender, instance, created, **kwargs):
-    # Moved to SalesInvoiceItem signals for item-level tracking
-    pass
+    _recompute_customer_after_commit(instance.customer_id)
 
 @receiver(post_delete, sender=SalesInvoice)
 def revert_balance_and_challans_on_sale_delete(sender, instance, **kwargs):
@@ -401,6 +411,7 @@ def revert_balance_and_challans_on_sale_delete(sender, instance, **kwargs):
                 DocumentSyncService.reconcile_sales_order_dispatched_state(sos, instance.created_by)
 
     reconcile_sequence_from_db(instance.created_by, 'sales_invoice')
+    _recompute_customer_after_commit(instance.customer_id)
 
 @receiver(pre_save, sender=Payment)
 def track_payment_pre_save(sender, instance, **kwargs):
@@ -687,13 +698,6 @@ def reconcile_delivery_challan_sequence(sender, instance, **kwargs):
 # UAT P1 item 2 (Rudra CA): credit notes reduce what the customer owes. Recompute the stored
 # balance from the shared formula after the CN (and its items/total) is committed.
 from billing.models_returns import CreditNote as _CreditNote  # noqa: E402
-
-
-def _recompute_customer_after_commit(customer_id):
-    from django.db import transaction
-    from billing.balance_sync import recompute_customer_balance
-    if customer_id:
-        transaction.on_commit(lambda: recompute_customer_balance(customer_id))
 
 
 @receiver(post_save, sender=_CreditNote)

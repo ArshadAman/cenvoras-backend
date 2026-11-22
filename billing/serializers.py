@@ -1684,7 +1684,7 @@ class VendorSerializer(serializers.ModelSerializer):
         except ValueError as exc:
             raise serializers.ValidationError(str(exc) or GSTIN_INVALID_MSG)
         if not gstin:
-            return value
+            return None
         user = getattr(self.context['request'].user, 'active_tenant', self.context['request'].user)
         qs = Vendor.objects.filter(created_by=user, gstin__iexact=gstin)
         if self.instance:

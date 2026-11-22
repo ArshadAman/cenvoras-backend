@@ -158,10 +158,33 @@ def vendor_update_delete(request, pk):
                 "success": True,
                 "message": "Vendor deleted successfully."
             }, status=status.HTTP_204_NO_CONTENT)
-        except ProtectedError:
+        except ProtectedError as e:
+            docs = []
+            doc_summary = []
+            for obj in getattr(e, 'protected_objects', []):
+                model_name = getattr(obj._meta, 'verbose_name', type(obj).__name__).title()
+                num = (
+                    getattr(obj, 'bill_number', None) or 
+                    getattr(obj, 'po_number', None) or 
+                    getattr(obj, 'order_number', None) or 
+                    getattr(obj, 'debit_note_number', None) or 
+                    str(obj)
+                )
+                docs.append({'type': model_name, 'identifier': str(num), 'id': str(getattr(obj, 'id', ''))})
+                doc_summary.append(f"{model_name} '{num}'")
+
+            if doc_summary:
+                detail_msg = ", ".join(doc_summary[:5])
+                if len(doc_summary) > 5:
+                    detail_msg += f" and {len(doc_summary) - 5} more"
+                msg = f"Cannot delete vendor '{vendor.name}'. Linked to: {detail_msg}. Delete or reassign these documents first."
+            else:
+                msg = f"Cannot delete vendor '{vendor.name}'. They are currently linked to existing transactions (purchase bills, purchase orders, etc.). Delete those transactions first."
+
             return Response({
                 "success": False,
-                "message": "Cannot delete this vendor. They are currently linked to existing transactions (like purchase bills). You must delete those transactions first."
+                "message": msg,
+                "blocking_documents": docs
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({

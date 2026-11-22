@@ -263,7 +263,7 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             'id', 'bill_number', 'bill_date', 'due_date',
             'vendor', 'vendor_name', 'vendor_display', 'vendor_address', 'vendor_gstin', 'gst_treatment',
             'place_of_supply', 'warehouse', 'journal', 'is_reverse_charge', 'rcm_receipt_date',
-            'total_amount', 'amount_paid', 'payment_status', 'created_by', 'created_at', 'items', 'meta'
+            'total_amount', 'amount_paid', 'payment_status', 'round_off', 'additional_charges', 'created_by', 'created_at', 'items', 'meta'
         ]
         read_only_fields = ['id', 'created_by', 'created_at', 'amount_paid', 'payment_status']
         extra_kwargs = {'bill_number': {'required': False, 'allow_blank': True}}
@@ -390,7 +390,12 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
             (self._vendor_payable(item, _bill_rcm) for item in items_data),
             Decimal('0.00')
         )
-        validated_data['total_amount'] = recalculated_total
+        from billing.sync_service import DocumentSyncService
+        raw_charges = validated_data.get('additional_charges', [])
+        is_tax_locked = getattr(self, '_tax_locked_unregistered', False)
+        charges, _, _, charges_gross = DocumentSyncService.process_additional_charges(raw_charges, is_tax_locked=is_tax_locked)
+        validated_data['additional_charges'] = charges
+        validated_data['total_amount'] = recalculated_total + charges_gross
         
         # Fix 500 Error: explicitly pass created_by to avoid IntegrityError
         validated_data['created_by'] = user
@@ -524,13 +529,18 @@ class PurchaseBillSerializer(serializers.ModelSerializer):
                 }, instance.is_reverse_charge) for item in instance.items.all()),
                 Decimal('0'),
             )
-            instance.total_amount = recalculated_total
-            instance.save(update_fields=['total_amount'])
+            from billing.sync_service import DocumentSyncService
+            raw_charges = validated_data.get('additional_charges', instance.additional_charges)
+            is_tax_locked = getattr(self, '_tax_locked_unregistered', False)
+            charges, _, _, charges_gross = DocumentSyncService.process_additional_charges(raw_charges, is_tax_locked=is_tax_locked)
+            instance.additional_charges = charges
+            instance.total_amount = recalculated_total + charges_gross
+            instance.save(update_fields=['total_amount', 'additional_charges'])
             if instance.amount_paid > instance.total_amount:
                 instance.amount_paid = instance.total_amount
 
             instance.refresh_payment_status(save=False)
-            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status'])
+            instance.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'additional_charges'])
 
         tenant_id = getattr(user, 'id', None)
         transaction.on_commit(lambda bill_id=instance.id: _rebuild_purchase_bill_ledger(bill_id))
@@ -962,7 +972,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # Exclude 'customer' from fields to avoid UUID validation issues
         fields = ['id', 'customer_name', 'customer_details', 'customer_email', 'customer_phone', 'customer_address', 
                   'invoice_number', 'invoice_date', 'due_date', 'po_number', 'po_date', 'challan_number', 'challan_date', 'delivery_challans', 'delivery_address', 'place_of_supply', 'gst_treatment',
-                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'is_reverse_charge', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
+                  'journal', 'warehouse', 'status', 'total_amount', 'amount_paid', 'payment_status', 'round_off', 'apply_round_off', 'additional_charges', 'is_reverse_charge', 'created_by', 'created_at', 'items', 'meta', 'tax_type', 'bank_account_id', 'template_id']
 
     def get_customer_details(self, instance):
         customer = getattr(instance, 'customer', None)
@@ -1026,6 +1036,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         data['display_number'] = display_document_number(instance.invoice_number)
         data['bank_account_id'] = getattr(getattr(instance, 'meta', None), 'bank_account_id', None)
         data['template_id'] = getattr(getattr(instance, 'meta', None), 'template_id', None)
+        data['additional_charges'] = getattr(instance, 'additional_charges', []) or []
         try:
             from billing.gst_rules import invoice_pos_decision
             _c, warn, _e = invoice_pos_decision(customer, instance.place_of_supply, list(instance.items.all()))
@@ -1406,6 +1417,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
             from billing.round_off import compute_round_off, resolve_apply_round_off
             from billing.sync_service import DocumentSyncService
+            charges, _, _, charges_gross = DocumentSyncService.process_additional_charges(
+                sales_invoice.additional_charges
+            )
+            sales_invoice.additional_charges = charges
             unrounded_total = sum(
                 (
                     DocumentSyncService.calculate_line_gross(
@@ -1415,7 +1430,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     if getattr(item, 'row_type', 'item') != 'note'
                 ),
                 Decimal('0'),
-            )
+            ) + charges_gross
             recalculated_total, round_off = compute_round_off(
                 unrounded_total,
                 resolve_apply_round_off(sales_invoice.created_by, _apply_round_off, _client_round_off))
@@ -1424,7 +1439,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if sales_invoice.amount_paid > sales_invoice.total_amount:
                 sales_invoice.amount_paid = sales_invoice.total_amount
             sales_invoice.refresh_payment_status(save=False)
-            sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off'])
+            sales_invoice.save(update_fields=['total_amount', 'amount_paid', 'payment_status', 'round_off', 'additional_charges'])
             
             # Create Transaction Meta
             meta_dict = dict(meta_data or {})
@@ -1481,6 +1496,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         old_place_of_supply = instance.place_of_supply
         old_total_amount = Decimal(str(instance.total_amount or 0))
         resolved_customer = getattr(self, '_customer_obj', None)
+
+        if 'additional_charges' in validated_data:
+            from billing.sync_service import DocumentSyncService
+            charges, _, _, _ = DocumentSyncService.process_additional_charges(validated_data['additional_charges'])
+            validated_data['additional_charges'] = charges
         
         # Check draft-to-final promotion — keep a live unique number
         new_status = validated_data.get('status', old_status)

@@ -338,6 +338,39 @@ class AccountingService:
                 created_by=user
             )
 
+        # Process additional/miscellaneous charges (Freight, Packaging, Loading, etc.)
+        charges = getattr(sales_invoice, 'additional_charges', []) or []
+        from billing.sync_service import DocumentSyncService
+        sanitized_charges, _, _, _ = DocumentSyncService.process_additional_charges(charges)
+        for idx, charge in enumerate(sanitized_charges, 1):
+            chg_amt = Decimal(str(charge['amount'])).quantize(Decimal('0.01'))
+            chg_tax = Decimal(str(charge['tax_amount'])).quantize(Decimal('0.01'))
+            chg_rate = Decimal(str(charge['tax_rate']))
+            chg_name = charge['name']
+
+            total_taxable += chg_amt
+            if chg_tax > 0:
+                if is_interstate:
+                    total_igst += chg_tax
+                else:
+                    line_cgst = (chg_tax / Decimal('2')).quantize(Decimal('0.01'))
+                    line_sgst = chg_tax - line_cgst
+                    total_cgst += line_cgst
+                    total_sgst += line_sgst
+
+            # Credit: Sales Revenue for additional charge
+            GeneralLedgerEntry.objects.create(
+                date=sales_invoice.invoice_date,
+                account=sr_account,
+                debit=0,
+                credit=chg_amt,
+                description=f"{chg_name} (Taxable: ₹{chg_amt}, Tax: {chg_rate}%) - Invoice {sales_invoice.invoice_number}",
+                reference=f"{sales_invoice.invoice_number}-charge-{idx}",
+                sales_invoice=sales_invoice,
+                customer=None,
+                created_by=user
+            )
+
         # Credit: Output GST (Duties & Taxes Liability)
         if total_igst > Decimal('0.00'):
             GeneralLedgerEntry.objects.create(
@@ -546,6 +579,39 @@ class AccountingService:
             # the blocked part of RCM tax is already inside cls_['blocked_tax'] (cost)
             total_tax = (sum(itc.values(), Decimal('0.00')) + to_cost
                          + sum(cls_['itc_rcm'].values(), Decimal('0.00')))
+
+        # Process additional/miscellaneous charges (Freight, Packaging, Loading, etc.)
+        charges = getattr(purchase_bill, 'additional_charges', []) or []
+        from billing.sync_service import DocumentSyncService
+        sanitized_charges, _, _, _ = DocumentSyncService.process_additional_charges(charges)
+        for idx, charge in enumerate(sanitized_charges, 1):
+            chg_amt = Decimal(str(charge['amount'])).quantize(Decimal('0.01'))
+            chg_tax = Decimal(str(charge['tax_amount'])).quantize(Decimal('0.01'))
+            chg_rate = Decimal(str(charge['tax_rate']))
+            chg_name = charge['name']
+
+            total_taxable += chg_amt
+            GeneralLedgerEntry.objects.create(
+                date=purchase_bill.bill_date,
+                account=pur_account,
+                debit=chg_amt,
+                credit=0,
+                description=f"{chg_name} (Taxable: ₹{chg_amt}, Tax: {chg_rate}%) - Bill {purchase_bill.bill_number}",
+                reference=f"{purchase_bill.bill_number}-charge-{idx}",
+                purchase_bill=purchase_bill,
+                vendor=vendor_obj,
+                created_by=user
+            )
+
+            if chg_tax > 0:
+                total_tax += chg_tax
+                if is_interstate:
+                    _gl(accounts['input_igst'], chg_tax, 0, f"Input IGST on {chg_name} for Bill {purchase_bill.bill_number}")
+                else:
+                    line_cgst = (chg_tax / Decimal('2')).quantize(Decimal('0.01'))
+                    line_sgst = chg_tax - line_cgst
+                    _gl(accounts['input_cgst'], line_cgst, 0, f"Input CGST on {chg_name} for Bill {purchase_bill.bill_number}")
+                    _gl(accounts['input_sgst'], line_sgst, 0, f"Input SGST on {chg_name} for Bill {purchase_bill.bill_number}")
 
         # Create detailed description with line items for accounts payable
         if line_items:

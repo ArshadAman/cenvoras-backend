@@ -162,7 +162,8 @@ def customer_list_create(request):
 def customer_detail(request, pk):
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=tenant)
+        from django.db.models import Q
+        customer = Customer.objects.get(Q(created_by=tenant) | Q(created_by__parent=tenant), pk=pk)
     except Customer.DoesNotExist:
         return Response({
             "success": False,
@@ -170,6 +171,7 @@ def customer_detail(request, pk):
         }, status=status.HTTP_404_NOT_FOUND)
 
     recompute_customer_balances_for_customers([customer], tenant)
+    customer.refresh_from_db()
     
     serializer = CustomerSerializer(customer)
     return Response(serializer.data)
@@ -215,7 +217,8 @@ def customer_detail(request, pk):
 def customer_update_delete(request, pk):
     tenant = getattr(request.user, 'active_tenant', request.user)
     try:
-        customer = Customer.objects.get(pk=pk, created_by=tenant)
+        from django.db.models import Q
+        customer = Customer.objects.get(Q(created_by=tenant) | Q(created_by__parent=tenant), pk=pk)
     except Customer.DoesNotExist:
         return Response({
             "success": False,
@@ -250,10 +253,34 @@ def customer_update_delete(request, pk):
                 "success": True,
                 "message": "Customer deleted successfully."
             }, status=status.HTTP_204_NO_CONTENT)
-        except ProtectedError:
+        except ProtectedError as e:
+            docs = []
+            doc_summary = []
+            for obj in getattr(e, 'protected_objects', []):
+                model_name = getattr(obj._meta, 'verbose_name', type(obj).__name__).title()
+                num = (
+                    getattr(obj, 'invoice_number', None) or 
+                    getattr(obj, 'order_number', None) or 
+                    getattr(obj, 'quotation_number', None) or 
+                    getattr(obj, 'challan_number', None) or 
+                    getattr(obj, 'credit_note_number', None) or 
+                    str(obj)
+                )
+                docs.append({'type': model_name, 'identifier': str(num), 'id': str(getattr(obj, 'id', ''))})
+                doc_summary.append(f"{model_name} '{num}'")
+
+            if doc_summary:
+                detail_msg = ", ".join(doc_summary[:5])
+                if len(doc_summary) > 5:
+                    detail_msg += f" and {len(doc_summary) - 5} more"
+                msg = f"Cannot delete customer '{customer.name}'. Linked to: {detail_msg}. Delete or reassign these documents first."
+            else:
+                msg = f"Cannot delete customer '{customer.name}'. They are currently linked to existing transactions (invoices, orders, quotations, etc.). Delete those transactions first."
+
             return Response({
                 "success": False,
-                "message": "Cannot delete this customer. They are currently linked to existing transactions (like invoices, orders, etc.). You must delete those transactions first."
+                "message": msg,
+                "blocking_documents": docs
             }, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({

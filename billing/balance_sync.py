@@ -39,24 +39,39 @@ def customer_balance_breakdown(tenant, customer_ids=None):
     """
     from .models_returns import CreditNote
 
-    customers = Customer.objects.filter(created_by=tenant)
+    tenant_obj = getattr(tenant, 'active_tenant', tenant) if tenant else None
+    tenant_filter = (Q(created_by=tenant_obj) | Q(created_by__parent=tenant_obj)) if tenant_obj else Q()
+
     if customer_ids is not None:
-        customers = customers.filter(id__in=list(customer_ids))
+        customers = Customer.objects.filter(id__in=list(customer_ids))
+        if tenant_obj:
+            customers = customers.filter(tenant_filter)
+    else:
+        customers = Customer.objects.filter(tenant_filter)
+
     ids = list(customers.values_list('id', flat=True))
     if not ids:
         return {}
 
-    invoices = _sum_by_customer(
-        SalesInvoice.objects.filter(created_by=tenant, customer_id__in=ids).exclude(status='draft'),
-        'total_amount')
-    receipts_qs = Payment.objects.filter(created_by=tenant, customer_id__in=ids).exclude(invoice__status='draft')
+    inv_qs = SalesInvoice.objects.filter(customer_id__in=ids).exclude(status='draft')
+    if tenant_obj:
+        inv_qs = inv_qs.filter(tenant_filter)
+    invoices = _sum_by_customer(inv_qs, 'total_amount')
+
+    receipts_qs = Payment.objects.filter(customer_id__in=ids).exclude(invoice__status='draft')
+    if tenant_obj:
+        receipts_qs = receipts_qs.filter(tenant_filter)
     receipts = _sum_by_customer(receipts_qs, 'amount')
     unlinked_receipts = _sum_by_customer(receipts_qs.filter(invoice__isnull=True), 'amount')
+
     applied = _sum_by_customer(
         AdvanceAdjustment.objects.filter(payment__customer_id__in=ids, payment__invoice__isnull=True,
                                          reversed_on__isnull=True),
         'gross', key='payment__customer_id')
-    cn_qs = CreditNote.objects.filter(created_by=tenant, customer_id__in=ids)
+
+    cn_qs = CreditNote.objects.filter(customer_id__in=ids)
+    if tenant_obj:
+        cn_qs = cn_qs.filter(tenant_filter)
     credit_notes = _sum_by_customer(cn_qs, 'total_amount')
     unlinked_cns = _sum_by_customer(cn_qs.filter(original_invoice__isnull=True), 'total_amount')
 
@@ -102,7 +117,8 @@ def invoice_outstanding_map(invoices):
 
 def customer_outstanding(customer):
     """Outstanding for one customer (Decimal)."""
-    row = customer_balance_breakdown(customer.created_by, [customer.id]).get(customer.id)
+    tenant = getattr(customer.created_by, 'active_tenant', customer.created_by)
+    row = customer_balance_breakdown(tenant, [customer.id]).get(customer.id)
     return row['outstanding'] if row else _ZERO
 
 
@@ -155,12 +171,14 @@ def recompute_customer_balances_for_customers(customers, tenant):
     customers = list(customers)
     if not customers:
         return
-    breakdown = customer_balance_breakdown(tenant, [c.id for c in customers])
+    tenant_obj = getattr(tenant, 'active_tenant', tenant)
+    breakdown = customer_balance_breakdown(tenant_obj, [c.id for c in customers])
     for customer in customers:
         row = breakdown.get(customer.id)
         if row is None:
-            continue
-        computed_balance = row['outstanding']
+            computed_balance = _ZERO
+        else:
+            computed_balance = row['outstanding']
         if customer.current_balance != computed_balance:
             Customer.objects.filter(pk=customer.id).update(current_balance=computed_balance)
             customer.current_balance = computed_balance

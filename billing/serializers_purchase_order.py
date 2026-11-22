@@ -79,7 +79,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PurchaseOrder
-        fields = ['id', 'po_number', 'vendor', 'vendor_id', 'vendor_name', 'vendor_display_name', 'expected_date', 'status', 'notes', 'total_amount', 'items', 'created_at']
+        fields = ['id', 'po_number', 'vendor', 'vendor_id', 'vendor_name', 'vendor_display_name', 'expected_date', 'status', 'notes', 'round_off', 'additional_charges', 'total_amount', 'items', 'created_at']
         extra_kwargs = {'po_number': {'required': False, 'allow_blank': True, 'allow_null': True}}
 
     def get_vendor_display_name(self, obj):

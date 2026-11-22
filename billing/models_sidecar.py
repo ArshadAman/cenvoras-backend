@@ -203,6 +203,8 @@ class SalesOrder(models.Model):
     )
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     notes = models.TextField(blank=True)
     po_number = models.CharField(max_length=100, blank=True, null=True, help_text="Customer PO Number")
     po_date = models.DateField(null=True, blank=True, help_text="Customer PO Date")
@@ -312,6 +314,7 @@ class DeliveryChallan(models.Model):
     
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     
     STATUS_CHOICES = [
         ('draft', 'Draft'),
@@ -427,6 +430,7 @@ class Quotation(models.Model):
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     bank_account_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of bank account selected for this quotation")
     template_id = models.CharField(max_length=50, blank=True, null=True, help_text="ID of preview template/format selected for this quotation")
 

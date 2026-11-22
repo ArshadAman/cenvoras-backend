@@ -641,6 +641,13 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     story.append(Spacer(1, 4 * mm))
 
     # 4. Summary and Tax Block (Kept together to avoid splitting)
+    # Process additional charges (Freight, Packaging, Loading, etc.)
+    charges = getattr(invoice_obj, 'additional_charges', []) or []
+    from billing.sync_service import DocumentSyncService
+    sanitized_charges, chg_taxable, chg_tax, _ = DocumentSyncService.process_additional_charges(charges)
+    subtotal += chg_taxable
+    total_tax += chg_tax
+
     subtotal = subtotal.quantize(Decimal('0.01'))
     total_tax = total_tax.quantize(Decimal('0.01'))
     unrounded_total = (subtotal + total_tax).quantize(Decimal('0.01'))
@@ -663,8 +670,13 @@ def generate_invoice_pdf(invoice_obj, tenant, document_type='invoice', template_
     is_interstate = (seller_state_code != pos_code)
 
     summary_rows = [
-        [Paragraph("Taxable Subtotal:", body_style), Paragraph(f"Rs. {subtotal:,.2f}", td_style_right)],
+        [Paragraph("Items Subtotal:", body_style), Paragraph(f"Rs. {(subtotal - chg_taxable):,.2f}", td_style_right)],
     ]
+    for chg in sanitized_charges:
+        c_lbl = chg['name']
+        if chg['tax_rate'] > 0:
+            c_lbl += f" ({chg['tax_rate']:g}% GST)"
+        summary_rows.append([Paragraph(f"{c_lbl}:", body_style), Paragraph(f"Rs. {Decimal(str(chg['amount'])):,.2f}", td_style_right)])
     if total_tax > 0:
         if is_interstate:
             summary_rows.append([Paragraph("Output IGST:", body_style), Paragraph(f"Rs. {total_tax:,.2f}", td_style_right)])

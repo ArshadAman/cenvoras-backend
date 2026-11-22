@@ -205,6 +205,8 @@ class PurchaseBill(models.Model):
     journal = models.CharField(max_length=50, default="Purchases")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, help_text="Warehouse where items are received")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
 
@@ -280,6 +282,8 @@ class PurchaseOrder(models.Model):
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
     notes = models.TextField(blank=True, null=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_off = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     source_sales_order = models.ForeignKey(
         'billing.SalesOrder',
         on_delete=models.SET_NULL,
@@ -389,6 +393,7 @@ class SalesInvoice(models.Model):
         help_text="Original sales order this invoice was converted from"
     )
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    additional_charges = models.JSONField(default=list, blank=True, help_text="Miscellaneous expenses such as freight, packing, forwarding, loading, etc.")
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, choices=BillPaymentStatus.choices, default=BillPaymentStatus.PENDING)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

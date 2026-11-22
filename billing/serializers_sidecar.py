@@ -314,7 +314,7 @@ class SalesOrderSerializer(serializers.ModelSerializer):
             'id', 'order_number', 'date', 'customer', 'customer_name', 'customer_display_name',
             'customer_email', 'customer_phone', 'customer_address', 'customer_gstin', 'due_date',
             'delivery_address', 'place_of_supply', 'round_off', 'stage', 'total_amount', 'notes',
-            'po_number', 'po_date', 'source_quotation', 'bank_account_id', 'template_id', 'items',
+            'po_number', 'po_date', 'source_quotation', 'bank_account_id', 'template_id', 'additional_charges', 'items',
             'created_by', 'created_at', 'invoice_number', 'invoice_date'
         ]
         read_only_fields = ['id', 'created_at', 'created_by', 'customer']
@@ -699,6 +699,7 @@ class DeliveryChallanSerializer(serializers.ModelSerializer):
             'warehouse',
             'total_amount',
             'round_off',
+            'additional_charges',
             'status',
             'is_billed',
             'converted_invoice',
@@ -1117,6 +1118,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             'warehouse',
             'total_amount',
             'round_off',
+            'additional_charges',
             'bank_account_id',
             'template_id',
             'items',

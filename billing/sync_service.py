@@ -54,8 +54,60 @@ class DocumentSyncService:
         ).quantize(Decimal('0.01'))
 
     @classmethod
+    def process_additional_charges(cls, charges, is_tax_locked=False):
+        """
+        Validates, normalizes, and computes taxes for additional/miscellaneous charges.
+        Returns: (sanitized_charges_list, total_taxable, total_tax, total_gross)
+        """
+        if not charges or not isinstance(charges, list):
+            return [], Decimal('0.00'), Decimal('0.00'), Decimal('0.00')
+
+        sanitized = []
+        total_taxable = Decimal('0.00')
+        total_tax = Decimal('0.00')
+
+        for item in charges:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            if not name:
+                name = 'Miscellaneous Expense'
+            try:
+                amt = Decimal(str(item.get('amount') or '0')).quantize(Decimal('0.01'))
+            except Exception:
+                amt = Decimal('0.00')
+            if amt <= Decimal('0.00'):
+                continue
+
+            if is_tax_locked:
+                tax_rate = Decimal('0.00')
+            else:
+                try:
+                    tax_rate = Decimal(str(item.get('tax_rate') or '0')).quantize(Decimal('0.01'))
+                except Exception:
+                    tax_rate = Decimal('0.00')
+
+            tax_amt = ((amt * tax_rate) / Decimal('100')).quantize(Decimal('0.01'))
+            gross = amt + tax_amt
+
+            total_taxable += amt
+            total_tax += tax_amt
+
+            sanitized.append({
+                'id': str(item.get('id') or ''),
+                'name': name,
+                'amount': float(amt),
+                'tax_rate': float(tax_rate),
+                'tax_amount': float(tax_amt),
+                'total': float(gross),
+            })
+
+        total_gross = total_taxable + total_tax
+        return sanitized, total_taxable, total_tax, total_gross
+
+    @classmethod
     def recalculate_document_total(cls, document):
-        """Recalculates total_amount from items and updates document."""
+        """Recalculates total_amount from items and additional charges, updating document."""
         if hasattr(document, '_prefetched_objects_cache'):
             document._prefetched_objects_cache.clear()
 
@@ -70,6 +122,11 @@ class DocumentSyncService:
                 getattr(item, 'discount', 0),
                 getattr(item, 'tax', 0),
             )
+
+        charges = getattr(document, 'additional_charges', [])
+        _, _, _, charges_gross = cls.process_additional_charges(charges)
+        total += charges_gross
+
         existing_round_off = Decimal(str(getattr(document, 'round_off', 0) or 0))
         has_round_off_field = hasattr(document, 'round_off')
         if has_round_off_field and existing_round_off != 0:

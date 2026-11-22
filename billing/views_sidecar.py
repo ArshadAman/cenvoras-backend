@@ -273,6 +273,7 @@ def convert_order_to_invoice(request, pk):
                 po_date=order.po_date,
                 source_sales_order=order,
                 created_by=tenant,
+                additional_charges=order.additional_charges or [],
                 total_amount=Decimal('0.00'),
                 status='final',
             )
@@ -381,6 +382,10 @@ def convert_order_to_invoice(request, pk):
                     bonus_line.save()
 
             invoice.refresh_from_db()
+
+            from billing.sync_service import DocumentSyncService
+            _, _, _, charges_gross = DocumentSyncService.process_additional_charges(invoice.additional_charges)
+            total_items_amount += charges_gross
 
             from billing.round_off import compute_round_off
             from billing.sync_service import DocumentSyncService
@@ -984,6 +989,7 @@ def convert_challan_to_invoice(request, pk):
                 warehouse=challan.warehouse,
                 source_sales_order=challan.sales_order,
                 round_off=challan.round_off or Decimal('0.00'),
+                additional_charges=challan.additional_charges or [],
                 total_amount=Decimal('0.00'),  # Set to 0.00 initially so item signals add up cleanly
                 status='final',
                 created_by=tenant,
@@ -1037,6 +1043,10 @@ def convert_challan_to_invoice(request, pk):
                 )
                 inv_item._skip_stock_deduction = True
                 inv_item.save()
+
+            from billing.sync_service import DocumentSyncService
+            _, _, _, charges_gross = DocumentSyncService.process_additional_charges(invoice.additional_charges)
+            total_items_amount += charges_gross
 
             from billing.round_off import compute_round_off
             challan_had_unrounded_total = (

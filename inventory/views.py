@@ -150,9 +150,23 @@ class ProductListCreateView(generics.ListCreateAPIView):
 
         ordering = self.request.query_params.get('ordering')
         if ordering:
+            if ordering in ['status', '-status']:
+                from django.db.models import Case, When, Value, IntegerField
+                qs = qs.annotate(
+                    status_order=Case(
+                        When(stock__lt=0, then=Value(1)),
+                        When(stock=0, then=Value(2)),
+                        When(low_stock_alert__gt=0, stock__gt=0, stock__lte=F('low_stock_alert'), then=Value(3)),
+                        default=Value(4),
+                        output_field=IntegerField(),
+                    )
+                )
+                if ordering == 'status':
+                    return qs.order_by('status_order', 'stock', 'name')
+                else:
+                    return qs.order_by('-status_order', '-stock', 'name')
+
             field_map = {
-                'status': 'stock',
-                '-status': '-stock',
                 'current_stock': 'stock',
                 '-current_stock': '-stock',
                 'unit_price': 'price',
@@ -164,7 +178,6 @@ class ProductListCreateView(generics.ListCreateAPIView):
             valid_fields = [
                 'name', '-name',
                 'stock', '-stock',
-                'status', '-status',
                 'sale_price', '-sale_price',
                 'price', '-price',
                 'created_at', '-created_at',

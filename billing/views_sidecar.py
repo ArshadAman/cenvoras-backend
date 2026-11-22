@@ -54,6 +54,18 @@ def sales_order_list_create(request):
         search = request.GET.get('search', '')
         orders = SalesOrder.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta')
         
+        customer_filter = request.GET.get('customer')
+        if customer_filter:
+            from billing.models import Customer
+            cust_obj = Customer.objects.filter(id=customer_filter).first()
+            if cust_obj and cust_obj.name:
+                orders = orders.filter(
+                    Q(customer_id=customer_filter) | Q(customer__id=customer_filter) |
+                    Q(customer_name__iexact=cust_obj.name)
+                )
+            else:
+                orders = orders.filter(customer_id=customer_filter)
+
         if search:
             orders = orders.filter(
                 Q(order_number__icontains=search) | Q(customer__name__icontains=search)
@@ -1441,6 +1453,18 @@ def quotation_list_create(request):
             qs = qs.filter(Q(quotation_number__icontains=search) | Q(customer_name__icontains=search))
         if status_filter and status_filter != 'all':
             qs = qs.filter(status=status_filter)
+
+        customer_filter = request.GET.get('customer')
+        if customer_filter:
+            from billing.models import Customer
+            cust_obj = Customer.objects.filter(id=customer_filter).first()
+            if cust_obj and cust_obj.name:
+                qs = qs.filter(
+                    Q(customer_id=customer_filter) | Q(customer__id=customer_filter) |
+                    Q(customer_name__iexact=cust_obj.name)
+                )
+            else:
+                qs = qs.filter(customer_id=customer_filter)
 
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(qs, request)

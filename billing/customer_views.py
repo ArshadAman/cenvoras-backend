@@ -258,16 +258,46 @@ def customer_update_delete(request, pk):
             doc_summary = []
             for obj in getattr(e, 'protected_objects', []):
                 model_name = getattr(obj._meta, 'verbose_name', type(obj).__name__).title()
+                obj_cls = type(obj).__name__
+
                 num = (
                     getattr(obj, 'invoice_number', None) or 
                     getattr(obj, 'order_number', None) or 
                     getattr(obj, 'quotation_number', None) or 
                     getattr(obj, 'challan_number', None) or 
                     getattr(obj, 'credit_note_number', None) or 
-                    str(obj)
+                    getattr(obj, 'reference', None) or
+                    getattr(obj, 'receipt_voucher_number', None)
                 )
-                docs.append({'type': model_name, 'identifier': str(num), 'id': str(getattr(obj, 'id', ''))})
-                doc_summary.append(f"{model_name} '{num}'")
+                if not num and obj_cls == 'AdvanceAdjustment':
+                    payment_ref = getattr(getattr(obj, 'payment', None), 'reference', '')
+                    num = f"Advance Adjustment ({payment_ref or getattr(obj, 'date', '')})"
+                elif not num:
+                    num = str(obj)
+
+                raw_status = getattr(obj, 'status', getattr(obj, 'stage', None))
+
+                module_route = '/sales'
+                if obj_cls == 'SalesOrder':
+                    module_route = '/sales-orders'
+                elif obj_cls == 'Quotation':
+                    module_route = '/quotations'
+                elif obj_cls == 'DeliveryChallan':
+                    module_route = '/delivery-challans'
+                elif obj_cls == 'CreditNote':
+                    module_route = '/credit-notes'
+                elif obj_cls in ('Payment', 'AdvanceAdjustment'):
+                    module_route = '/payments'
+
+                docs.append({
+                    'type': model_name,
+                    'identifier': str(num),
+                    'id': str(getattr(obj, 'id', '')),
+                    'status': str(raw_status) if raw_status else None,
+                    'route': module_route,
+                })
+                status_suffix = f" ({raw_status})" if raw_status else ""
+                doc_summary.append(f"{model_name} '{num}'{status_suffix}")
 
             if doc_summary:
                 detail_msg = ", ".join(doc_summary[:5])

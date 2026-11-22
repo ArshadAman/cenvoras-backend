@@ -2,8 +2,9 @@ from datetime import date
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
-from billing.models import Customer
+from billing.models import Customer, SalesInvoice
 from billing.models_sidecar import SalesOrder, Quotation
+from billing.serializers import SalesInvoiceSerializer
 
 User = get_user_model()
 
@@ -89,3 +90,43 @@ class CustomerDeleteAndFilterTests(APITestCase):
         q_data = res_q.data if isinstance(res_q.data, list) else res_q.data.get('results', [])
         self.assertEqual(len(q_data), 1)
         self.assertEqual(q_data[0]['quotation_number'], 'QT-A')
+
+    def test_delete_customer_with_sales_invoice_reports_blocking_doc(self):
+        cust = Customer.objects.create(name='Customer With Invoice', created_by=self.user)
+        inv = SalesInvoice.objects.create(
+            invoice_number='INV-TEST-999',
+            invoice_date=date.today(),
+            customer=cust,
+            customer_name=cust.name,
+            total_amount=5000,
+            status='final',
+            created_by=self.user
+        )
+
+        res = self.client.delete(f'/api/billing/customers/{cust.id}/edit/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(res.data['success'])
+        self.assertIn("INV-TEST-999", res.data['message'])
+        self.assertEqual(len(res.data['blocking_documents']), 1)
+        doc = res.data['blocking_documents'][0]
+        self.assertEqual(doc['identifier'], 'INV-TEST-999')
+        self.assertEqual(doc['type'], 'Sales Invoice')
+        self.assertEqual(doc['status'], 'final')
+        self.assertEqual(doc['route'], '/sales')
+
+    def test_sales_invoice_serializer_exposes_customer_id(self):
+        cust = Customer.objects.create(name='Serialized Cust', created_by=self.user)
+        inv = SalesInvoice.objects.create(
+            invoice_number='INV-SER-001',
+            invoice_date=date.today(),
+            customer=cust,
+            customer_name=cust.name,
+            total_amount=1000,
+            status='final',
+            created_by=self.user
+        )
+        serialized = SalesInvoiceSerializer(inv).data
+        self.assertEqual(serialized['customer'], str(cust.id))
+        self.assertEqual(serialized['customer_id'], str(cust.id))
+        self.assertEqual(serialized['customer_details']['id'], str(cust.id))
+

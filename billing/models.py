@@ -26,6 +26,18 @@ class Customer(models.Model):
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Maximum allowed credit")
     current_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Positive = Customer Owes Us")
     allow_credit = models.BooleanField(default=True, help_text="If false, block sales when limit exceeded")
+    default_price_tier = models.CharField(
+        max_length=16,
+        choices=[('rate_a', 'Rate A (Retailer)'), ('rate_b', 'Rate B (Wholesale)'), ('rate_c', 'Rate C (Special/Hospital)')],
+        default='rate_a',
+        help_text="Default Marg-style price tier for this customer",
+    )
+
+    # Pharma & Food Compliance (Marg Parity)
+    dl_number_20b = models.CharField(max_length=64, blank=True, default='', help_text="Drug License Form 20B")
+    dl_number_21b = models.CharField(max_length=64, blank=True, default='', help_text="Drug License Form 21B")
+    dl_expiry_date = models.DateField(null=True, blank=True, help_text="Drug License validity expiry date")
+    fssai_number = models.CharField(max_length=32, blank=True, default='', help_text="FSSAI License Number")
     
     state = models.CharField(
         max_length=50, 
@@ -162,6 +174,11 @@ class Vendor(models.Model):
         null=True,
         help_text="Vendor's State/Region (Determines Tax Treatment)"
     )
+
+    # Pharma & Food Compliance (Marg Parity)
+    dl_number_20b = models.CharField(max_length=64, blank=True, default='', help_text="Drug License Form 20B")
+    dl_number_21b = models.CharField(max_length=64, blank=True, default='', help_text="Drug License Form 21B")
+    fssai_number = models.CharField(max_length=32, blank=True, default='', help_text="FSSAI License Number")
 
     # Compliance & GST Shield fields
     compliance_score = models.IntegerField(default=100, help_text="Vendor GST Compliance Score (0-100)")

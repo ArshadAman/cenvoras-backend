@@ -7,6 +7,7 @@ from .views import (
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
 from .views import TeamViewSet
+from . import migration_views
 
 router = DefaultRouter()
 router.register(r'team', TeamViewSet, basename='team')
@@ -32,4 +33,9 @@ urlpatterns = [
     # Backward compatibility (optional - can remove later)
     # Backward compatibility (optional - can remove later)
     path('register/', quick_signup_view, name='register_legacy'),
+
+    # Marg ERP & Tally Migration Pipeline
+    path('migration/marg-preview/', migration_views.marg_preview_view, name='marg_preview_view'),
+    path('migration/marg-dry-run/', migration_views.marg_dry_run_view, name='marg_dry_run_view'),
+    path('migration/marg-commit/', migration_views.marg_commit_view, name='marg_commit_view'),
 ] + router.urls

@@ -28,6 +28,7 @@ class BidirectionalSyncTests(TestCase):
             sale_price=Decimal('150.00'),
             stock=100,
             unit='pcs',
+            hsn_sac_code='8481',
             created_by=self.user
         )
         self.product2 = Product.objects.create(
@@ -36,6 +37,7 @@ class BidirectionalSyncTests(TestCase):
             sale_price=Decimal('20.00'),
             stock=500,
             unit='pcs',
+            hsn_sac_code='7318',
             created_by=self.user
         )
 
@@ -110,6 +112,7 @@ class BidirectionalSyncTests(TestCase):
                     'quantity': 4,
                     'price': '150.00',
                     'unit': 'pcs',
+                    'hsn_sac_code': '8481',
                 },
                 {
                     'id': str(inv_items[1].id),
@@ -118,6 +121,7 @@ class BidirectionalSyncTests(TestCase):
                     'quantity': 20,
                     'price': '20.00',
                     'unit': 'pcs',
+                    'hsn_sac_code': '7318',
                 }
             ]
         }
@@ -134,17 +138,17 @@ class BidirectionalSyncTests(TestCase):
         self.assertEqual(dc_item1.quantity, 4)
         self.assertEqual(challan.total_amount, Decimal('1000.00'))
 
-        # Verify Sales Order updated backward
+        # Verify Sales Order: ordered quantity remains 10, dispatched_quantity reflects delivery
         sales_order.refresh_from_db()
         so_item1.refresh_from_db()
-        self.assertEqual(so_item1.quantity, 4)
-        self.assertEqual(sales_order.total_amount, Decimal('1000.00'))
+        self.assertEqual(so_item1.quantity, 10)
+        self.assertEqual(so_item1.dispatched_quantity, 4)
 
-        # Verify Quotation updated backward
+        # Verify Quotation remains untouched (immutability of original commercial offer)
         quotation.refresh_from_db()
         q_item1.refresh_from_db()
-        self.assertEqual(q_item1.quantity, 4)
-        self.assertEqual(quotation.total_amount, Decimal('1000.00'))
+        self.assertEqual(q_item1.quantity, 10)
+        self.assertEqual(quotation.total_amount, Decimal('1900.00'))
 
     def test_backward_item_deletion_and_addition(self):
         """
@@ -182,7 +186,7 @@ class BidirectionalSyncTests(TestCase):
 
         # New product to add
         product3 = Product.objects.create(
-            name='Extra Bolt', price=Decimal('5.00'), sale_price=Decimal('8.00'), stock=100, created_by=self.user
+            name='Extra Bolt', price=Decimal('5.00'), sale_price=Decimal('8.00'), stock=100, hsn_sac_code='7318', created_by=self.user
         )
 
         # Edit Invoice: Delete product2 line, keep product1 line, add product3 line
@@ -195,17 +199,19 @@ class BidirectionalSyncTests(TestCase):
                     'quantity': 5,
                     'price': '100.00',
                     'unit': 'pcs',
+                    'hsn_sac_code': '8481',
                 },
                 {
                     'product': str(product3.id),
                     'quantity': 2,
                     'price': '8.00',
                     'unit': 'pcs',
+                    'hsn_sac_code': '7318',
                 }
             ]
         }
         res_edit = self.client.patch(f'/api/billing/sales-invoices/{inv.id}/edit/', patch_payload, format='json')
-        self.assertEqual(res_edit.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_edit.status_code, status.HTTP_200_OK, res_edit.data)
 
         # Verify deletion and addition in invoice: 5 * 100 + 2 * 8 = 516.00
         inv.refresh_from_db()
@@ -219,19 +225,18 @@ class BidirectionalSyncTests(TestCase):
         self.assertTrue(dc.items.filter(product=product3).exists())
         self.assertEqual(dc.total_amount, Decimal('516.00'))
 
-        # Verify Sales Order
+        # Verify Sales Order: deleting from challan preserves original ordered lines, and challan additions do not alter SO
         so.refresh_from_db()
-        self.assertEqual(so.items.count(), 2)
-        self.assertFalse(so.items.filter(product=self.product2).exists())
-        self.assertTrue(so.items.filter(product=product3).exists())
-        self.assertEqual(so.total_amount, Decimal('516.00'))
+        self.assertTrue(so.items.filter(product=self.product1).exists())
+        self.assertTrue(so.items.filter(product=self.product2).exists())
+        self.assertFalse(so.items.filter(product=product3).exists())
 
-        # Verify Quotation
+        # Verify Quotation remains untouched (immutability of original commercial offer)
         quotation.refresh_from_db()
         self.assertEqual(quotation.items.count(), 2)
-        self.assertFalse(quotation.items.filter(product=self.product2).exists())
-        self.assertTrue(quotation.items.filter(product=product3).exists())
-        self.assertEqual(quotation.total_amount, Decimal('516.00'))
+        self.assertTrue(quotation.items.filter(product=self.product2).exists())
+        self.assertFalse(quotation.items.filter(product=product3).exists())
+        self.assertEqual(quotation.total_amount, Decimal('600.00'))
 
     def test_forward_propagation_from_quotation(self):
         """

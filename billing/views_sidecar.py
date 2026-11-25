@@ -1447,7 +1447,7 @@ def quotation_list_create(request):
         search = request.GET.get('search', '').strip()
         status_filter = request.GET.get('status', '').strip()
 
-        qs = Quotation.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').order_by('-quotation_number', '-created_at')
+        qs = Quotation.objects.filter(created_by=tenant).select_related('customer', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch', 'sales_orders').order_by('-quotation_number', '-created_at')
 
         if search:
             qs = qs.filter(Q(quotation_number__icontains=search) | Q(customer_name__icontains=search))
@@ -1548,7 +1548,7 @@ def _validate_converted_quotation_items(quotation, request_data):
 def quotation_detail(request, pk):
     tenant = request.user.active_tenant
     try:
-        quotation = Quotation.objects.select_related('customer', 'warehouse', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch').get(pk=pk, created_by=tenant)
+        quotation = Quotation.objects.select_related('customer', 'warehouse', 'created_by').prefetch_related('items__product', 'items__product__meta', 'items__batch', 'sales_orders').get(pk=pk, created_by=tenant)
     except Quotation.DoesNotExist:
         return Response({'message': 'Quotation not found'}, status=status.HTTP_404_NOT_FOUND)
 

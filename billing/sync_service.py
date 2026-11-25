@@ -450,11 +450,17 @@ class DocumentSyncService:
         """Recursively propagates row changes to upstream and downstream documents."""
         visited = _get_visited_set()
         connections = cls.get_connected_documents(document)
+        from billing.models_sidecar import Quotation, DeliveryChallan
 
         for target in connections['upstream'] + connections['downstream']:
             t_key = _doc_key(target)
             if t_key in visited:
                 continue
+
+            # Quotations must never cascade changes into DeliveryChallans (stock is only touched by DeliveryChallan itself)
+            if isinstance(document, Quotation) and isinstance(target, DeliveryChallan):
+                continue
+
             visited.add(t_key)
 
             is_target_upstream = target in connections['upstream']
@@ -465,7 +471,7 @@ class DocumentSyncService:
         """Synchronizes item changes from source_doc into target_doc."""
         from inventory.models import Product
         from billing.models import PurchaseOrder
-        from billing.models_sidecar import DeliveryChallan, SalesOrder
+        from billing.models_sidecar import DeliveryChallan, SalesOrder, Quotation
         target_items = list(target_doc.items.all())
 
         # 1. Propagate Updates
@@ -496,10 +502,14 @@ class DocumentSyncService:
             from billing.models_sidecar import SalesOrder
             is_po_sync = isinstance(target_doc, PurchaseOrder) or isinstance(source_doc, PurchaseOrder)
             is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
+            is_so_to_quotation_upstream = is_upstream and isinstance(target_doc, Quotation)
 
             if matching_target_item:
                 old_t_qty = getattr(matching_target_item, 'quantity', 0)
-                if is_dc_to_so_upstream:
+                if is_so_to_quotation_upstream:
+                    # Quotations are original historical quotes; never overwrite their quantities or prices from downstream orders
+                    pass
+                elif is_dc_to_so_upstream:
                     # When editing a Delivery Challan linked to a Sales Order:
                     # Do NOT overwrite matching_target_item.quantity (the original ordered quantity)!
                     # Instead, adjust dispatched_quantity by delta = item.quantity - old_dispatched_for_this_challan
@@ -550,9 +560,12 @@ class DocumentSyncService:
                     matching_target_item = same_prod[0]
 
             if matching_target_item:
-                from billing.models_sidecar import DeliveryChallan, SalesOrder
+                from billing.models_sidecar import DeliveryChallan, SalesOrder, Quotation
                 is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
-                if is_dc_to_so_upstream:
+                if is_upstream and isinstance(target_doc, Quotation):
+                    # Never delete items from an original Quotation when deleted downstream
+                    pass
+                elif is_dc_to_so_upstream:
                     # Deleting an item from a challan does NOT delete the item from the sales order!
                     # The sales order line remains, but dispatched_quantity will be recomputed below.
                     pass
@@ -566,10 +579,11 @@ class DocumentSyncService:
 
         # 3. Propagate Additions
         TargetItemModel = target_doc.items.model
-        from billing.models_sidecar import DeliveryChallan, SalesOrder
+        from billing.models_sidecar import DeliveryChallan, SalesOrder, Quotation
         is_dc_to_so_upstream = isinstance(source_doc, DeliveryChallan) and isinstance(target_doc, SalesOrder) and is_upstream
+        is_so_to_quotation_upstream = is_upstream and isinstance(target_doc, Quotation)
 
-        if not is_dc_to_so_upstream:
+        if not is_dc_to_so_upstream and not is_so_to_quotation_upstream:
             for item in created_items:
                 # Check if target already has this item
                 already_exists = False
@@ -664,8 +678,9 @@ class DocumentSyncService:
         # Recalculate target total
         cls.recalculate_document_total(target_doc)
 
-        # Continue propagating through target's connections
-        cls._propagate_changes(target_doc, updated_items, deleted_items, created_items)
+        # Continue propagating through target's connections (except Quotation, which is an immutable historical quote)
+        if not isinstance(target_doc, Quotation):
+            cls._propagate_changes(target_doc, updated_items, deleted_items, created_items)
 
     @classmethod
     def reconcile_sales_order_dispatched_state(cls, order_or_orders, tenant=None):

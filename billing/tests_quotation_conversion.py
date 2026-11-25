@@ -266,6 +266,72 @@ class QuotationConversionEnhancementTests(TestCase):
         self.assertEqual(delete_res.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Quotation.objects.filter(pk=quotation.pk).exists())
 
+    def test_quotation_item_serializer_sets_stock_zero_for_new_product(self):
+        """Verifies creating a product via Quotation item serializer initializes stock=0."""
+        from billing.serializers_sidecar import QuotationItemSerializer
+        context = {'request': Mock(user=self.user)}
+        serializer = QuotationItemSerializer(
+            data={
+                'product_name': 'Brand New Reagent',
+                'quantity': 5,
+                'price': '150.00',
+                'unit': 'pcs',
+            },
+            context=context,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        created_prod = Product.objects.get(name='Brand New Reagent', created_by=self.user)
+        self.assertEqual(created_prod.stock, 0)
+
+    def test_converted_orders_serialized_and_quotation_untouched_on_so_edit(self):
+        """Verifies converted_orders field, override independence, and SO edit isolation."""
+        quotation, item = self._create_quotation(quantity=10)
+        # Convert with overridden quantity = 4
+        res = self.client.post(
+            f'/api/billing/quotations/{quotation.id}/convert-to-sales-order/',
+            {'items': [{'id': str(item.id), 'quantity': 4}]},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        so_id = res.data['sales_order_id']
+        so_number = res.data['sales_order_number']
+
+        # 1. Quotation item must remain 10 (untouched by conversion override)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 10)
+
+        # 2. Quotation details include converted_orders with clickable links info
+        detail_res = self.client.get(f'/api/billing/quotations/{quotation.id}/')
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        converted_orders = detail_res.data.get('converted_orders', [])
+        self.assertEqual(len(converted_orders), 1)
+        self.assertEqual(converted_orders[0]['id'], str(so_id))
+        self.assertEqual(converted_orders[0]['order_number'], so_number)
+
+        # 3. Edit sales order directly via PATCH (e.g. change quantity to 2)
+        so = SalesOrder.objects.get(id=so_id)
+        so_item = so.items.first()
+        so_edit_res = self.client.patch(
+            f'/api/billing/sales-orders/{so.id}/',
+            {
+                'items': [
+                    {
+                        'id': so_item.id,
+                        'product': str(self.product.id),
+                        'quantity': 2,
+                        'price': '200.00',
+                        'unit': 'pcs',
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(so_edit_res.status_code, status.HTTP_200_OK, so_edit_res.data)
+
+        # 4. Quotation must STILL remain 10 (not overwritten by SalesOrder edit)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 10)
+
 
 def _mock_quotation_with_item(quantity=10, status='converted'):
     item = Mock(id=11, quantity=quantity, row_type='item')

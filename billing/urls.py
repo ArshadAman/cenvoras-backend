@@ -20,6 +20,7 @@ from . import returns_views
 from . import views
 from . import views_gst_shield
 from . import vendor_payment_views
+from . import tally_views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -128,6 +129,9 @@ urlpatterns = [
     path('credit-notes/<uuid:pk>/', returns_views.credit_note_detail, name='credit_note_detail'),
     path('debit-notes/', returns_views.debit_note_list_create, name='debit_note_list_create'),
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
+    # TallyPrime XML Export & CA Interoperability
+    path('tally/export-xml/', tally_views.export_tally_xml_view, name='export_tally_xml_view'),
+    
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),
 ]

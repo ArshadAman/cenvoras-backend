@@ -230,3 +230,40 @@ def export_tally_xml_view(request):
             {'error': f'Failed to generate Tally XML: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ca_audit_pack_zip_view(request):
+    """
+    1-Click Monthly CA Audit Pack ZIP download.
+    Bundles Tally XML(s), GSTR-1/2B Excel, Trial Balance Excel, GSTR JSON, and README_FOR_CA.txt.
+    Query params:
+    - start_date (optional, YYYY-MM-DD)
+    - end_date (optional, YYYY-MM-DD)
+    - include_inventory_xml (optional, 'true'/'false', default 'false')
+    """
+    from .ca_pack import generate_ca_audit_pack_zip
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    start_date = request.query_params.get('start_date') or request.query_params.get('from')
+    end_date = request.query_params.get('end_date') or request.query_params.get('to')
+    include_inventory_xml = _parse_bool(request.query_params.get('include_inventory_xml'), default=False)
+
+    try:
+        zip_bytes, filename = generate_ca_audit_pack_zip(
+            tenant=tenant,
+            start_date=start_date,
+            end_date=end_date,
+            include_inventory_xml=include_inventory_xml,
+        )
+        response = HttpResponse(zip_bytes, content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+        return response
+    except Exception as e:
+        logger.exception("Failed to generate CA Audit Pack ZIP for tenant %s: %s", tenant.id, e)
+        return Response(
+            {'error': f'Failed to generate CA Audit Pack ZIP: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

@@ -134,6 +134,7 @@ urlpatterns = [
     path('tally/ca-profile/', tally_views.ca_profile_detail_view, name='ca_profile_detail_view'),
     path('tally/ca-profile/reset-defaults/', tally_views.ca_profile_reset_defaults_view, name='ca_profile_reset_defaults_view'),
     path('tally/ca-profile/generate-magic-link/', tally_views.ca_profile_generate_magic_link_view, name='ca_profile_generate_magic_link_view'),
+    path('tally/ca-audit-pack-zip/', tally_views.ca_audit_pack_zip_view, name='ca_audit_pack_zip_view'),
     
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),

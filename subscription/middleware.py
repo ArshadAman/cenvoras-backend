@@ -85,6 +85,27 @@ class SubscriptionAccessMiddleware:
         if is_vip_user(user):
             return self.get_response(request)
 
+        # Task 5.1: Check Perpetual License & AMC enforcement
+        tenant = getattr(user, 'active_tenant', user)
+        perpetual_lic = getattr(tenant, 'perpetual_license', None)
+        amc_warning_header = None
+        if perpetual_lic is not None:
+            amc_state = perpetual_lic.get_amc_state()
+            if amc_state == 'amc_locked':
+                is_write = request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
+                is_exempt = (
+                    self._path_matches_prefix(path, '/api/subscription/')
+                    or self._path_matches_prefix(path, '/api/users/backup/')
+                )
+                if is_write and not is_exempt:
+                    return self._forbidden(
+                        code='amc_locked',
+                        message='AMC has expired beyond the 30-day grace period. Read-only & data backup access remain available; renew AMC to resume creating/editing records.',
+                        path=path,
+                    )
+            elif amc_state == 'grace_warning':
+                amc_warning_header = 'grace_warning'
+
         plan_code = get_effective_plan_code(user)
 
         # Free plan hard gate.
@@ -104,4 +125,7 @@ class SubscriptionAccessMiddleware:
                 path=path,
             )
 
-        return self.get_response(request)
+        response = self.get_response(request)
+        if amc_warning_header:
+            response['X-Cenvora-AMC-Status'] = amc_warning_header
+        return response

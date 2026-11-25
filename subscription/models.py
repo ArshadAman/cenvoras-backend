@@ -82,6 +82,7 @@ class BillingCycle(models.TextChoices):
     MONTHLY = 'monthly', 'Monthly'
     QUARTERLY = 'quarterly', 'Quarterly'
     YEARLY = 'yearly', 'Yearly'
+    PERPETUAL = 'perpetual', 'Perpetual (Lifetime + AMC)'
 
 
 class SubscriptionPaymentStatus(models.TextChoices):
@@ -198,3 +199,44 @@ class WebhookEvent(models.Model):
     
     def __str__(self):
         return f"{self.event_type} - {self.event_id} ({self.provider})"
+
+
+class PerpetualLicense(models.Model):
+    """
+    Task 5.1: Cryptographic Lifetime / Custom ERP license bound to a tenant
+    with Annual Maintenance Contract (AMC) grace period and read-only lock support.
+    """
+    tenant = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='perpetual_license',
+    )
+    license_key = models.CharField(max_length=128, unique=True)
+    issued_at = models.DateTimeField(default=timezone.now)
+    amc_valid_until = models.DateField(help_text="AMC coverage end date; grace period begins after this date.")
+    grace_period_days = models.PositiveIntegerField(default=30)
+    is_revoked = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def verify_signature(self) -> bool:
+        from .licensing import verify_license_key
+        ok, _ = verify_license_key(self.license_key, str(self.tenant_id))
+        return ok
+
+    def get_amc_state(self, as_of=None) -> str:
+        """
+        Returns: 'active', 'grace_warning', or 'amc_locked'.
+        """
+        from datetime import date as _date, timedelta
+        if self.is_revoked or not self.verify_signature():
+            return 'amc_locked'
+        today = as_of or _date.today()
+        if today <= self.amc_valid_until:
+            return 'active'
+        grace_end = self.amc_valid_until + timedelta(days=self.grace_period_days)
+        if today <= grace_end:
+            return 'grace_warning'
+        return 'amc_locked'
+
+    def __str__(self):
+        return f"{self.tenant} [{self.get_amc_state()}] ({self.license_key})"

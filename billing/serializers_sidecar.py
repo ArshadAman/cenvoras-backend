@@ -569,7 +569,7 @@ class DeliveryChallanItemSerializer(UQCQuantityMixin, serializers.ModelSerialize
             mutable['description'] = mutable.get('product_description') or ''
 
         row_type = mutable.get('row_type', 'item')
-        product_value = mutable.get('product')
+        product_value = mutable.get('product') or mutable.get('product_name')
         if row_type == 'note' or (not product_value and mutable.get('description')):
             mutable['row_type'] = 'note'
             mutable['product'] = None
@@ -640,6 +640,7 @@ class DeliveryChallanItemSerializer(UQCQuantityMixin, serializers.ModelSerialize
                     unit=mutable.get('unit') or 'pcs',
                     price=mutable.get('price') or 0,
                     tax=mutable.get('tax') or 0,
+                    stock=0,
                     created_by=tenant,
                 )
 
@@ -996,7 +997,7 @@ class QuotationItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
             mutable['description'] = mutable.get('product_description') or ''
 
         row_type = mutable.get('row_type', 'item')
-        product_value = mutable.get('product')
+        product_value = mutable.get('product') or mutable.get('product_name')
         if row_type == 'note' or (not product_value and mutable.get('description')):
             mutable['row_type'] = 'note'
             mutable['product'] = None
@@ -1059,6 +1060,7 @@ class QuotationItemSerializer(UQCQuantityMixin, serializers.ModelSerializer):
                     unit=mutable.get('unit') or 'pcs',
                     price=mutable.get('price') or 0,
                     tax=mutable.get('tax') or 0,
+                    stock=0,
                     created_by=tenant,
                 )
 
@@ -1073,6 +1075,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_gstin = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
     customer_details = serializers.SerializerMethodField(read_only=True)
+    converted_orders = serializers.SerializerMethodField(read_only=True)
 
     quotation_number = serializers.CharField(required=False, allow_blank=True)
     quotation_date = serializers.DateField(required=False, allow_null=True)
@@ -1122,21 +1125,11 @@ class QuotationSerializer(serializers.ModelSerializer):
             'bank_account_id',
             'template_id',
             'items',
+            'converted_orders',
             'created_by',
             'created_at',
         ]
         read_only_fields = ['created_by', 'created_at']
-
-    def to_internal_value(self, data):
-        # Shared forms can send extra invoice-only keys; ignore unknown fields.
-        if hasattr(data, 'copy'):
-            mutable = data.copy()
-            allowed = set(self.fields.keys())
-            for key in list(mutable.keys()):
-                if key not in allowed:
-                    mutable.pop(key, None)
-            data = mutable
-        return super().to_internal_value(data)
 
     def get_customer_details(self, obj):
         if not obj.customer:
@@ -1151,9 +1144,27 @@ class QuotationSerializer(serializers.ModelSerializer):
             'state': obj.customer.state,
         }
 
+    def get_converted_orders(self, obj):
+        orders = obj.sales_orders.all()
+        return [
+            {
+                'id': str(order.id),
+                'order_number': order.order_number,
+            }
+            for order in orders
+        ]
+
     def to_internal_value(self, data):
+        # Shared forms can send extra invoice-only keys; ignore unknown fields.
         if hasattr(data, 'copy'):
-            data = data.copy()
+            mutable = data.copy()
+            allowed = set(self.fields.keys())
+            for key in list(mutable.keys()):
+                if key not in allowed:
+                    mutable.pop(key, None)
+            data = mutable
+        else:
+            data = dict(data)
         if 'total_amount' in data and data['total_amount'] is not None and str(data['total_amount']).strip():
             try:
                 data['total_amount'] = f"{Decimal(str(data['total_amount'])).quantize(Decimal('0.01')):.2f}"

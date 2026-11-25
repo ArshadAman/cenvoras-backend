@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from .marg_dbf_parser import parse_marg_dbf_zip
 from .marg_excel_parser import parse_marg_spreadsheet, preview_marg_spreadsheet
 from .migration_service import MigrationBlockerError, MigrationValidationGate
+from .tally_importer import parse_tally_xml
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +190,65 @@ def marg_dbf_commit_view(request):
     except Exception as e:
         logger.exception("Marg DBF commit failed: %s", e)
         return Response({'error': f'DBF commit failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def tally_dry_run_view(request):
+    """
+    TallyPrime XML Dry-Run: Upload Master.xml or DayBook.xml and run
+    Stage 1 + Stage 2 validation without writing to PostgreSQL.
+    """
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return Response({'error': 'No XML file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        parsed = parse_tally_xml(uploaded.read())
+        gate = MigrationValidationGate(tenant=tenant)
+        report = gate.dry_run(
+            products=parsed['products'],
+            parties=parsed['parties'],
+            batches=parsed['batches'],
+        )
+        res = report.to_dict()
+        res['historical_vouchers_count'] = len(parsed['historical_vouchers'])
+        return Response(res)
+    except Exception as e:
+        logger.exception("Tally XML dry-run failed: %s", e)
+        return Response({'error': f'Tally XML dry-run failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def tally_commit_view(request):
+    """
+    TallyPrime XML Commit: Upload Master.xml / DayBook.xml and atomically commit
+    masters and opening stock to PostgreSQL.
+    """
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return Response({'error': 'No XML file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        parsed = parse_tally_xml(uploaded.read())
+        gate = MigrationValidationGate(tenant=tenant)
+        result = gate.commit(
+            products=parsed['products'],
+            parties=parsed['parties'],
+            batches=parsed['batches'],
+        )
+        result['historical_vouchers_count'] = len(parsed['historical_vouchers'])
+        return Response(result, status=status.HTTP_200_OK)
+    except MigrationBlockerError as mbe:
+        return Response(
+            {'success': False, 'error': str(mbe), 'blockers': mbe.blockers},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    except Exception as e:
+        logger.exception("Tally XML commit failed: %s", e)
+        return Response({'error': f'Tally XML commit failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

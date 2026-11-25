@@ -115,6 +115,7 @@ def marg_commit_view(request):
             products=parsed['products'],
             parties=parsed['parties'],
             batches=parsed['batches'],
+            historical_vouchers=parsed.get('historical_vouchers'),
         )
         return Response(result, status=status.HTTP_200_OK)
     except MigrationBlockerError as mbe:
@@ -179,6 +180,7 @@ def marg_dbf_commit_view(request):
             products=parsed['products'],
             parties=parsed['parties'],
             batches=parsed['batches'],
+            historical_vouchers=parsed.get('historical_vouchers'),
         )
         result['detected_files'] = parsed['detected_files']
         return Response(result, status=status.HTTP_200_OK)
@@ -241,6 +243,7 @@ def tally_commit_view(request):
             products=parsed['products'],
             parties=parsed['parties'],
             batches=parsed['batches'],
+            historical_vouchers=parsed.get('historical_vouchers'),
         )
         result['historical_vouchers_count'] = len(parsed['historical_vouchers'])
         return Response(result, status=status.HTTP_200_OK)

@@ -534,3 +534,4 @@ from .models_returns import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from .models_gst_shield import GSTR2BImport, GSTR2BRecord, VendorLegalNotice
 from .models_rcm import RcmSelfInvoice, RcmPaymentVoucher  # noqa: E402,F401
 from .models_ca import CAMappingProfile, CAPresetChoices  # noqa: E402,F401
+from .models_archive import HistoricalDocumentArchive  # noqa: E402,F401

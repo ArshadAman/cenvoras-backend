@@ -42,4 +42,7 @@ urlpatterns = [
     path('migration/marg-dbf-commit/', migration_views.marg_dbf_commit_view, name='marg_dbf_commit_view'),
     path('migration/tally-dry-run/', migration_views.tally_dry_run_view, name='tally_dry_run_view'),
     path('migration/tally-commit/', migration_views.tally_commit_view, name='tally_commit_view'),
+
+    # Data Sovereignty (1-Click Complete Business Backup ZIP)
+    path('backup/download-zip/', migration_views.complete_backup_zip_view, name='complete_backup_zip_view'),
 ] + router.urls

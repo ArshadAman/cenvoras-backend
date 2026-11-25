@@ -14,6 +14,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from .marg_dbf_parser import parse_marg_dbf_zip
 from .marg_excel_parser import parse_marg_spreadsheet, preview_marg_spreadsheet
 from .migration_service import MigrationBlockerError, MigrationValidationGate
 
@@ -127,3 +128,64 @@ def marg_commit_view(request):
     except Exception as e:
         logger.exception("Marg commit failed: %s", e)
         return Response({'error': f'Commit failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def marg_dbf_dry_run_view(request):
+    """
+    Tier 3 DBF Dry-Run: Upload a zipped Marg DATA folder (.zip containing .DBF files)
+    and run Stage 1 + Stage 2 validation without writing to the database.
+    """
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return Response({'error': 'No ZIP file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        parsed = parse_marg_dbf_zip(uploaded.read())
+        gate = MigrationValidationGate(tenant=tenant)
+        report = gate.dry_run(
+            products=parsed['products'],
+            parties=parsed['parties'],
+            batches=parsed['batches'],
+        )
+        res = report.to_dict()
+        res['detected_files'] = parsed['detected_files']
+        return Response(res)
+    except Exception as e:
+        logger.exception("Marg DBF dry-run failed: %s", e)
+        return Response({'error': f'DBF dry-run failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def marg_dbf_commit_view(request):
+    """
+    Tier 3 DBF Commit: Upload a zipped Marg DATA folder and atomically commit to PostgreSQL.
+    """
+    uploaded = request.FILES.get('file')
+    if not uploaded:
+        return Response({'error': 'No ZIP file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    tenant = getattr(request.user, 'active_tenant', request.user)
+    try:
+        parsed = parse_marg_dbf_zip(uploaded.read())
+        gate = MigrationValidationGate(tenant=tenant)
+        result = gate.commit(
+            products=parsed['products'],
+            parties=parsed['parties'],
+            batches=parsed['batches'],
+        )
+        result['detected_files'] = parsed['detected_files']
+        return Response(result, status=status.HTTP_200_OK)
+    except MigrationBlockerError as mbe:
+        return Response(
+            {'success': False, 'error': str(mbe), 'blockers': mbe.blockers},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    except Exception as e:
+        logger.exception("Marg DBF commit failed: %s", e)
+        return Response({'error': f'DBF commit failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

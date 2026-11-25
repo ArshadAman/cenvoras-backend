@@ -38,4 +38,6 @@ urlpatterns = [
     path('migration/marg-preview/', migration_views.marg_preview_view, name='marg_preview_view'),
     path('migration/marg-dry-run/', migration_views.marg_dry_run_view, name='marg_dry_run_view'),
     path('migration/marg-commit/', migration_views.marg_commit_view, name='marg_commit_view'),
+    path('migration/marg-dbf-dry-run/', migration_views.marg_dbf_dry_run_view, name='marg_dbf_dry_run_view'),
+    path('migration/marg-dbf-commit/', migration_views.marg_dbf_commit_view, name='marg_dbf_commit_view'),
 ] + router.urls

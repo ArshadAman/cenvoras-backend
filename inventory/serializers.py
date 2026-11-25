@@ -24,6 +24,16 @@ class ProductSerializer(QuantityAsNumberMixin, serializers.ModelSerializer):
         read_only_fields = ['id', 'created_by', 'current_stock', 'created_at', 'updated_at']
 
     def validate(self, attrs):
+        # Stock can only be set on create. On edit, stock is managed via
+        # Purchase Bills, Sales Invoices, and Stock Adjustments.
+        if self.instance is not None:
+            # Preserve existing stock — don't allow direct stock overwrite via Product form
+            attrs.pop('stock', None)
+        else:
+            stock = attrs.get('stock')
+            if stock is not None and stock < 0:
+                raise serializers.ValidationError({'stock': 'Initial stock cannot be negative.'})
+
         sale_price = attrs.get('sale_price')
         if sale_price is None and self.instance is not None:
             sale_price = self.instance.sale_price

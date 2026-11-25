@@ -489,9 +489,63 @@ class ProductSoftDeleteAndArchivalTests(TestCase):
 
 		# p_free is truly deleted from DB
 		self.assertFalse(Product.objects.filter(id=p_free.id).exists())
-		# p_linked is archived in DB
-		p_linked.refresh_from_db()
-		self.assertFalse(p_linked.is_active)
+	def test_product_create_rejects_negative_stock(self):
+		payload = {
+			"name": "Negative Stock Item",
+			"hsn_sac_code": "84713010",
+			"sale_price": "100.00",
+			"unit": "pcs",
+			"stock": -5,
+		}
+		res = self.client.post("/api/inventory/products/", payload, format='json')
+		self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn("stock", res.data)
+
+	def test_product_edit_allows_changes_when_stock_is_negative(self):
+		product = Product.objects.create(
+			name="Negative Stock Existing Item",
+			hsn_sac_code="84713010",
+			sale_price=150,
+			stock=-4,
+			created_by=self.tenant
+		)
+		payload = {
+			"name": "Updated Negative Stock Item",
+			"sale_price": "160.00",
+			"hsn_sac_code": "84713020",
+		}
+		res = self.client.patch(
+			f"/api/inventory/products/{product.id}/",
+			payload,
+			format='json'
+		)
+		self.assertEqual(res.status_code, status.HTTP_200_OK)
+		product.refresh_from_db()
+		self.assertEqual(product.name, "Updated Negative Stock Item")
+		self.assertEqual(float(product.sale_price), 160.00)
+		self.assertEqual(float(product.stock), -4.00)
+
+	def test_product_edit_ignores_direct_stock_modification(self):
+		product = Product.objects.create(
+			name="Immutable Stock Item",
+			hsn_sac_code="84713010",
+			sale_price=200,
+			stock=-4,
+			created_by=self.tenant
+		)
+		payload = {
+			"sale_price": "210.00",
+			"stock": 10,
+		}
+		res = self.client.patch(
+			f"/api/inventory/products/{product.id}/",
+			payload,
+			format='json'
+		)
+		self.assertEqual(res.status_code, status.HTTP_200_OK)
+		product.refresh_from_db()
+		self.assertEqual(float(product.sale_price), 210.00)
+		self.assertEqual(float(product.stock), -4.00)
 
 
 

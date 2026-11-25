@@ -102,7 +102,16 @@ class TallyXMLExporter:
         self.include_returns = include_returns
 
         self.mapping = dict(DEFAULT_CA_MAPPING)
-        if ca_mapping:
+        # Apply persisted CA mapping profile if configured for this tenant
+        ca_profile = getattr(tenant, 'ca_mapping_profile', None)
+        if ca_profile and hasattr(ca_profile, 'to_mapping_dict'):
+            try:
+                self.mapping.update(ca_profile.to_mapping_dict())
+            except Exception as e:
+                logger.warning("Failed to load ca_mapping_profile for tenant %s: %s", getattr(tenant, 'id', None), e)
+
+        # Apply request-level runtime overrides if passed
+        if ca_mapping and isinstance(ca_mapping, dict):
             self.mapping.update(ca_mapping)
 
         self.seller_state_code = get_seller_state_code(tenant)

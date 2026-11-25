@@ -21,6 +21,7 @@ from . import views
 from . import views_gst_shield
 from . import vendor_payment_views
 from . import tally_views
+from . import ca_portal_views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -135,6 +136,12 @@ urlpatterns = [
     path('tally/ca-profile/reset-defaults/', tally_views.ca_profile_reset_defaults_view, name='ca_profile_reset_defaults_view'),
     path('tally/ca-profile/generate-magic-link/', tally_views.ca_profile_generate_magic_link_view, name='ca_profile_generate_magic_link_view'),
     path('tally/ca-audit-pack-zip/', tally_views.ca_audit_pack_zip_view, name='ca_audit_pack_zip_view'),
+
+    # Passwordless CA Magic-Link Portal (Public Token-Authenticated)
+    path('ca-portal/summary/', ca_portal_views.ca_portal_summary_view, name='ca_portal_summary_view'),
+    path('ca-portal/download-xml/', ca_portal_views.ca_portal_download_xml_view, name='ca_portal_download_xml_view'),
+    path('ca-portal/download-zip/', ca_portal_views.ca_portal_download_zip_view, name='ca_portal_download_zip_view'),
+    path('ca-portal/download-excel/', ca_portal_views.ca_portal_download_excel_view, name='ca_portal_download_excel_view'),
     
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),

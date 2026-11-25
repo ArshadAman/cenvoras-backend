@@ -8,11 +8,14 @@ Exposes:
 import json
 import logging
 
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from .backup_service import generate_complete_business_backup_zip
 
 from .marg_dbf_parser import parse_marg_dbf_zip
 from .marg_excel_parser import parse_marg_spreadsheet, preview_marg_spreadsheet
@@ -255,3 +258,20 @@ def tally_commit_view(request):
     except Exception as e:
         logger.exception("Tally XML commit failed: %s", e)
         return Response({'error': f'Tally XML commit failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def complete_backup_zip_view(request):
+    """
+    Task 3.1: 1-Click Complete Business Backup ZIP download for Data Sovereignty.
+    """
+    try:
+        zip_bytes, filename = generate_complete_business_backup_zip(request.user)
+        response = HttpResponse(zip_bytes, content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+        return response
+    except Exception as e:
+        logger.exception("Complete backup ZIP generation failed: %s", e)
+        return Response({'error': f'Backup failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

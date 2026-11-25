@@ -357,6 +357,16 @@ class MigrationValidationGate:
             else:
                 clean_rows += 1
 
+            raw_tier = str(row.get('default_price_tier') or 'rate_a').lower().strip()
+            if 'b' == raw_tier or 'rate_b' in raw_tier or 'wholesale' in raw_tier:
+                price_tier = 'rate_b'
+            elif 'c' == raw_tier or 'rate_c' in raw_tier or 'hospital' in raw_tier or 'special' in raw_tier:
+                price_tier = 'rate_c'
+            else:
+                price_tier = 'rate_a'
+
+            dl_exp, _, _ = parse_marg_expiry(row.get('dl_expiry_date'))
+
             sanitized_parties.append({
                 'name': name,
                 'party_type': party_type,
@@ -366,6 +376,11 @@ class MigrationValidationGate:
                 'address': str(row.get('address') or '').strip(),
                 'state': str(row.get('state') or '').strip(),
                 'opening_balance': ob_val,
+                'dl_number_20b': str(row.get('dl_number_20b') or '').strip(),
+                'dl_number_21b': str(row.get('dl_number_21b') or '').strip(),
+                'dl_expiry_date': dl_exp,
+                'fssai_number': str(row.get('fssai_number') or '').strip(),
+                'default_price_tier': price_tier,
             })
 
         # --- 3. Validate & Sanitize Opening Stock Batches ---
@@ -405,6 +420,9 @@ class MigrationValidationGate:
             mrp_val, _ = sanitize_decimal(row.get('mrp', 0), default=Decimal('0.00'))
             cost_val, _ = sanitize_decimal(row.get('cost_price', 0), default=Decimal('0.00'))
             sale_val, _ = sanitize_decimal(row.get('sale_price', 0), default=Decimal('0.00'))
+            rate_a_val, _ = sanitize_decimal(row.get('rate_a', sale_val or 0), default=Decimal('0.00'))
+            rate_b_val, _ = sanitize_decimal(row.get('rate_b', 0), default=Decimal('0.00'))
+            rate_c_val, _ = sanitize_decimal(row.get('rate_c', 0), default=Decimal('0.00'))
 
             if row_blocked:
                 continue
@@ -424,6 +442,9 @@ class MigrationValidationGate:
                 'mrp': mrp_val if mrp_val is not None else Decimal('0.00'),
                 'cost_price': cost_val if cost_val is not None else Decimal('0.00'),
                 'sale_price': sale_val if sale_val is not None else Decimal('0.00'),
+                'rate_a': rate_a_val if rate_a_val is not None else Decimal('0.00'),
+                'rate_b': rate_b_val if rate_b_val is not None else Decimal('0.00'),
+                'rate_c': rate_c_val if rate_c_val is not None else Decimal('0.00'),
             })
 
         total_rows = len(products) + len(parties) + len(batches)
@@ -513,6 +534,11 @@ class MigrationValidationGate:
                             'address': party['address'],
                             'state': party['state'],
                             'current_balance': party['opening_balance'],
+                            'dl_number_20b': party.get('dl_number_20b', ''),
+                            'dl_number_21b': party.get('dl_number_21b', ''),
+                            'dl_expiry_date': party.get('dl_expiry_date'),
+                            'fssai_number': party.get('fssai_number', ''),
+                            'default_price_tier': party.get('default_price_tier', 'rate_a'),
                         },
                     )
                     if created:
@@ -528,6 +554,9 @@ class MigrationValidationGate:
                             'email': party['email'],
                             'address': party['address'],
                             'state': party['state'],
+                            'dl_number_20b': party.get('dl_number_20b', ''),
+                            'dl_number_21b': party.get('dl_number_21b', ''),
+                            'fssai_number': party.get('fssai_number', ''),
                         },
                     )
                     if created:
@@ -571,6 +600,9 @@ class MigrationValidationGate:
                         'mrp': b_data['mrp'],
                         'cost_price': b_data['cost_price'],
                         'sale_price': b_data['sale_price'],
+                        'rate_a': b_data.get('rate_a', Decimal('0.00')),
+                        'rate_b': b_data.get('rate_b', Decimal('0.00')),
+                        'rate_c': b_data.get('rate_c', Decimal('0.00')),
                     },
                 )
                 if b_created:

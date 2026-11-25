@@ -22,6 +22,7 @@ from . import views_gst_shield
 from . import vendor_payment_views
 from . import tally_views
 from . import ca_portal_views
+from . import archive_views
 
 urlpatterns = [
     path('purchase-bills/', purchase_bill_list_create, name='purchase_bill_list_create'),
@@ -142,6 +143,10 @@ urlpatterns = [
     path('ca-portal/download-xml/', ca_portal_views.ca_portal_download_xml_view, name='ca_portal_download_xml_view'),
     path('ca-portal/download-zip/', ca_portal_views.ca_portal_download_zip_view, name='ca_portal_download_zip_view'),
     path('ca-portal/download-excel/', ca_portal_views.ca_portal_download_excel_view, name='ca_portal_download_excel_view'),
+
+    # Historical Document Archive (Read-Only Migrated Legacy Vouchers)
+    path('archive/documents/', archive_views.historical_archive_list_view, name='historical_archive_list_view'),
+    path('archive/documents/<uuid:pk>/', archive_views.historical_archive_detail_view, name='historical_archive_detail_view'),
     
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),

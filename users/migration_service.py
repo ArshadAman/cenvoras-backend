@@ -469,13 +469,20 @@ class MigrationValidationGate:
         parties: list[dict] | None = None,
         batches: list[dict] | None = None,
         dry_run_report: DryRunReport | None = None,
+        historical_vouchers: list[dict] | None = None,
+        post_gl_opening_balances: bool = True,
+        cutover_date: date | None = None,
     ) -> dict:
         """
         Stage 3: Atomically commit validated payload to PostgreSQL inside transaction.atomic().
         Refuses to commit if blockers exist.
+        Also posts double-entry GL opening balances offset against Account 3999 (Task 2.6)
+        and archives historical vouchers into HistoricalDocumentArchive (Task 2.5).
         """
         from billing.models import Customer, Vendor
+        from billing.models_archive import HistoricalDocumentArchive
         from inventory.models import Product, ProductBatch, StockPoint, Warehouse
+        from ledger.services import AccountingService
 
         report = dry_run_report or self.dry_run(products=products, parties=parties, batches=batches)
         if not report.can_commit:
@@ -488,7 +495,13 @@ class MigrationValidationGate:
             'vendors': 0,
             'batches': 0,
             'stock_points': 0,
+            'historical_archives': 0,
+            'gl_entries': 0,
         }
+
+        customer_gl_balances = []
+        vendor_gl_balances = []
+        total_stock_valuation = Decimal('0.00')
 
         with transaction.atomic():
             product_map = {}
@@ -524,7 +537,7 @@ class MigrationValidationGate:
             # 2. Upsert Parties (Customers / Vendors)
             for party in payload.get('parties', []):
                 if party['party_type'] in ('customer', 'both'):
-                    _, created = Customer.objects.update_or_create(
+                    cust_obj, created = Customer.objects.update_or_create(
                         created_by=self.tenant,
                         name=party['name'],
                         defaults={
@@ -541,11 +554,13 @@ class MigrationValidationGate:
                             'default_price_tier': party.get('default_price_tier', 'rate_a'),
                         },
                     )
+                    if party['opening_balance'] != Decimal('0.00'):
+                        customer_gl_balances.append((cust_obj, party['opening_balance']))
                     if created:
                         created_counts['customers'] += 1
 
                 if party['party_type'] in ('vendor', 'both'):
-                    _, created = Vendor.objects.update_or_create(
+                    vend_obj, created = Vendor.objects.update_or_create(
                         created_by=self.tenant,
                         name=party['name'],
                         defaults={
@@ -559,6 +574,8 @@ class MigrationValidationGate:
                             'fssai_number': party.get('fssai_number', ''),
                         },
                     )
+                    if party['party_type'] == 'vendor' and party['opening_balance'] != Decimal('0.00'):
+                        vendor_gl_balances.append((vend_obj, party['opening_balance']))
                     if created:
                         created_counts['vendors'] += 1
 
@@ -615,7 +632,43 @@ class MigrationValidationGate:
                 )
                 if sp_created:
                     created_counts['stock_points'] += 1
+                total_stock_valuation += (b_data['quantity'] * (b_data['cost_price'] or Decimal('0.00')))
                 prod.recalculate_stock(save=True)
+
+            # 4. Task 2.6: Post Opening Balance GL entries balanced against Account 3999
+            if post_gl_opening_balances and (customer_gl_balances or vendor_gl_balances or total_stock_valuation > 0):
+                created_counts['gl_entries'] = AccountingService.post_migration_opening_balances(
+                    tenant=self.tenant,
+                    cutover_date=cutover_date,
+                    customer_balances=customer_gl_balances,
+                    vendor_balances=vendor_gl_balances,
+                    opening_stock_value=total_stock_valuation,
+                )
+
+            # 5. Task 2.5: Persist Historical Document Archive
+            for hv in (historical_vouchers or []):
+                doc_no = str(hv.get('document_number') or '').strip()
+                if not doc_no:
+                    continue
+                doc_dt = None
+                if hv.get('document_date'):
+                    doc_dt, _, _ = parse_marg_expiry(hv.get('document_date'))
+                _, h_created = HistoricalDocumentArchive.objects.update_or_create(
+                    tenant=self.tenant,
+                    source_erp=hv.get('source', 'tally'),
+                    voucher_type=hv.get('voucher_type', 'Sales'),
+                    document_number=doc_no,
+                    defaults={
+                        'document_date': doc_dt,
+                        'party_name': str(hv.get('party_name') or '')[:255],
+                        'party_gstin': str(hv.get('party_gstin') or '')[:20],
+                        'total_amount': Decimal(str(hv.get('total_amount') or 0)),
+                        'items': hv.get('items', []),
+                        'raw_metadata': hv.get('raw_metadata', {}),
+                    },
+                )
+                if h_created:
+                    created_counts['historical_archives'] += 1
 
         return {
             'success': True,

@@ -53,6 +53,7 @@ class AccountingService:
             # Equity
             ('3001', 'Owner\'s Equity', AccountType.EQUITY),
             ('3100', 'Retained Earnings', AccountType.EQUITY),
+            ('3999', 'Opening Balance Suspense', AccountType.EQUITY),
             
             # Revenue
             ('4001', 'Sales Revenue', AccountType.REVENUE),
@@ -958,6 +959,110 @@ class AccountingService:
             'total_credits': total_credits,
             'is_balanced': total_debits == total_credits
         }
+
+    @classmethod
+    def post_migration_opening_balances(
+        cls,
+        tenant,
+        cutover_date=None,
+        customer_balances=None,
+        vendor_balances=None,
+        opening_stock_value=Decimal('0.00'),
+    ):
+        """
+        Task 2.6: Post migrated opening balances into GeneralLedgerEntry,
+        automatically balancing every debit/credit against Equity Account
+        3999 ('Opening Balance Suspense') so Trial Balance is 100% balanced on Day 1.
+        """
+        from datetime import date as _date
+        tenant = getattr(tenant, 'active_tenant', tenant)
+        post_date = cutover_date or _date.today()
+        accounts = cls.get_or_create_default_accounts(tenant)
+
+        ar_acc = accounts['accounts_receivable']
+        ap_acc = accounts['accounts_payable']
+        inv_acc = accounts['inventory']
+        suspense_acc = accounts['opening_balance_suspense']
+
+        entries_created = 0
+        ref = "OPENING-BAL-MIGRATION"
+
+        # 1. Customer Opening Balances (Positive = Customer Owes Us -> Dr AR, Cr 3999)
+        for cust, bal in (customer_balances or []):
+            amt = Decimal(str(bal or 0)).quantize(Decimal('0.01'))
+            if amt == Decimal('0.00'):
+                continue
+            if amt > 0:
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=ar_acc, customer=cust,
+                    debit=amt, credit=Decimal('0.00'), reference=ref,
+                    description=f"Opening Balance (Migration) - {cust.name}",
+                )
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=suspense_acc, customer=cust,
+                    debit=Decimal('0.00'), credit=amt, reference=ref,
+                    description=f"Opening Balance Offset - {cust.name}",
+                )
+            else:
+                abs_amt = abs(amt)
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=suspense_acc, customer=cust,
+                    debit=abs_amt, credit=Decimal('0.00'), reference=ref,
+                    description=f"Opening Balance Offset (Credit) - {cust.name}",
+                )
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=ar_acc, customer=cust,
+                    debit=Decimal('0.00'), credit=abs_amt, reference=ref,
+                    description=f"Opening Advance (Migration) - {cust.name}",
+                )
+            entries_created += 2
+
+        # 2. Vendor Opening Balances (Positive = We Owe Vendor -> Dr 3999, Cr AP)
+        for vend, bal in (vendor_balances or []):
+            amt = Decimal(str(bal or 0)).quantize(Decimal('0.01'))
+            if amt == Decimal('0.00'):
+                continue
+            if amt > 0:
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=suspense_acc, vendor=vend,
+                    debit=amt, credit=Decimal('0.00'), reference=ref,
+                    description=f"Opening Payable Offset - {vend.name}",
+                )
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=ap_acc, vendor=vend,
+                    debit=Decimal('0.00'), credit=amt, reference=ref,
+                    description=f"Opening Payable (Migration) - {vend.name}",
+                )
+            else:
+                abs_amt = abs(amt)
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=ap_acc, vendor=vend,
+                    debit=abs_amt, credit=Decimal('0.00'), reference=ref,
+                    description=f"Opening Vendor Advance (Migration) - {vend.name}",
+                )
+                GeneralLedgerEntry.objects.create(
+                    created_by=tenant, date=post_date, account=suspense_acc, vendor=vend,
+                    debit=Decimal('0.00'), credit=abs_amt, reference=ref,
+                    description=f"Opening Vendor Advance Offset - {vend.name}",
+                )
+            entries_created += 2
+
+        # 3. Opening Stock Valuation (Dr Inventory 1300, Cr 3999)
+        stock_val = Decimal(str(opening_stock_value or 0)).quantize(Decimal('0.01'))
+        if stock_val > 0:
+            GeneralLedgerEntry.objects.create(
+                created_by=tenant, date=post_date, account=inv_acc,
+                debit=stock_val, credit=Decimal('0.00'), reference=ref,
+                description="Opening Stock Valuation (Migration)",
+            )
+            GeneralLedgerEntry.objects.create(
+                created_by=tenant, date=post_date, account=suspense_acc,
+                debit=Decimal('0.00'), credit=stock_val, reference=ref,
+                description="Opening Stock Valuation Offset",
+            )
+            entries_created += 2
+
+        return entries_created
     
     @classmethod
     def get_general_ledger_entries(cls, account, user, date_from=None, date_to=None):

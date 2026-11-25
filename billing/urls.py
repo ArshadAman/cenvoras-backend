@@ -131,6 +131,9 @@ urlpatterns = [
     path('debit-notes/<uuid:pk>/', returns_views.debit_note_detail, name='debit_note_detail'),
     # TallyPrime XML Export & CA Interoperability
     path('tally/export-xml/', tally_views.export_tally_xml_view, name='export_tally_xml_view'),
+    path('tally/ca-profile/', tally_views.ca_profile_detail_view, name='ca_profile_detail_view'),
+    path('tally/ca-profile/reset-defaults/', tally_views.ca_profile_reset_defaults_view, name='ca_profile_reset_defaults_view'),
+    path('tally/ca-profile/generate-magic-link/', tally_views.ca_profile_generate_magic_link_view, name='ca_profile_generate_magic_link_view'),
     
     # Fix endpoints
     path('sales-invoices/recalculate-totals/', recalculate_invoice_totals, name='recalculate_invoice_totals'),

@@ -2,6 +2,7 @@ from billing.uqc import to_qty
 import csv
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import urllib.parse
@@ -30,6 +31,8 @@ from .serializers import (
 from django_filters.rest_framework import DjangoFilterBackend
 
 from rest_framework import filters
+
+logger = logging.getLogger(__name__)
 
 
 def _product_template_fields():
@@ -512,8 +515,18 @@ def bulk_upload_products(request):
     if not uploaded_file:
         return Response({'error': 'CSV file is required using form key "file".'}, status=status.HTTP_400_BAD_REQUEST)
 
-    if not uploaded_file.name.lower().endswith('.csv'):
-        return Response({'error': 'Only CSV files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+    file_name = (uploaded_file.name or '').lower()
+    if file_name.endswith(('.xlsx', '.xls')):
+        return Response(
+            {'error': 'Excel files (.xlsx / .xls) are not supported. Please save your file as CSV before importing.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not file_name.endswith('.csv'):
+        return Response(
+            {'error': 'Only CSV files are supported. Please save your file as CSV before importing.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     # Hard limit for bulk upload: 10MB
     if uploaded_file.size and uploaded_file.size > (10 * 1024 * 1024):
@@ -523,12 +536,18 @@ def bulk_upload_products(request):
 
     try:
         raw_bytes = uploaded_file.read()
+        # Check for binary zip header (common to .xlsx/.docx) or null characters
+        if raw_bytes.startswith(b'PK\x03\x04') or b'\x00' in raw_bytes[:1024]:
+            return Response(
+                {'error': 'The uploaded file appears to be an Excel (.xlsx / .xls) or binary file. Please save your file as CSV before importing.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         csv_content = _decode_csv_bytes(raw_bytes)
         if not csv_content.strip():
             return Response({'error': 'CSV file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
     except UnicodeDecodeError:
         return Response(
-            {'error': 'Unable to decode CSV. Supported encodings: UTF-8, UTF-16, Windows-1252, Latin-1.'},
+            {'error': 'Unable to decode CSV. Supported encodings: UTF-8, UTF-16, Windows-1252, Latin-1. Please save your file as standard CSV (UTF-8) before importing.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
@@ -578,6 +597,7 @@ def bulk_upload_products(request):
                 status=status.HTTP_200_OK,
             )
         except Exception as exc:
+            logger.error(f"Synchronous bulk upload failed: {exc}", exc_info=True)
             return Response(
                 {'error': f'Bulk upload failed: {str(exc)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

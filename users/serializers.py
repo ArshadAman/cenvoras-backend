@@ -501,6 +501,14 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        identifier = (attrs.get(self.username_field) or '').strip()
+        if identifier and not User.objects.filter(username=identifier).exists():
+            user = User.objects.filter(email__iexact=identifier).first()
+            if user:
+                attrs[self.username_field] = user.username
+        return super().validate(attrs)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)

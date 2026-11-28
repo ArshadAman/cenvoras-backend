@@ -22,9 +22,15 @@ def clean(value):
     return re.sub(r'[\s\/\-]+', '', str(value or '')).upper()
 
 
+def is_na(value):
+    return re.sub(r'[\s\/\-\.]+', '', str(value or '')).upper() == 'NA'
+
+
 def normalize_pf_number(value):
     if not value:
         return ''
+    if is_na(value):
+        return 'NA'
     s = str(value).strip().upper()
     parts = [p for p in re.split(r'[\/\-]+', s) if p]
     if len(parts) == 5:
@@ -42,6 +48,8 @@ def normalize_pf_number(value):
 
 
 def pan_error(value, individual=False):
+    if is_na(value):
+        return None
     v = clean(value)
     if not PAN_RE.fullmatch(v):
         return 'Enter a valid PAN (5 letters, 4 digits, 1 letter, e.g. ABCPE1234F).'
@@ -57,19 +65,27 @@ def is_valid_pan(value, individual=False):
 
 
 def ifsc_error(value):
+    if is_na(value):
+        return None
     return None if IFSC_RE.fullmatch(clean(value)) else (
         'Enter a valid IFSC (4 letters, then 0, then 6 letters or digits, e.g. SBIN0001234).')
 
 
 def uan_error(value):
+    if is_na(value):
+        return None
     return None if UAN_RE.fullmatch(clean(value)) else 'UAN must be exactly 12 digits.'
 
 
 def esi_ip_error(value):
+    if is_na(value):
+        return None
     return None if ESI_IP_RE.fullmatch(clean(value)) else 'ESI IP number must be exactly 10 digits.'
 
 
 def pf_member_error(value):
+    if is_na(value):
+        return None
     v = normalize_pf_number(value)
     return None if PF_MEMBER_RE.fullmatch(v) else (
         'PF member ID must be 22 characters: 5 letters then 17 digits (e.g. MHBAN00123450000001234 or MH/BAN/0012345/000/0001234).')

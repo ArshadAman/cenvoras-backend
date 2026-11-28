@@ -36,6 +36,14 @@ class ValidatorTests(SimpleTestCase):
         self.assertIsNotNone(pf_member_error('MHBAN0012345000001234'))  # 21 chars
         self.assertIsNotNone(pf_member_error('MHBA100123450000012345'))
 
+    def test_na_allowed_across_statutory_and_ifsc(self):
+        for na in ('NA', 'na', 'N/A', ' n/a ', 'N.A.'):
+            self.assertIsNone(pan_error(na, individual=True), na)
+            self.assertIsNone(ifsc_error(na), na)
+            self.assertIsNone(uan_error(na), na)
+            self.assertIsNone(esi_ip_error(na), na)
+            self.assertIsNone(pf_member_error(na), na)
+
 
 class EmployeeIdsApiTests(APITestCase):
     def setUp(self):

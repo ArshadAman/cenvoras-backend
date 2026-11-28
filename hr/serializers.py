@@ -133,7 +133,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _id_or_none(value, error_fn):
-        from hr.validators import clean
+        from hr.validators import clean, is_na
+        if is_na(value):
+            return 'NA'
         v = clean(value)
         if not v:
             return None
@@ -174,7 +176,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return self._id_or_none(value, esi_ip_error)
 
     def validate_pf_member_id(self, value):
-        from hr.validators import normalize_pf_number, pf_member_error
+        from hr.validators import is_na, normalize_pf_number, pf_member_error
+        if is_na(value):
+            return 'NA'
         v = normalize_pf_number(value)
         if not v:
             return None
@@ -182,6 +186,21 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if err:
             raise serializers.ValidationError(err)
         return v
+
+    def _normalize_na_text(self, value):
+        from hr.validators import is_na
+        if is_na(value):
+            return 'NA'
+        return value
+
+    def validate_bank_name(self, value):
+        return self._normalize_na_text(value)
+
+    def validate_bank_account_number(self, value):
+        return self._normalize_na_text(value)
+
+    def validate_account_holder_name(self, value):
+        return self._normalize_na_text(value)
 
     def validate_personal_email(self, value):
         if not value or not str(value).strip():
